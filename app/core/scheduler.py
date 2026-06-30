@@ -29,9 +29,6 @@ class TokenBudgetManager:
         logger.info("Session %s consumed %s tokens. Total: %s", session_id, tokens, self.usage[session_id])
         return self.check_budget(session_id)
 
-    def get_usage(self, session_id: str) -> int:
-        return self.usage.get(session_id, 0)
-
     def check_budget(self, session_id: str, ceiling: Optional[int] = None) -> bool:
         limit = ceiling if ceiling is not None else self.default_ceiling
         return self.usage.get(session_id, 0) < limit

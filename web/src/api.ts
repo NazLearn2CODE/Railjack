@@ -1,9 +1,7 @@
 import type { SessionMeta } from "./types";
 
-const base = "";
-
 export async function createSession(prompt: string, systemPrompt?: string): Promise<SessionMeta> {
-  const r = await fetch(`${base}/api/sessions`, {
+  const r = await fetch("/api/sessions", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ prompt, system_prompt: systemPrompt || null }),
@@ -13,13 +11,13 @@ export async function createSession(prompt: string, systemPrompt?: string): Prom
 }
 
 export async function listSessions(): Promise<SessionMeta[]> {
-  const r = await fetch(`${base}/api/sessions`);
+  const r = await fetch("/api/sessions");
   if (!r.ok) throw new Error(`listSessions ${r.status}`);
   return r.json();
 }
 
 export async function approve(sessionId: string, approvalId: string, approve: boolean): Promise<void> {
-  await fetch(`${base}/api/sessions/${sessionId}/approve`, {
+  await fetch(`/api/sessions/${sessionId}/approve`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ approval_id: approvalId, approve }),
