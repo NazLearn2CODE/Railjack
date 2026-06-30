@@ -30,9 +30,9 @@ web dashboard on `localhost:<port>`. Built from the blueprint in
 - Session logs: `[[../B-sessions]]`
 
 **Current status:**
-- Working on: fresh bootstrap (2026-06-30). Vault + blueprint + stack declared.
-- Next up: (1) rebuild Phase 1 dashboard; (2) implement blueprint Phase 1 OS-core primitives.
-- Last deployed: n/a
+- Working on: gateway + dashboard + OS core **built and committed** on branch `feat/gateway-dashboard` (7 commits ahead of `main`). FastAPI gateway (REST + WS), React 19 dashboard, HiveMind scheduler primitives (AIMD / circuit-breaker / rate-limit / admission / token-budget), streaming agent loop, and **per-call tool approval via a PreToolUse hook** (Bash/Write/Edit gated, read-only auto-run) — see `[[2026-07-01-tool-approval-pretooluse-hook]]`.
+- Next up (optional, not started): (1) merge `feat/gateway-dashboard` → `main`; (2) manual UI smoke test end-to-end through the browser (composer → streamed output → approval card → approve/deny).
+- Last deployed: n/a (dev only, `localhost:8000`).
 
 ## Build Rules
 

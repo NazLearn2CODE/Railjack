@@ -1,9 +1,14 @@
 ---
 date: 2026-07-01
-status: accepted
+status: superseded
+superseded_by: 2026-07-01-tool-approval-pretooluse-hook.md
 ---
 
 # ADR: Tool execution runs with local autonomy (per-call approval deferred)
+
+> **Superseded** by `[[2026-07-01-tool-approval-pretooluse-hook]]` — per-call
+> approval is now live via a PreToolUse hook. The *finding* below (`can_use_tool`
+> dormant under z.ai) remains accurate and is the foundation the new ADR builds on.
 
 ## Context
 
