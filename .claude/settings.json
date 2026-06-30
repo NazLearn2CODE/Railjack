@@ -12,8 +12,13 @@
   "hooks": {
     "SessionStart": [
       {
-        "description": "Load project context from vault",
-        "command": "echo '🗂️ Vault active: Orbiter — Agentic OS dashboard + orchestration core'"
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo '🗂️ Vault active: Orbiter — Agentic OS dashboard + orchestration core'"
+          }
+        ]
       }
     ]
   }
