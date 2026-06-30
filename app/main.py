@@ -3,7 +3,9 @@
 One process = one HiveMindScheduler + one AgentSessionManager (local single-user OS).
 Dashboard mounts at "/" once the React build exists; until then a placeholder is served.
 """
+import asyncio
 import logging
+from contextlib import suppress
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
@@ -71,26 +73,35 @@ async def approve_tool(session_id: str, req: ApproveTool):
 
 @app.websocket("/ws/sessions/{session_id}")
 async def stream_session(ws: WebSocket, session_id: str):
-    """Drive one agent session and stream its events to the dashboard.
+    """Drive one agent session; events flow from its asyncio.Queue event bus.
 
-    Disconnect cancels the run (the async generator's finally block tears it down).
+    Dangerous tool calls surface as `approval_needed`; the operator resolves them
+    via POST /api/sessions/{id}/approve. Disconnect cancels the run (its finally
+    block disconnects the SDK client).
     """
     s = manager.get_session(session_id)
     if s is None:
         await ws.close(code=4404)
         return
     await ws.accept()
+    task = asyncio.create_task(s.run())
     try:
-        async for event in s.run():
+        while True:
+            event = await s.events.get()
             await ws.send_json(event)
+            if event.get("type") == "stream_end":
+                break
     except WebSocketDisconnect:
         logger.info("client disconnected from %s", session_id)
     except Exception as e:  # noqa: BLE001 — surface any failure to the client, then drop
         logger.exception("stream error on %s", session_id)
-        try:
+        with suppress(Exception):
             await ws.send_json({"type": "status", "status": "failed", "error": str(e)})
-        except Exception:
-            pass
+    finally:
+        if not task.done():
+            task.cancel()
+            with suppress(Exception):
+                await task
 
 
 DASHBOARD_DIST = Path(__file__).resolve().parent.parent / "web" / "dist"
