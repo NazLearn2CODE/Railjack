@@ -1,0 +1,378 @@
+@import "tailwindcss";
+
+/* ============================================================
+   ORBITER — Orbital Telemetry Console theme
+   Vacuum field · phosphor cyan signal · amber hazard · mono data
+   ============================================================ */
+@theme {
+  --color-vacuum: #070a0f;
+  --color-void: #05070b;
+  --color-panel: #0b1017;
+  --color-panel-2: #0f1620;
+  --color-edge: #1a2734;
+  --color-edge-soft: #131d28;
+  --color-phosphor: #cfe3ef;
+  --color-phosphor-dim: #9fb6c6;
+  --color-muted: #56708a;
+  --color-faint: #324658;
+  --color-signal: #38e0ff;
+  --color-signal-deep: #0a4a5a;
+  --color-hazard: #ffb648;
+  --color-hazard-deep: #5a3c0a;
+  --color-critical: #ff4d6d;
+  --color-go: #3ddc97;
+
+  --font-display: "Chakra Petch", "IBM Plex Mono", sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, monospace;
+}
+
+@layer base {
+  * {
+    border-color: var(--color-edge);
+  }
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+  body {
+    margin: 0;
+    background: var(--color-vacuum);
+    color: var(--color-phosphor);
+    font-family: var(--font-mono);
+    font-size: 13px;
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+    overflow: hidden;
+  }
+  ::selection {
+    background: color-mix(in srgb, var(--color-signal) 30%, transparent);
+    color: #fff;
+  }
+
+  /* Scrollbars — thin, signal-tinted */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--color-edge) transparent;
+  }
+  *::-webkit-scrollbar {
+    width: 7px;
+    height: 7px;
+  }
+  *::-webkit-scrollbar-thumb {
+    background: var(--color-edge);
+    border-radius: 0;
+  }
+  *::-webkit-scrollbar-thumb:hover {
+    background: var(--color-faint);
+  }
+}
+
+/* ---------- Atmospheric field: grid + horizon glow + scanlines + grain ---------- */
+.field::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  background-image:
+    linear-gradient(to right, color-mix(in srgb, var(--color-signal) 4%, transparent) 1px, transparent 1px),
+    linear-gradient(to bottom, color-mix(in srgb, var(--color-signal) 4%, transparent) 1px, transparent 1px);
+  background-size: 48px 48px;
+  mask-image: radial-gradient(ellipse 120% 90% at 50% 0%, #000 30%, transparent 80%);
+}
+.field::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 1;
+  background:
+    radial-gradient(ellipse 80% 50% at 50% -10%, color-mix(in srgb, var(--color-signal) 10%, transparent), transparent 70%),
+    repeating-linear-gradient(
+      to bottom,
+      transparent 0,
+      transparent 2px,
+      color-mix(in srgb, #000 35%, transparent) 3px,
+      transparent 4px
+    );
+}
+.scanlines {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 50;
+  background: repeating-linear-gradient(
+    to bottom,
+    transparent 0,
+    transparent 2px,
+    color-mix(in srgb, #000 22%, transparent) 3px,
+    transparent 4px
+  );
+  mix-blend-mode: multiply;
+  opacity: 0.5;
+}
+.grain {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 51;
+  opacity: 0.035;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='3'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
+/* ---------- HUD panel with corner brackets ---------- */
+.hud {
+  position: relative;
+  border: 1px solid var(--color-edge);
+  background:
+    linear-gradient(color-mix(in srgb, var(--color-panel) 92%, transparent), var(--color-panel));
+  backdrop-filter: blur(2px);
+}
+.hud--bracket::before,
+.hud--bracket::after {
+  content: "";
+  position: absolute;
+  width: 11px;
+  height: 11px;
+  pointer-events: none;
+}
+.hud--bracket::before {
+  top: -1px;
+  left: -1px;
+  border-top: 1px solid var(--color-signal);
+  border-left: 1px solid var(--color-signal);
+}
+.hud--bracket::after {
+  bottom: -1px;
+  right: -1px;
+  border-bottom: 1px solid var(--color-signal);
+  border-right: 1px solid var(--color-signal);
+}
+
+/* ---------- Typography helpers ---------- */
+.label {
+  font-family: var(--font-display);
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  font-weight: 600;
+  font-size: 10px;
+  color: var(--color-muted);
+}
+.mono {
+  font-family: var(--font-mono);
+}
+.display {
+  font-family: var(--font-display);
+}
+
+/* ---------- Status pip + live signal ---------- */
+.pip {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--color-muted);
+}
+.pip--signal {
+  background: var(--color-signal);
+  box-shadow: 0 0 8px 1px color-mix(in srgb, var(--color-signal) 70%, transparent);
+  animation: pulse-signal 1.4s ease-in-out infinite;
+}
+.pip--hazard {
+  background: var(--color-hazard);
+  box-shadow: 0 0 8px 1px color-mix(in srgb, var(--color-hazard) 70%, transparent);
+  animation: pulse-signal 1s ease-in-out infinite;
+}
+.pip--go {
+  background: var(--color-go);
+  box-shadow: 0 0 6px 1px color-mix(in srgb, var(--color-go) 60%, transparent);
+}
+.pip--crit {
+  background: var(--color-critical);
+  box-shadow: 0 0 8px 1px color-mix(in srgb, var(--color-critical) 70%, transparent);
+}
+@keyframes pulse-signal {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.45; transform: scale(0.82); }
+}
+
+/* streaming caret */
+.caret::after {
+  content: "▋";
+  margin-left: 2px;
+  color: var(--color-signal);
+  animation: blink 1s steps(2, start) infinite;
+}
+@keyframes blink {
+  50% { opacity: 0; }
+}
+
+/* ---------- Load reveal (staggered) ---------- */
+.reveal {
+  opacity: 0;
+  transform: translateY(6px);
+  animation: reveal-in 0.6s cubic-bezier(0.2, 0.7, 0.2, 1) forwards;
+}
+.reveal-1 { animation-delay: 0.05s; }
+.reveal-2 { animation-delay: 0.14s; }
+.reveal-3 { animation-delay: 0.23s; }
+.reveal-4 { animation-delay: 0.32s; }
+.reveal-5 { animation-delay: 0.42s; }
+@keyframes reveal-in {
+  to { opacity: 1; transform: none; }
+}
+.row-in {
+  animation: row-in 0.32s ease-out;
+}
+@keyframes row-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: none; }
+}
+
+/* ---------- Buttons ---------- */
+.btn {
+  font-family: var(--font-display);
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  font-weight: 600;
+  font-size: 11px;
+  padding: 8px 14px;
+  border: 1px solid var(--color-edge);
+  background: var(--color-panel-2);
+  color: var(--color-phosphor-dim);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.btn:hover:not(:disabled) {
+  border-color: var(--color-signal);
+  color: var(--color-signal);
+  box-shadow: inset 0 0 18px color-mix(in srgb, var(--color-signal) 12%, transparent);
+}
+.btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.btn--signal {
+  border-color: color-mix(in srgb, var(--color-signal) 55%, var(--color-edge));
+  color: var(--color-signal);
+  background: color-mix(in srgb, var(--color-signal) 10%, var(--color-panel));
+}
+.btn--signal:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--color-signal) 18%, var(--color-panel));
+  box-shadow: 0 0 14px color-mix(in srgb, var(--color-signal) 35%, transparent);
+}
+.btn--hazard:hover:not(:disabled) {
+  border-color: var(--color-hazard);
+  color: var(--color-hazard);
+  box-shadow: inset 0 0 18px color-mix(in srgb, var(--color-hazard) 12%, transparent);
+}
+.btn--crit:hover:not(:disabled) {
+  border-color: var(--color-critical);
+  color: var(--color-critical);
+  box-shadow: inset 0 0 18px color-mix(in srgb, var(--color-critical) 12%, transparent);
+}
+
+/* ---------- Inputs ---------- */
+.input {
+  font-family: var(--font-mono);
+  background: var(--color-void);
+  border: 1px solid var(--color-edge);
+  color: var(--color-phosphor);
+  padding: 10px 12px;
+  outline: none;
+  width: 100%;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.input:focus {
+  border-color: var(--color-signal);
+  box-shadow: inset 0 0 14px color-mix(in srgb, var(--color-signal) 10%, transparent);
+}
+.input::placeholder {
+  color: var(--color-faint);
+}
+
+/* ---------- Markdown (assistant output) ---------- */
+.prose-md {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--color-phosphor);
+}
+.prose-md p { margin: 0 0 0.7em; }
+.prose-md p:last-child { margin-bottom: 0; }
+.prose-md h1, .prose-md h2, .prose-md h3 {
+  font-family: var(--font-display);
+  margin: 1em 0 0.5em;
+  color: #fff;
+  letter-spacing: 0.04em;
+}
+.prose-md h1 { font-size: 1.15rem; }
+.prose-md h2 { font-size: 1.05rem; }
+.prose-md h3 { font-size: 0.98rem; }
+.prose-md ul, .prose-md ol { margin: 0 0 0.7em; padding-left: 1.2em; }
+.prose-md li { margin: 0.2em 0; }
+.prose-md a {
+  color: var(--color-signal);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.prose-md code {
+  font-family: var(--font-mono);
+  background: var(--color-void);
+  border: 1px solid var(--color-edge-soft);
+  padding: 1px 5px;
+  font-size: 12px;
+  color: var(--color-signal);
+}
+.prose-md pre {
+  background: var(--color-void);
+  border: 1px solid var(--color-edge);
+  border-left: 2px solid var(--color-signal);
+  padding: 10px 12px;
+  overflow-x: auto;
+  margin: 0 0 0.7em;
+}
+.prose-md pre code {
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--color-phosphor);
+  font-size: 12px;
+}
+.prose-md blockquote {
+  border-left: 2px solid var(--color-hazard);
+  margin: 0 0 0.7em;
+  padding: 2px 0 2px 12px;
+  color: var(--color-phosphor-dim);
+}
+.prose-md table {
+  border-collapse: collapse;
+  margin: 0 0 0.7em;
+  font-size: 12px;
+}
+.prose-md th, .prose-md td {
+  border: 1px solid var(--color-edge);
+  padding: 4px 8px;
+}
+.prose-md th {
+  background: var(--color-panel-2);
+  color: var(--color-signal);
+  font-family: var(--font-display);
+  text-transform: uppercase;
+  font-size: 10px;
+  letter-spacing: 0.1em;
+}
+.prose-md hr {
+  border: none;
+  border-top: 1px dashed var(--color-edge);
+  margin: 0.8em 0;
+}
+
+/* ---------- Utility: event ticker fade ---------- */
+.tick {
+  animation: tick-in 0.3s ease-out;
+}
+@keyframes tick-in {
+  from { opacity: 0; transform: translateX(-4px); }
+  to { opacity: 1; transform: none; }
+}

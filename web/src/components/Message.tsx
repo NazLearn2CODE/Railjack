@@ -1,0 +1,80 @@
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+import type { Row } from "../types";
+import { cn } from "../util";
+
+function safeJson(v: unknown): string {
+  try {
+    return typeof v === "string" ? v : JSON.stringify(v, null, 2);
+  } catch {
+    return String(v);
+  }
+}
+
+export default function Message({ row }: { row: Row }) {
+  switch (row.kind) {
+    case "user":
+      return (
+        <div className="row-in flex justify-end">
+          <div className="max-w-[85%] border border-edge bg-panel-2 px-3 py-2">
+            <div className="label mb-1 flex justify-end">
+              <span className="text-hazard">OPERATOR</span>
+            </div>
+            <div className="whitespace-pre-wrap text-[13px] text-phosphor">{row.text}</div>
+          </div>
+        </div>
+      );
+
+    case "text":
+      return (
+        <div className="row-in">
+          <div className="label mb-1.5">
+            <span className="text-signal">AGENT</span> · RESPONSE
+          </div>
+          <div className="prose-md border-l-2 border-signal/40 pl-3">
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>{row.text}</ReactMarkdown>
+          </div>
+        </div>
+      );
+
+    case "thinking":
+      return (
+        <details className="row-in border border-edge-soft bg-void px-3 py-2">
+          <summary className="label cursor-pointer select-none">▸ COGNITION TRACE</summary>
+          <div className="mt-2 whitespace-pre-wrap text-[12px] italic text-muted">{row.text}</div>
+        </details>
+      );
+
+    case "tool_use":
+      return (
+        <div className="row-in border border-edge-soft bg-void px-3 py-2">
+          <div className="mb-1.5 flex items-center justify-between">
+            <span className="label">
+              <span className="text-hazard">TOOL</span> · {row.name}
+            </span>
+            <span className="label text-faint">EXECUTED</span>
+          </div>
+          <pre className="overflow-x-auto text-[11px] leading-relaxed text-phosphor-dim">{safeJson(row.input)}</pre>
+        </div>
+      );
+
+    case "result":
+      return (
+        <div
+          className={cn(
+            "row-in mt-1 flex items-center gap-2 border-t pt-2",
+            row.isError ? "border-critical/40" : "border-go/30",
+          )}
+        >
+          <span className={cn("pip", row.isError ? "pip--crit" : "pip--go")} />
+          <span
+            className="label"
+            style={{ color: row.isError ? "var(--color-critical)" : "var(--color-go)" }}
+          >
+            {row.isError ? "RUN FAULT" : "RUN COMPLETE"}
+          </span>
+          <span className="truncate text-[11px] text-muted">{row.text}</span>
+        </div>
+      );
+  }
+}

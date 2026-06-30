@@ -1,0 +1,118 @@
+"""Orbiter FastAPI gateway — REST + WebSocket surface over the OS core.
+
+One process = one HiveMindScheduler + one AgentSessionManager (local single-user OS).
+Dashboard mounts at "/" once the React build exists; until then a placeholder is served.
+"""
+import logging
+from pathlib import Path
+
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.responses import HTMLResponse
+from pydantic import BaseModel
+
+from app.core.agent import AgentSessionManager
+from app.core.scheduler import HiveMindScheduler
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s | %(message)s")
+logger = logging.getLogger("orbiter")
+
+# Singletons — created once at import; reused across requests/connections.
+scheduler = HiveMindScheduler()
+manager = AgentSessionManager(scheduler)
+
+app = FastAPI(title="Orbiter", version="0.1.0")
+
+
+class CreateSession(BaseModel):
+    prompt: str
+    system_prompt: str | None = None
+
+
+class ApproveTool(BaseModel):
+    approval_id: str
+    approve: bool
+
+
+@app.post("/api/sessions")
+async def create_session(req: CreateSession):
+    s = manager.create_session(req.prompt, req.system_prompt)
+    return {"session_id": s.session_id, "status": s.status, "prompt": s.prompt}
+
+
+@app.get("/api/sessions")
+async def list_sessions():
+    return manager.list_sessions()
+
+
+@app.get("/api/sessions/{session_id}")
+async def get_session(session_id: str):
+    s = manager.get_session(session_id)
+    if s is None:
+        raise HTTPException(status_code=404, detail="session not found")
+    return {
+        "session_id": s.session_id,
+        "prompt": s.prompt,
+        "status": s.status,
+        "tokens_consumed": s.tokens_consumed,
+        "error": s.error_message,
+        "messages": s.messages,
+    }
+
+
+@app.post("/api/sessions/{session_id}/approve")
+async def approve_tool(session_id: str, req: ApproveTool):
+    # ponytail: endpoint is correct; the dashboard approval UI lands in milestone 2.
+    s = manager.get_session(session_id)
+    if s is None:
+        raise HTTPException(status_code=404, detail="session not found")
+    await s.approve_tool(req.approval_id, req.approve)
+    return {"ok": True}
+
+
+@app.websocket("/ws/sessions/{session_id}")
+async def stream_session(ws: WebSocket, session_id: str):
+    """Drive one agent session and stream its events to the dashboard.
+
+    Disconnect cancels the run (the async generator's finally block tears it down).
+    """
+    s = manager.get_session(session_id)
+    if s is None:
+        await ws.close(code=4404)
+        return
+    await ws.accept()
+    try:
+        async for event in s.run():
+            await ws.send_json(event)
+    except WebSocketDisconnect:
+        logger.info("client disconnected from %s", session_id)
+    except Exception as e:  # noqa: BLE001 — surface any failure to the client, then drop
+        logger.exception("stream error on %s", session_id)
+        try:
+            await ws.send_json({"type": "status", "status": "failed", "error": str(e)})
+        except Exception:
+            pass
+
+
+DASHBOARD_DIST = Path(__file__).resolve().parent.parent / "web" / "dist"
+
+
+@app.get("/api/health")
+async def health():
+    return {"status": "OK"}
+
+
+# Serve the built React dashboard when present; otherwise a placeholder.
+# Mounted last so /api/* and /ws/* routes (registered above) take precedence.
+if DASHBOARD_DIST.is_dir():
+    from fastapi.staticfiles import StaticFiles
+
+    app.mount("/", StaticFiles(directory=DASHBOARD_DIST, html=True), name="dashboard")
+else:
+
+    @app.get("/", response_class=HTMLResponse)
+    async def index() -> str:
+        return (
+            "<h1>Orbiter</h1>"
+            "<p>Gateway up. Dashboard not built — run <code>npm install &amp;&amp; npm run build</code> "
+            "in <code>web/</code>.</p>"
+        )
