@@ -2,13 +2,16 @@ import asyncio
 import uuid
 import logging
 import datetime
-import os
+from pathlib import Path
 from typing import Dict, Any, Optional
 from claude_agent_sdk import query, ClaudeAgentOptions, PermissionResultAllow, PermissionResultDeny
 from claude_agent_sdk.types import AssistantMessage, ResultMessage, UserMessage, RateLimitEvent
 from app.core.scheduler import HiveMindScheduler
 
 logger = logging.getLogger("orbiter.agent")
+
+# Project root: app/core/agent.py → parents[2] is the Orbiter root (for B-sessions/ logs).
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 # Read-only subset, referenced by the (currently dormant) approval callback.
 SAFE_TOOLS = {"Read", "Grep", "Glob", "WebSearch", "WebFetch"}
@@ -86,10 +89,10 @@ class AgentSession:
 
     def save_log(self):
         """Saves a session log to B-sessions/ conforming to session-template.md."""
-        # ponytail: hardcoded path resolves via /home -> /var/home symlink; derive from __file__ later (task #6).
         date_str = datetime.date.today().isoformat()
         filename = f"{date_str}-{self.session_id[:8]}.md"
-        filepath = f"/home/NAZ/Coding Projects/Orbiter/B-sessions/{filename}"
+        log_dir = PROJECT_ROOT / "B-sessions"
+        filepath = log_dir / filename
 
         content = f"""---
 title: Session Log
@@ -133,9 +136,8 @@ Run autonomous agent query: "{self.prompt}"
                 content += f"> [!TIP]\n> **Tool Result (Error: {msg.get('is_error')}):**\n> ```\n> {msg.get('result')}\n> ```\n\n"
 
         try:
-            os.makedirs(os.path.dirname(filepath), exist_ok=True)
-            with open(filepath, "w", encoding="utf-8") as f:
-                f.write(content)
+            log_dir.mkdir(parents=True, exist_ok=True)
+            filepath.write_text(content, encoding="utf-8")
             logger.info("Saved session log to %s", filepath)
         except Exception as e:
             logger.error("Failed to save session log: %s", e)
@@ -164,6 +166,7 @@ Run autonomous agent query: "{self.prompt}"
             )
 
             success = True
+            over_budget = False
             async for message in query(prompt=self._prompt_stream(), options=options):
                 msg_data = self._serialize_message(message)
                 if msg_data:
@@ -173,7 +176,11 @@ Run autonomous agent query: "{self.prompt}"
                 if isinstance(message, AssistantMessage) and message.usage:
                     turn_tokens = message.usage.get("input_tokens", 0) + message.usage.get("output_tokens", 0)
                     self.tokens_consumed += turn_tokens
-                    self.scheduler.token_budget.record_tokens(self.session_id, turn_tokens)
+                    # Mid-turn budget enforcement: stop the moment a session crosses its ceiling.
+                    if not self.scheduler.token_budget.consume(self.session_id, turn_tokens):
+                        self.error_message = f"Token budget exceeded ({self.scheduler.token_budget.default_ceiling})."
+                        over_budget = True
+                        break
 
                 if isinstance(message, ResultMessage):
                     if message.is_error:
@@ -182,16 +189,18 @@ Run autonomous agent query: "{self.prompt}"
                     if message.usage:
                         self.tokens_consumed = message.usage.get("input_tokens", 0) + message.usage.get("output_tokens", 0)
 
-            self.scheduler.exit_turn(self.session_id, self.start_time, success, actual_tokens=self.tokens_consumed)
-            self.status = "completed"
-            await self._emit({"type": "status", "status": self.status})
+            await self.scheduler.exit_turn(self.session_id, self.start_time, success, actual_tokens=self.tokens_consumed)
+            self.status = "failed" if over_budget else "completed"
+            await self._emit(
+                {"type": "status", "status": self.status, **({"error": self.error_message} if over_budget else {})}
+            )
 
         except Exception as e:
             logger.error("Error executing agent session %s: %s", self.session_id, e, exc_info=True)
             self.status = "failed"
             self.error_message = str(e)
             if self.start_time > 0.0:
-                self.scheduler.exit_turn(self.session_id, self.start_time, False, actual_tokens=0)
+                await self.scheduler.exit_turn(self.session_id, self.start_time, False, actual_tokens=0)
             await self._emit({"type": "status", "status": self.status, "error": self.error_message})
         finally:
             await self._emit({"type": "stream_end"})

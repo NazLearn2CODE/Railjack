@@ -19,9 +19,15 @@ class TokenBudgetManager:
         self.default_ceiling = default_ceiling
         self.usage: Dict[str, int] = {}
 
-    def record_tokens(self, session_id: str, tokens: int):
+    def consume(self, session_id: str, tokens: int) -> bool:
+        """
+        Records token usage and returns whether the session is still under its
+        ceiling. Single mid-turn entry point — callers break the agent loop
+        when this returns False (budget enforcement).
+        """
         self.usage[session_id] = self.usage.get(session_id, 0) + tokens
         logger.info("Session %s consumed %s tokens. Total: %s", session_id, tokens, self.usage[session_id])
+        return self.check_budget(session_id)
 
     def get_usage(self, session_id: str) -> int:
         return self.usage.get(session_id, 0)
@@ -133,34 +139,28 @@ class AIMDController:
 
 class AdmissionControl:
     """
-    Orchestrates the dynamic Semaphore based on AIMD controller limits,
-    handling request slot admission.
+    Dynamic concurrency gate driven by the AIMD controller's live limit.
+    Uses an asyncio.Condition because asyncio.Semaphore has no public way to
+    shrink capacity — the previous code mutated the private `_value`, and
+    rebuilding a fresh semaphore abandons tasks already waiting on the old one.
+    The lock here is genuine (it guards an `await wait()`), NOT the await-free
+    locking the audit removed elsewhere.
     """
     def __init__(self, aimd: AIMDController):
         self.aimd = aimd
-        self.current_limit = aimd.limit
-        self.semaphore = asyncio.Semaphore(self.current_limit)
+        self.in_flight = 0
+        self._cond = asyncio.Condition()
 
     async def acquire(self):
-        # Capacity adjust is a sync block (atomic under asyncio); the only await is the slot itself.
-        target_limit = self.aimd.get_limit()
-        if target_limit != self.current_limit:
-            diff = target_limit - self.current_limit
-            self.current_limit = target_limit
-            if diff > 0:
-                # Increase capacity: release the semaphore diff times
-                for _ in range(diff):
-                    self.semaphore.release()
-            elif diff < 0:
-                # Decrease capacity: acquire the semaphore diff times
-                try:
-                    self.semaphore._value = max(0, self.semaphore._value + diff)
-                except AttributeError:
-                    pass
-        await self.semaphore.acquire()
+        async with self._cond:
+            while self.in_flight >= self.aimd.get_limit():
+                await self._cond.wait()
+            self.in_flight += 1
 
-    def release(self):
-        self.semaphore.release()
+    async def release(self):
+        async with self._cond:
+            self.in_flight = max(0, self.in_flight - 1)
+            self._cond.notify(1)
 
 
 class RateLimitTracker:
@@ -211,6 +211,10 @@ class RateLimitTracker:
         self.requests.append(now)
         self.token_history.append((now, tokens))
 
+    def record_tokens(self, tokens: int):
+        """Feeds ACTUAL token usage into the TPM window (post-turn, not the estimate)."""
+        self.token_history.append((time.time(), tokens))
+
 
 class HiveMindScheduler:
     """
@@ -244,19 +248,23 @@ class HiveMindScheduler:
 
         # 4. Concurrency Admission
         await self.admission.acquire()
-        self.rate_tracker.record_request(estimated_tokens)
+        # RPM +1 at request time; actual tokens feed the TPM window in exit_turn.
+        self.rate_tracker.record_request()
         return time.time()
 
-    def exit_turn(self, session_id: str, start_time: float, success: bool, actual_tokens: int = 0):
+    async def exit_turn(self, session_id: str, start_time: float, success: bool, actual_tokens: int = 0):
         """
-        Releases the concurrency slot, records actual tokens, and updates AIMD/Circuit Breaker.
+        Releases the concurrency slot, feeds ACTUAL tokens to the TPM window,
+        and updates AIMD/Circuit Breaker. Token-budget accounting happens
+        mid-turn via token_budget.consume(); actual_tokens here feed only the
+        rate-limit window, avoiding the prior double-count into the budget.
         """
         try:
             # 1. Release concurrency slot
-            self.admission.release()
+            await self.admission.release()
 
-            # 2. Record actual tokens
-            self.token_budget.record_tokens(session_id, actual_tokens)
+            # 2. Feed actual tokens to the TPM window (not the budget)
+            self.rate_tracker.record_tokens(actual_tokens)
 
             # 3. Update feedback loops
             if success:
