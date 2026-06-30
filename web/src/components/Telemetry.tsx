@@ -62,17 +62,7 @@ export default function Telemetry() {
         <Readout label="LINK" value={c.label} />
       </Panel>
 
-      <Panel idx="03" title="SCHEDULER">
-        <Readout label="ADMISSION" value="—" muted />
-        <Readout label="AIMD CONC" value="—" muted />
-        <Readout label="BREAKER" value="—" muted />
-        <Readout label="RPM / TPM" value="—" muted />
-        <p className="mt-2 text-[9px] leading-relaxed text-faint">
-          HiveMind telemetry awaits a read endpoint on the gateway.
-        </p>
-      </Panel>
-
-      <Panel idx="04" title="EVENT STREAM">
+      <Panel idx="03" title="EVENT STREAM">
         <div className="max-h-[240px] overflow-y-auto">
           {log.length === 0 ? (
             <div className="label py-1 text-faint">NO EVENTS</div>

@@ -5,7 +5,7 @@ import datetime
 import os
 from typing import Dict, Any, Optional
 from claude_agent_sdk import query, ClaudeAgentOptions, PermissionResultAllow, PermissionResultDeny
-from claude_agent_sdk.types import AssistantMessage, ResultMessage, UserMessage, SystemMessage, StreamEvent, RateLimitEvent
+from claude_agent_sdk.types import AssistantMessage, ResultMessage, UserMessage, RateLimitEvent
 from app.core.scheduler import HiveMindScheduler
 
 logger = logging.getLogger("orbiter.agent")
@@ -173,7 +173,7 @@ Run autonomous agent query: "{self.prompt}"
                 if isinstance(message, AssistantMessage) and message.usage:
                     turn_tokens = message.usage.get("input_tokens", 0) + message.usage.get("output_tokens", 0)
                     self.tokens_consumed += turn_tokens
-                    await self.scheduler.token_budget.record_tokens(self.session_id, turn_tokens)
+                    self.scheduler.token_budget.record_tokens(self.session_id, turn_tokens)
 
                 if isinstance(message, ResultMessage):
                     if message.is_error:
@@ -182,7 +182,7 @@ Run autonomous agent query: "{self.prompt}"
                     if message.usage:
                         self.tokens_consumed = message.usage.get("input_tokens", 0) + message.usage.get("output_tokens", 0)
 
-            await self.scheduler.exit_turn(self.session_id, self.start_time, success, actual_tokens=self.tokens_consumed)
+            self.scheduler.exit_turn(self.session_id, self.start_time, success, actual_tokens=self.tokens_consumed)
             self.status = "completed"
             await self._emit({"type": "status", "status": self.status})
 
@@ -191,7 +191,7 @@ Run autonomous agent query: "{self.prompt}"
             self.status = "failed"
             self.error_message = str(e)
             if self.start_time > 0.0:
-                await self.scheduler.exit_turn(self.session_id, self.start_time, False, actual_tokens=0)
+                self.scheduler.exit_turn(self.session_id, self.start_time, False, actual_tokens=0)
             await self._emit({"type": "status", "status": self.status, "error": self.error_message})
         finally:
             await self._emit({"type": "stream_end"})

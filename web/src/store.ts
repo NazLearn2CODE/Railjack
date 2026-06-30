@@ -2,6 +2,10 @@ import { create } from "zustand";
 import { approve as apiApprove, createSession, listSessions, openStream } from "./api";
 import type { ContentBlock, Row, SessionMeta, SessionStatus, StreamEvent, Transcript } from "./types";
 
+// Module-level ID for event-log entries — no need to thread a counter through store state.
+let _logSeq = 0;
+const nextLogId = () => ++_logSeq;
+
 const emptyTranscript = (): Transcript => ({
   rows: [],
   status: "created",
@@ -29,7 +33,6 @@ interface State {
   dispatch: (prompt: string, systemPrompt?: string) => Promise<void>;
   select: (id: string) => Promise<void>;
   approve: (approvalId: string, approve: boolean) => Promise<void>;
-  private: { seq: number };
 }
 
 function rowsFromContent(content: ContentBlock[] | string | undefined): Row[] {
@@ -120,7 +123,6 @@ export const useStore = create<State>((set, get) => ({
   conn: 0,
   ws: null,
   composing: "",
-  private: { seq: 1 },
 
   init: async () => {
     try {
@@ -156,8 +158,7 @@ export const useStore = create<State>((set, get) => ({
         set((s) => {
           const cur = s.transcripts[id] ?? t;
           const applied = applyEvent(cur, ev);
-          const seq = s.private.seq + 1;
-          const entry: LogEntry = { id: seq, label: labelFor(ev), tone: toneFor(ev) };
+          const entry: LogEntry = { id: nextLogId(), label: labelFor(ev), tone: toneFor(ev) };
           const log = [entry, ...s.log].slice(0, 60);
           const sessions = s.sessions.some((x) => x.session_id === id)
             ? s.sessions.map((x) => (x.session_id === id ? { ...x, status: applied.status } : x))
@@ -166,7 +167,6 @@ export const useStore = create<State>((set, get) => ({
             transcripts: { ...s.transcripts, [id]: applied },
             log,
             sessions,
-            private: { seq },
           };
         });
       },
@@ -179,8 +179,7 @@ export const useStore = create<State>((set, get) => ({
       conn: ws.readyState,
       sessions: s.sessions.some((x) => x.session_id === id) ? s.sessions : [meta, ...s.sessions],
       transcripts: { ...s.transcripts, [id]: t },
-      log: [{ id: s.private.seq, label: `DISPATCH ▸ ${id.slice(0, 8)}`, tone: "signal" }, ...s.log].slice(0, 60),
-      private: { seq: s.private.seq + 1 },
+      log: [{ id: nextLogId(), label: `DISPATCH ▸ ${id.slice(0, 8)}`, tone: "signal" }, ...s.log].slice(0, 60),
     }));
   },
 
