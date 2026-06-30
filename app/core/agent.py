@@ -4,8 +4,8 @@ import logging
 import datetime
 from pathlib import Path
 from typing import Dict, Any, Optional
-from claude_agent_sdk import query, ClaudeAgentOptions, PermissionResultAllow, PermissionResultDeny
-from claude_agent_sdk.types import AssistantMessage, ResultMessage, UserMessage, RateLimitEvent
+from claude_agent_sdk import query, ClaudeAgentOptions
+from claude_agent_sdk.types import AssistantMessage, ResultMessage, UserMessage, RateLimitEvent, HookMatcher
 from app.core.scheduler import HiveMindScheduler
 
 logger = logging.getLogger("orbiter.agent")
@@ -13,16 +13,19 @@ logger = logging.getLogger("orbiter.agent")
 # Project root: app/core/agent.py → parents[2] is the Orbiter root (for B-sessions/ logs).
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
-# Read-only subset, referenced by the (currently dormant) approval callback.
-SAFE_TOOLS = {"Read", "Grep", "Glob", "WebSearch", "WebFetch"}
-
-# LOCAL AUTONOMY: every tool auto-allowed. can_use_tool is wired but dormant —
-# under the z.ai/GLM backend the CLI never invokes --permission-prompt-tool
-# (verified 0 callback calls across CLI 2.1.139/2.1.191, modes default/plan,
-# setting_sources []/default). Per-call approval is deferred. To restore it:
-# switch to the native Anthropic API, or expose bash/edit/write as custom SDK
-# MCP tools (in-process, so ungated-bypass-proof).
+# PER-CALL APPROVAL via a PreToolUse hook (not the SDK's can_use_tool).
+# Under the z.ai/GLM backend the CLI never invokes --permission-prompt-tool, so
+# can_use_tool is dormant (0 callbacks, verified CLI 2.1.191). But PreToolUse
+# hooks ride the same control protocol and DO fire (verified: hook fires, native
+# Bash executes after it returns allow). So the gate lives on the hook, gating
+# the NATIVE Bash/Write/Edit — no tool reimplementation, full capabilities kept.
+# Read-only tools (Read/Grep/Glob/WebSearch/WebFetch) carry no hook → auto-run.
+DANGEROUS_TOOLS = "Bash|Write|Edit"
 ALLOWED_TOOLS = ["Read", "Write", "Edit", "Bash", "Grep", "Glob", "WebSearch", "WebFetch"]
+
+# Seconds the operator has to decide on a dangerous tool call. On expiry the
+# hook DENIES (fail-closed) — an idle operator never lets a blocked tool through.
+APPROVAL_TIMEOUT = 600.0
 
 
 class AgentSession:
@@ -63,10 +66,16 @@ class AgentSession:
             future.set_result(approve)
             logger.info("Session %s tool approval %s: %s", self.session_id, approval_id, approve)
 
-    async def _can_use_tool_callback(self, tool_name: str, tool_input: dict, context) -> Any:
-        """SDK permission callback. Safe tools pass; others block on operator approval."""
-        if tool_name in SAFE_TOOLS:
-            return PermissionResultAllow()
+    async def _pre_tool_use_hook(self, hook_input: dict, tool_use_id: Optional[str], context) -> dict:
+        """PreToolUse gate for dangerous tools (Bash/Write/Edit).
+
+        Emits an `approval_needed` event and blocks on operator approval from the
+        dashboard (resolved via approve_tool()). Returns allow/deny to the CLI.
+        This is the path that actually fires under the z.ai/GLM backend — see the
+        DANGEROUS_TOOLS comment above for why the hook and not can_use_tool.
+        """
+        tool_name = hook_input.get("tool_name", "?")
+        tool_input = hook_input.get("tool_input", {})
 
         approval_id = str(uuid.uuid4())
         future = asyncio.get_running_loop().create_future()
@@ -81,11 +90,25 @@ class AgentSession:
             "input": tool_input,
         })
 
-        approved = await future
-        self.status = "running"
+        try:
+            # Fail-closed: deny if the operator doesn't decide in time.
+            approved = await asyncio.wait_for(future, timeout=APPROVAL_TIMEOUT)
+        except asyncio.TimeoutError:
+            logger.warning("Approval %s timed out after %ss — denying", approval_id, APPROVAL_TIMEOUT)
+            approved = False
+        finally:
+            self.pending_approvals.pop(approval_id, None)
+            self.status = "running"
+
         if approved:
-            return PermissionResultAllow()
-        return PermissionResultDeny(message="Execution denied by operator via dashboard.")
+            return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow"}}
+        return {
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "deny",
+                "permissionDecisionReason": "Execution denied by operator via dashboard (or approval timed out).",
+            }
+        }
 
     def save_log(self):
         """Saves a session log to B-sessions/ conforming to session-template.md."""
@@ -146,8 +169,8 @@ Run autonomous agent query: "{self.prompt}"
         """
         Runs the agent loop under scheduler control via the streaming query() API,
         pushing structured events onto self.events. Emits a terminal `stream_end`
-        when done. The AsyncIterable prompt is required so can_use_tool's control
-        protocol (permission_prompt_tool stdio) is enabled.
+        when done. The AsyncIterable prompt keeps the SDK in streaming/control-
+        protocol mode, which is what lets the PreToolUse approval hook fire.
         """
         self.status = "pending_admission"
         await self._emit({"type": "status", "status": self.status})
@@ -160,7 +183,15 @@ Run autonomous agent query: "{self.prompt}"
             options = ClaudeAgentOptions(
                 system_prompt=self.system_prompt,
                 allowed_tools=ALLOWED_TOOLS,
-                can_use_tool=self._can_use_tool_callback,
+                hooks={
+                    "PreToolUse": [
+                        HookMatcher(
+                            matcher=DANGEROUS_TOOLS,
+                            hooks=[self._pre_tool_use_hook],
+                            timeout=APPROVAL_TIMEOUT + 10,  # CLI waits slightly longer than our fail-closed deadline
+                        )
+                    ]
+                },
                 setting_sources=[],
                 session_id=self.session_id,
             )
