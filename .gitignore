@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# Node / frontend
+node_modules/
+dist/
+.vite/
+
+# Obsidian — machine-local state + secrets only; vault content is tracked
+.obsidian/workspace*
+.obsidian/cache
+.obsidian/plugins/obsidian-local-rest-api/data.json
+
+# Env / secrets
+.env
+.env.*
+.mcp.json
+
+# OS
+.DS_Store

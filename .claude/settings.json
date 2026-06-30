@@ -1,0 +1,20 @@
+{
+  "mcpServers": {
+    "obsidian": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-obsidian", "/var/home/NAZ/Coding Projects/Orbiter"],
+      "env": {
+        "OBSIDIAN_REST_API_URL": "https://127.0.0.1:27124",
+        "OBSIDIAN_REST_API_TOKEN": "ffefe775a805c168edc82b130eda6b06013ae05f405cd92d16a8f826224b400d"
+      }
+    }
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "description": "Load project context from vault",
+        "command": "echo '🗂️ Vault active: Orbiter — Agentic OS dashboard + orchestration core'"
+      }
+    ]
+  }
+}
