@@ -224,7 +224,7 @@ class HiveMindScheduler:
         self.circuit_breaker = CircuitBreaker()
         self.token_budget = TokenBudgetManager(default_ceiling=default_ceiling)
 
-    async def enter_turn(self, session_id: str, estimated_tokens: int = 1000) -> float:
+    async def enter_turn(self, session_id: str) -> float:
         """
         Acquires slots and handles rate limits/circuit breakers.
         Returns the timestamp when entering execution.
@@ -237,8 +237,8 @@ class HiveMindScheduler:
         if not self.token_budget.check_budget(session_id):
             raise ValueError(f"Session {session_id} has exceeded its token budget limit.")
 
-        # 3. Rate limit delay
-        delay = self.rate_tracker.check_limit_and_delay(estimated_tokens)
+        # 3. Rate limit delay (check_limit_and_delay's own default estimate)
+        delay = self.rate_tracker.check_limit_and_delay()
         if delay > 0:
             logger.warning("RateLimitTracker backoff triggered. Waiting for %.2f seconds.", delay)
             await asyncio.sleep(delay)

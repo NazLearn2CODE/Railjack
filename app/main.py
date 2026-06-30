@@ -63,7 +63,7 @@ async def get_session(session_id: str):
 
 @app.post("/api/sessions/{session_id}/approve")
 async def approve_tool(session_id: str, req: ApproveTool):
-    # ponytail: endpoint is correct; the dashboard approval UI lands in milestone 2.
+    # Resolves a pending tool approval emitted by the agent's PreToolUse hook.
     s = manager.get_session(session_id)
     if s is None:
         raise HTTPException(status_code=404, detail="session not found")

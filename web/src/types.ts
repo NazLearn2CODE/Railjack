@@ -53,7 +53,7 @@ export interface StreamEvent {
   // rate_limit
   rate_limit_type?: string;
   info?: unknown;
-  // approval_needed (milestone 2)
+  // approval_needed
   approval_id?: string;
   tool?: string;
 }
