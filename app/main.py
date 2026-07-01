@@ -15,6 +15,7 @@ from pydantic import BaseModel
 
 from app.core.agent import AgentSessionManager
 from app.core.scheduler import HiveMindScheduler
+from app.core.sandbox import LandlockSandbox, NoopSandbox
 from app.core.security import SecurityPolicy, WorkspaceBoundary, ShellPolicy, ToolReceiptLedger
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s | %(message)s")
@@ -41,6 +42,24 @@ security = SecurityPolicy(
 )
 
 manager = AgentSessionManager(scheduler, security=security)
+
+# L3 OS sandbox (blueprint §2.2): self-Landlock write-confinement at startup.
+# Fail-open: NoopSandbox when disabled OR if Landlock is unavailable on this host.
+def _build_sandbox():
+    if os.environ.get("ORBITER_SANDBOX", "landlock").lower() == "none":
+        return NoopSandbox()
+    return LandlockSandbox(
+        writable_roots=[
+            Path(os.environ.get("ORBITER_WORKSPACE_ROOT", PROJECT_ROOT)).resolve(strict=False),
+            Path(os.environ.get("TMPDIR", "/tmp")),
+            Path("~/.claude").expanduser(),
+        ],
+        extra_roots=os.environ.get("ORBITER_SANDBOX_EXTRA_ROOTS"),
+    )
+
+
+sandbox = _build_sandbox()
+sandbox_status = sandbox.apply()
 
 app = FastAPI(title="Orbiter", version="0.1.0")
 
@@ -129,7 +148,16 @@ DASHBOARD_DIST = Path(__file__).resolve().parent.parent / "web" / "dist"
 
 @app.get("/api/health")
 async def health():
-    return {"status": "OK"}
+    return {
+        "status": "OK",
+        "sandbox": {
+            "active": sandbox_status.active,
+            "mechanism": sandbox_status.mechanism,
+            "abi": sandbox_status.abi,
+            "writable_roots": sandbox_status.writable_roots,
+            "reason": sandbox_status.reason,
+        },
+    }
 
 
 # Serve the built React dashboard when present; otherwise a placeholder.
