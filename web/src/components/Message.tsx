@@ -1,7 +1,7 @@
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { Row } from "../types";
-import { cn } from "../util";
+import { cn, statusMeta } from "../util";
 
 function safeJson(v: unknown): string {
   try {
@@ -76,5 +76,32 @@ export default function Message({ row }: { row: Row }) {
           <span className="truncate text-[11px] text-muted">{row.text}</span>
         </div>
       );
+
+    case "worker_lane": {
+      // A delegated worker's run, inlined where the supervisor called delegate.
+      const meta = statusMeta(row.status);
+      return (
+        <div className="row-in border border-edge-soft bg-void/60 px-3 py-2.5">
+          <div className="mb-2 flex items-center justify-between border-b border-edge-soft pb-1.5">
+            <span className="label">
+              <span className="text-signal">◂ DELEGATED</span> · {row.role}
+            </span>
+            <span className="label flex items-center gap-1.5">
+              <span className={cn("pip", meta.pip)} />
+              <span style={{ color: meta.color }}>{meta.label}</span>
+            </span>
+          </div>
+          <div className="space-y-2 border-l border-edge-soft pl-3">
+            {row.rows.length === 0 && <div className="label text-faint">WORKER SPUN UP…</div>}
+            {row.rows.map((r, i) => (
+              <Message key={i} row={r} />
+            ))}
+            {row.approval && (
+              <div className="label text-hazard">⏸ {row.approval.tool} · WORKER GATE</div>
+            )}
+          </div>
+        </div>
+      );
+    }
   }
 }

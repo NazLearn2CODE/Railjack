@@ -96,6 +96,8 @@ class Team:
         # Plain provider with no delegate callback → workers are leaves (no recursion).
         self.worker_provider = worker_provider
         self.roles: dict[str, WorkerRole] = {}
+        # The supervisor whose bus worker events forward onto (set by supervisor()).
+        self._supervisor: Optional[AgentSession] = None
 
     def hire(self, *roles: WorkerRole) -> "Team":
         for role in roles:
@@ -124,6 +126,25 @@ class Team:
             provider=self.worker_provider,
             allowed_tools=r.allowed_tools,
         )
+
+        # Forward every worker event onto the supervisor's bus as a nested
+        # worker_event frame, so worker activity streams live through the supervisor's
+        # /ws connection AND replays via GET /api/sessions/{supervisor} (ingest persists).
+        sup = self._supervisor
+        if sup is not None:
+            role_name = role
+            worker_id = worker.session_id
+
+            async def _to_supervisor(ev: dict) -> None:
+                await sup.ingest({
+                    "type": "worker_event",
+                    "role": role_name,
+                    "worker_id": worker_id,
+                    "event": ev,
+                })
+
+            worker.event_sink = _to_supervisor
+
         logger.info("Supervisor delegating to '%s': %.80s", role, task)
         try:
             await worker.run()
@@ -150,7 +171,7 @@ class Team:
         tools = list(allowed_tools if allowed_tools is not None else ALLOWED_TOOLS)
         if "delegate" not in tools:
             tools.append("delegate")
-        return AgentSession(
+        sup = AgentSession(
             session_id=f"supervisor-{uuid.uuid4().hex[:8]}",
             prompt=prompt,
             scheduler=self.scheduler,
@@ -160,3 +181,6 @@ class Team:
             allowed_tools=tools,
             kind="supervisor",
         )
+        # Remember the supervisor so worker events (delegate) forward onto its bus.
+        self._supervisor = sup
+        return sup

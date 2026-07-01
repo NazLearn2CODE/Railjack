@@ -3,7 +3,7 @@ import uuid
 import logging
 import datetime
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Callable, Awaitable
 from app.core.provider import ClaudeSdkProvider, Provider, ToolDecision
 from app.core.scheduler import HiveMindScheduler
 from app.core.security import SecurityPolicy
@@ -33,7 +33,7 @@ class AgentSession:
     asyncio.Queue (the event bus) consumed by the WebSocket gateway. Dangerous
     tool calls surface as `approval_needed` events resolved via approve_tool().
     """
-    def __init__(self, session_id: str, prompt: str, scheduler: HiveMindScheduler, system_prompt: Optional[str] = None, security: Optional[SecurityPolicy] = None, provider: Optional[Provider] = None, allowed_tools: Optional[list[str]] = None, kind: str = "single"):
+    def __init__(self, session_id: str, prompt: str, scheduler: HiveMindScheduler, system_prompt: Optional[str] = None, security: Optional[SecurityPolicy] = None, provider: Optional[Provider] = None, allowed_tools: Optional[list[str]] = None, kind: str = "single", event_sink: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None):
         self.session_id = session_id
         self.prompt = prompt
         self.scheduler = scheduler
@@ -46,6 +46,10 @@ class AgentSession:
         # "single" (plain session) | "supervisor" (a Team's supervisor — carries delegate).
         # Workers are transient (spawned inside delegate) and never registered, so no "worker" kind surfaces.
         self.kind = kind
+        # Optional forward-every-event sink. A Team supervisor sets this on each
+        # worker so the worker's inner activity streams onto the supervisor's bus
+        # (and replays via ingest) — see orchestrator.Team.delegate.
+        self.event_sink = event_sink
         self.pending_approvals: Dict[str, asyncio.Future] = {}
         self.messages: list = []
         self.events: asyncio.Queue = asyncio.Queue()
@@ -55,6 +59,17 @@ class AgentSession:
         self.error_message: Optional[str] = None
 
     async def _emit(self, event: Dict[str, Any]) -> None:
+        await self.events.put(event)
+        if self.event_sink is not None:
+            await self.event_sink(event)
+
+    async def ingest(self, event: Dict[str, Any]) -> None:
+        """Append an externally-produced event (e.g. a worker's, forwarded by
+        Team.delegate) to this session's bus AND message log, so it streams live
+        through /ws and replays via GET /api/sessions/{id}. Does NOT re-forward to
+        this session's own sink (no recursion) — uses events.put directly.
+        """
+        self.messages.append(event)
         await self.events.put(event)
 
     async def approve_tool(self, approval_id: str, approve: bool):

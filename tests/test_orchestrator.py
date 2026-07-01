@@ -112,6 +112,36 @@ def test_supervisor_session_has_delegate_tool():
     assert sup.session_id.startswith("supervisor-")
 
 
+def test_delegate_forwards_worker_events_to_supervisor_bus():
+    """Worker activity streams onto the supervisor's event bus as nested worker_event
+    frames (live observability) and is persisted in supervisor.messages (replay)."""
+    async def go():
+        team = Team(
+            HiveMindScheduler(default_ceiling=10**9),
+            worker_provider=FakeProvider(_worker_events("drafted the module")),
+        )
+        team.hire(WorkerRole(name="coder", system_prompt="x"))
+        sup = team.supervisor("plan the work")  # sets the forward target
+        out = await team.delegate("coder", "write a function")
+        assert out == "drafted the module"
+
+        drained = []
+        while not sup.events.empty():
+            drained.append(sup.events.get_nowait())
+        we = [e for e in drained if e.get("type") == "worker_event"]
+        assert we, "expected worker events forwarded to the supervisor bus"
+        # Every forwarded frame is tagged with the role + worker id + nested event.
+        assert all(e["role"] == "coder" and e["worker_id"].startswith("worker-coder-") for e in we)
+        inner_types = {e["event"]["type"] for e in we}
+        assert "message" in inner_types and "result" in inner_types
+        # The nested stream_end stays nested → it must NOT terminate the supervisor's WS loop.
+        assert all(e.get("type") != "stream_end" for e in drained)
+        # Persisted for replay via GET /api/sessions/{supervisor}.
+        assert any(m.get("type") == "worker_event" for m in sup.messages)
+
+    asyncio.run(go())
+
+
 if __name__ == "__main__":
     test_delegate_returns_worker_final_text()
     test_delegate_unknown_role_returns_error_string_listing_roles()
@@ -120,4 +150,5 @@ if __name__ == "__main__":
     test_delegate_records_worker_tokens_on_scheduler()
     test_workers_are_leaves_no_delegate_tool()
     test_supervisor_session_has_delegate_tool()
+    test_delegate_forwards_worker_events_to_supervisor_bus()
     print("orchestrator self-checks: OK")

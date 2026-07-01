@@ -59,6 +59,9 @@ export interface StreamEvent {
   approval_id?: string;
   tool?: string;
   input?: unknown;
+  // worker_event (nested worker activity forwarded by Team.delegate)
+  worker_id?: string;
+  event?: StreamEvent;
 }
 
 // Normalized render rows derived from the stream.
@@ -67,7 +70,15 @@ export type Row =
   | { kind: "text"; text: string }
   | { kind: "thinking"; text: string }
   | { kind: "tool_use"; id: string; name: string; input: unknown }
-  | { kind: "result"; text: string; isError: boolean };
+  | { kind: "result"; text: string; isError: boolean }
+  | {
+      kind: "worker_lane";
+      workerId: string;
+      role: string;
+      rows: Row[];
+      status: SessionStatus;
+      approval?: { tool: string };
+    };
 
 export interface Transcript {
   rows: Row[];

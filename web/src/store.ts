@@ -91,6 +91,31 @@ function applyEvent(t: Transcript, ev: StreamEvent): Transcript {
       if (ev.approval_id && ev.tool)
         next.pendingTools[ev.approval_id] = { name: ev.tool, input: ev.input };
       break;
+    case "worker_event": {
+      // A worker's inner activity, forwarded by Team.delegate. Route it into an
+      // inline lane keyed by worker_id, appended at the point delegation occurred.
+      type Lane = Extract<Row, { kind: "worker_lane" }>;
+      const wid = ev.worker_id!;
+      const idx = next.rows.findIndex((r) => r.kind === "worker_lane" && r.workerId === wid);
+      const prev = idx >= 0 ? (next.rows[idx] as Lane) : undefined;
+      const lane: Lane = prev
+        ? { ...prev, rows: [...prev.rows] }
+        : { kind: "worker_lane", workerId: wid, role: ev.role ?? "?", rows: [], status: "running" };
+      const inner = ev.event!;
+      if (inner.type === "status" && inner.status) lane.status = inner.status;
+      else if (inner.type === "message" && inner.role !== "user")
+        lane.rows.push(...rowsFromContent(inner.content));
+      else if (inner.type === "result")
+        lane.rows.push({
+          kind: "result",
+          text: typeof inner.result === "string" ? inner.result : JSON.stringify(inner.result),
+          isError: !!inner.is_error,
+        });
+      else if (inner.type === "approval_needed" && inner.tool) lane.approval = { tool: inner.tool };
+      if (idx >= 0) next.rows[idx] = lane;
+      else next.rows.push(lane);
+      break;
+    }
     default:
       break;
   }
@@ -107,6 +132,7 @@ const toneFor = (ev: StreamEvent): LogEntry["tone"] => {
   if (ev.type === "result") return ev.is_error ? "crit" : "go";
   if (ev.type === "rate_limit") return "hazard";
   if (ev.type === "approval_needed") return "hazard";
+  if (ev.type === "worker_event") return "signal";
   return "muted";
 };
 
@@ -122,6 +148,8 @@ const labelFor = (ev: StreamEvent): string => {
       return `RATE ▸ ${ev.rate_limit_type}`;
     case "approval_needed":
       return `APPROVAL ▸ ${ev.tool}`;
+    case "worker_event":
+      return `DELEGATE ▸ ${ev.role}`;
     default:
       return ev.type.toUpperCase();
   }
