@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { approve as apiApprove, createSession, listSessions, openStream } from "./api";
-import type { ContentBlock, Row, SessionMeta, SessionStatus, StreamEvent, Transcript } from "./types";
+import type { ContentBlock, Row, SessionMeta, StreamEvent, Transcript, Usage } from "./types";
 
 // Module-level ID for event-log entries — no need to thread a counter through store state.
 let _logSeq = 0;
@@ -48,6 +48,14 @@ function rowsFromContent(content: ContentBlock[] | string | undefined): Row[] {
   return out;
 }
 
+// Full token throughput incl. cache reads/writes — mirrors agent.py _throughput().
+// cache_read dominates once the prompt is cached; input+output alone ~100x low.
+function tokenTotal(u?: Usage): number {
+  if (!u) return 0;
+  return (u.input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0) +
+    (u.cache_creation_input_tokens ?? 0) + (u.output_tokens ?? 0);
+}
+
 function applyEvent(t: Transcript, ev: StreamEvent): Transcript {
   const next: Transcript = { ...t, rows: [...t.rows], pendingTools: { ...t.pendingTools } };
   switch (ev.type) {
@@ -62,15 +70,7 @@ function applyEvent(t: Transcript, ev: StreamEvent): Transcript {
         break;
       }
       next.rows.push(...rows);
-      if (ev.usage) {
-        // Full throughput incl. cache (cache_read dominates once the prompt is
-        // cached); mirrors agent.py _throughput(). input+output alone ~100x low.
-        next.tokens +=
-          (ev.usage.input_tokens ?? 0) +
-          (ev.usage.cache_read_input_tokens ?? 0) +
-          (ev.usage.cache_creation_input_tokens ?? 0) +
-          (ev.usage.output_tokens ?? 0);
-      }
+      if (ev.usage) next.tokens += tokenTotal(ev.usage);
       break;
     }
     case "result":
@@ -82,14 +82,8 @@ function applyEvent(t: Transcript, ev: StreamEvent): Transcript {
       // result.usage is the cumulative-final count (authoritative across backends);
       // set, don't add — assistant-message usage above is incremental only. This is
       // also the sole source under z.ai, where per-message usage is 0.
-      if (ev.usage) {
-        const total =
-          (ev.usage.input_tokens ?? 0) +
-          (ev.usage.cache_read_input_tokens ?? 0) +
-          (ev.usage.cache_creation_input_tokens ?? 0) +
-          (ev.usage.output_tokens ?? 0);
-        if (total > 0) next.tokens = total;
-      }
+      const total = tokenTotal(ev.usage);
+      if (total > 0) next.tokens = total;
       break;
     case "approval_needed":
       if (ev.approval_id && ev.tool)

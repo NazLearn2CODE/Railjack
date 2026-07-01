@@ -207,10 +207,10 @@ class RateLimitTracker:
 
         return delay
 
-    def record_request(self, tokens: int = 0):
-        now = time.time()
-        self.requests.append(now)
-        self.token_history.append((now, tokens))
+    def record_request(self):
+        """Records a request for RPM tracking. Actual tokens feed the TPM window
+        via record_tokens() — no zero-entry noise added here."""
+        self.requests.append(time.time())
 
     def record_tokens(self, tokens: int):
         """Feeds ACTUAL token usage into the TPM window (post-turn, not the estimate)."""

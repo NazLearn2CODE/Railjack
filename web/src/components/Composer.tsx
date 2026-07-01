@@ -6,7 +6,6 @@ export default function Composer() {
   const composing = useStore((s) => s.composing);
   const setComposing = useStore((s) => s.setComposing);
   const dispatch = useStore((s) => s.dispatch);
-  const activeId = useStore((s) => s.activeId);
   const t = useStore((s) => (s.activeId ? s.transcripts[s.activeId] : undefined));
   const [sysOpen, setSysOpen] = useState(false);
   const [sys, setSys] = useState("");
