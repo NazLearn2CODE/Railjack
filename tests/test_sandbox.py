@@ -1,4 +1,16 @@
-from app.core.sandbox import NoopSandbox, SandboxStatus, normalize_roots, write_mask_for_abi
+import os
+import tempfile
+from pathlib import Path
+
+import pytest
+
+from app.core.sandbox import (
+    LandlockSandbox,
+    NoopSandbox,
+    SandboxStatus,
+    normalize_roots,
+    write_mask_for_abi,
+)
 
 
 def test_noop_sandbox_returns_inactive_status():
@@ -29,8 +41,6 @@ def test_write_mask_abi_v2_includes_refer_truncate():
 
 
 def test_normalize_roots_expands_and_dedups_preserving_order():
-    from pathlib import Path
-
     roots = [Path("~/foo"), Path("/tmp"), Path("~/foo/bar")]
     # extra duplicates /tmp and adds one new
     out = normalize_roots(roots, extra="/tmp:/opt/orbiter")
@@ -40,3 +50,31 @@ def test_normalize_roots_expands_and_dedups_preserving_order():
     assert out[-1].endswith("/orbiter")
     assert out.count("/tmp") == 1  # dedup
     assert all(p.startswith("/") for p in out)  # absolutized
+
+
+# --- Gated live self-check (the only validation of the actual syscalls) ---
+# Locks down the process that runs it, so it is OFF by default. Run against a
+# REAL Orbiter / bare Python process, not the Claude Code shell (Landlock probes
+# EPERM there — the fail-open path is correct, L3 is simply inactive).
+_LIVE = os.environ.get("ORBITER_SANDBOX_LIVE") == "1"
+
+
+@pytest.mark.skipif(not _LIVE, reason="gated: locks down the process; run vs a real Orbiter process")
+def test_landlock_live_write_confinement():
+    # Allowed root is a temp dir we can write; denied path is under HOME (outside allowlist).
+    allowed = Path(tempfile.mkdtemp(prefix="orbiter_l3_allow_"))
+    denied = Path.home() / "orbiter_l3_probe_deny"
+    if denied.exists():
+        denied.unlink()
+
+    status = LandlockSandbox(writable_roots=[allowed]).apply()
+    assert status.active, f"sandbox not active: {status.reason}"
+
+    # Write inside the allowed root → succeeds.
+    (allowed / "ok.txt").write_text("ok")
+    # Write outside the allowlist → PermissionError (kernel-blocked).
+    with pytest.raises(PermissionError):
+        denied.write_text("should be blocked")
+
+    # Cleanup what we can (allowed root still writable).
+    (allowed / "ok.txt").unlink(missing_ok=True)
