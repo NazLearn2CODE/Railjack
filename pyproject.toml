@@ -14,5 +14,11 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest>=8", "ruff>=0.7"]
 
+[tool.pytest.ini_options]
+# ponytail: put project root on sys.path so `pytest` (not just `python -m pytest`)
+# resolves `from app.core...`. Without this the bare `.venv/bin/pytest` invocation
+# used in CI/plans fails with ModuleNotFoundError: No module named 'app'.
+pythonpath = ["."]
+
 [tool.ruff]
 line-length = 100
