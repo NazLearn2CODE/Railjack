@@ -127,7 +127,12 @@ async def create_team(req: CreateTeam):
     the existing /ws/sessions/{id} stream + /approve gate + GET detail drive it
     like any single-agent run — delegation surfaces as `delegate` tool calls.
     """
-    team = Team(scheduler, security=security, worker_provider=ClaudeSdkProvider(mcp_servers=EXTERNAL_MCP))
+    team = Team(
+        scheduler,
+        security=security,
+        worker_provider=ClaudeSdkProvider(mcp_servers=EXTERNAL_MCP),
+        register=manager.register,
+    )
     if req.roles:
         team.hire(*(WorkerRole(name=r.name, system_prompt=r.system_prompt) for r in req.roles))
     else:

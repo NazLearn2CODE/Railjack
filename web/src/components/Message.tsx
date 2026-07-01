@@ -1,7 +1,9 @@
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { useStore } from "../store";
 import type { Row } from "../types";
 import { cn, statusMeta } from "../util";
+import ApprovalCard from "./ApprovalCard";
 
 function safeJson(v: unknown): string {
   try {
@@ -12,6 +14,9 @@ function safeJson(v: unknown): string {
 }
 
 export default function Message({ row }: { row: Row }) {
+  // Called unconditionally (Rules of Hooks); only USED in the worker_lane case.
+  // Action reference is stable, so non-worker rows never re-render on store changes.
+  const approveWorker = useStore((s) => s.approveWorker);
   switch (row.kind) {
     case "user":
       return (
@@ -97,7 +102,11 @@ export default function Message({ row }: { row: Row }) {
               <Message key={i} row={r} />
             ))}
             {row.approval && (
-              <div className="label text-hazard">⏸ {row.approval.tool} · WORKER GATE</div>
+              <ApprovalCard
+                name={row.approval.tool}
+                input={row.approval.input}
+                onResolve={(a) => void approveWorker(row.workerId, row.approval!.approvalId, a)}
+              />
             )}
           </div>
         </div>

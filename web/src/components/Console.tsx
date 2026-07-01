@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import { useStore } from "../store";
 import { cn, shortId, statusMeta } from "../util";
+import ApprovalCard from "./ApprovalCard";
 import Composer from "./Composer";
 import Message from "./Message";
 
@@ -13,42 +14,10 @@ function Stat({ label, value }: { label: string; value: string }) {
   );
 }
 
-function ApprovalCard({
-  approvalId,
-  name,
-  input,
-}: {
-  approvalId: string;
-  name: string;
-  input: unknown;
-}) {
-  const approve = useStore((s) => s.approve);
-  return (
-    <div className="row-in border border-hazard/50 bg-hazard/5 px-3 py-2.5">
-      <div className="mb-1.5 flex items-center justify-between">
-        <span className="label">
-          <span className="text-hazard">⚠ APPROVAL REQUIRED</span> · {name}
-        </span>
-        <span className="label text-hazard">BLOCKING</span>
-      </div>
-      <pre className="mb-2 overflow-x-auto text-[11px] text-phosphor-dim">
-        {typeof input === "string" ? input : JSON.stringify(input, null, 2)}
-      </pre>
-      <div className="flex gap-2">
-        <button className="btn btn--hazard flex-1" onClick={() => void approve(approvalId, true)}>
-          APPROVE
-        </button>
-        <button className="btn btn--crit flex-1" onClick={() => void approve(approvalId, false)}>
-          DENY
-        </button>
-      </div>
-    </div>
-  );
-}
-
 export default function Console() {
   const activeId = useStore((s) => s.activeId);
   const t = useStore((s) => (s.activeId ? s.transcripts[s.activeId] : undefined));
+  const approve = useStore((s) => s.approve);
   const endRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -115,7 +84,12 @@ export default function Console() {
           <Message key={i} row={row} />
         ))}
         {pending.map(([aid, p]) => (
-          <ApprovalCard key={aid} approvalId={aid} name={p.name} input={p.input} />
+          <ApprovalCard
+            key={aid}
+            name={p.name}
+            input={p.input}
+            onResolve={(a) => void approve(aid, a)}
+          />
         ))}
         {live && <div className="label text-signal caret">STREAMING</div>}
         <div ref={endRef} />

@@ -16,7 +16,7 @@ from __future__ import annotations
 import uuid
 import logging
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Callable, Optional
 
 from app.core.agent import AgentSession, ALLOWED_TOOLS
 from app.core.provider import ClaudeSdkProvider, Provider
@@ -90,12 +90,18 @@ class Team:
         scheduler: HiveMindScheduler,
         security: Optional[SecurityPolicy] = None,
         worker_provider: Optional[Provider] = None,
+        register: Optional[Callable[[AgentSession], None]] = None,
     ):
         self.scheduler = scheduler
         self.security = security
         # Plain provider with no delegate callback → workers are leaves (no recursion).
         self.worker_provider = worker_provider
         self.roles: dict[str, WorkerRole] = {}
+        # Adopt each worker into the session manager before run(), mirroring the
+        # delegate-callback pattern. A registered worker's approval gate is then
+        # actionable via the shared POST /api/sessions/{id}/approve (otherwise its
+        # gated tools block to a fail-closed timeout). main.py wires manager.register.
+        self.register = register
         # The supervisor whose bus worker events forward onto (set by supervisor()).
         self._supervisor: Optional[AgentSession] = None
 
@@ -125,6 +131,7 @@ class Team:
             security=self.security,
             provider=self.worker_provider,
             allowed_tools=r.allowed_tools,
+            kind="worker",
         )
 
         # Forward every worker event onto the supervisor's bus as a nested
@@ -144,6 +151,11 @@ class Team:
                 })
 
             worker.event_sink = _to_supervisor
+
+        # Register before run() so the worker's approval gate is actionable through
+        # the shared /approve surface (excluded from list_sessions by kind).
+        if self.register is not None:
+            self.register(worker)
 
         logger.info("Supervisor delegating to '%s': %.80s", role, task)
         try:

@@ -35,6 +35,7 @@ interface State {
   dispatch: (prompt: string, systemPrompt?: string) => Promise<void>;
   select: (id: string) => Promise<void>;
   approve: (approvalId: string, approve: boolean) => Promise<void>;
+  approveWorker: (workerId: string, approvalId: string, approve: boolean) => Promise<void>;
 }
 
 function rowsFromContent(content: ContentBlock[] | string | undefined): Row[] {
@@ -111,7 +112,8 @@ function applyEvent(t: Transcript, ev: StreamEvent): Transcript {
           text: typeof inner.result === "string" ? inner.result : JSON.stringify(inner.result),
           isError: !!inner.is_error,
         });
-      else if (inner.type === "approval_needed" && inner.tool) lane.approval = { tool: inner.tool };
+      else if (inner.type === "approval_needed" && inner.approval_id && inner.tool)
+        lane.approval = { approvalId: inner.approval_id, tool: inner.tool, input: inner.input };
       if (idx >= 0) next.rows[idx] = lane;
       else next.rows.push(lane);
       break;
@@ -263,6 +265,24 @@ export const useStore = create<State>((set, get) => ({
       const pendingTools = { ...t.pendingTools };
       delete pendingTools[approvalId];
       return { transcripts: { ...s.transcripts, [id]: { ...t, pendingTools } } };
+    });
+  },
+
+  approveWorker: async (workerId, approvalId, approve) => {
+    // A worker's gated tool is actionable through the SAME /approve endpoint,
+    // addressed by workerId (registered server-side). Clears the lane card on click.
+    await apiApprove(workerId, approvalId, approve);
+    set((s) => {
+      const id = s.activeId;
+      if (!id) return {};
+      const t = s.transcripts[id];
+      if (!t) return {};
+      const rows = t.rows.map((r) =>
+        r.kind === "worker_lane" && r.approval?.approvalId === approvalId
+          ? { ...r, approval: undefined }
+          : r,
+      );
+      return { transcripts: { ...s.transcripts, [id]: { ...t, rows } } };
     });
   },
 }));

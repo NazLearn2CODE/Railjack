@@ -77,7 +77,7 @@ export type Row =
       role: string;
       rows: Row[];
       status: SessionStatus;
-      approval?: { tool: string };
+      approval?: { approvalId: string; tool: string; input: unknown };
     };
 
 export interface Transcript {

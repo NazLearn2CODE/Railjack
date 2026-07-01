@@ -43,8 +43,10 @@ class AgentSession:
         # Per-session tool set. Workers (orchestrator.Team) pass a role-scoped
         # subset excluding "delegate" (leaves); the supervisor passes native + "delegate".
         self.allowed_tools = allowed_tools if allowed_tools is not None else ALLOWED_TOOLS
-        # "single" (plain session) | "supervisor" (a Team's supervisor — carries delegate).
-        # Workers are transient (spawned inside delegate) and never registered, so no "worker" kind surfaces.
+        # "single" (plain session) | "supervisor" (a Team's supervisor — carries
+        # delegate) | "worker" (a Team's delegated leaf). Workers are registered so
+        # their approval gates are actionable via the shared /approve surface, but
+        # excluded from list_sessions — observed via the supervisor's worker_lane.
         self.kind = kind
         # Optional forward-every-event sink. A Team supervisor sets this on each
         # worker so the worker's inner activity streams onto the supervisor's bus
@@ -325,4 +327,5 @@ class AgentSessionManager:
                 "error": s.error_message,
             }
             for s in self.sessions.values()
+            if s.kind != "worker"
         ]
