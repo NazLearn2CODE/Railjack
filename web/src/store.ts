@@ -74,6 +74,13 @@ function applyEvent(t: Transcript, ev: StreamEvent): Transcript {
         text: typeof ev.result === "string" ? ev.result : JSON.stringify(ev.result),
         isError: !!ev.is_error,
       });
+      // result.usage is the cumulative-final count (authoritative across backends);
+      // set, don't add — assistant-message usage above is incremental only. This is
+      // also the sole source under z.ai, where per-message usage is 0.
+      if (ev.usage) {
+        const u = (ev.usage.input_tokens ?? 0) + (ev.usage.output_tokens ?? 0);
+        if (u > 0) next.tokens = u;
+      }
       break;
     case "approval_needed":
       if (ev.approval_id && ev.tool)

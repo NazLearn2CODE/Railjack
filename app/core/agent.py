@@ -279,7 +279,7 @@ Run autonomous agent query: "{self.prompt}"
                 "usage": message.usage,
             }
         elif isinstance(message, ResultMessage):
-            return {"type": "result", "result": message.result, "is_error": message.is_error, "uuid": message.uuid}
+            return {"type": "result", "result": message.result, "is_error": message.is_error, "usage": message.usage, "uuid": message.uuid}
         elif isinstance(message, RateLimitEvent):
             return {"type": "rate_limit", "rate_limit_type": message.rate_limit_type, "info": getattr(message, "info", None)}
         return None
