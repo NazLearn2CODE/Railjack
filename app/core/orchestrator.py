@@ -38,6 +38,42 @@ class WorkerRole:
     allowed_tools: list[str] = field(default_factory=lambda: list(ALLOWED_TOOLS))
 
 
+# A sensible general-purpose team for the default dashboard surface. The role
+# names are surfaced to the supervisor so it knows who it can delegate to.
+DEFAULT_ROLES: list[WorkerRole] = [
+    WorkerRole(
+        name="researcher",
+        system_prompt=(
+            "You are a research specialist. Investigate and gather context using "
+            "Read, Grep, Glob, and WebSearch. Report findings concisely — make no changes."
+        ),
+    ),
+    WorkerRole(
+        name="coder",
+        system_prompt=(
+            "You are an implementation specialist. Make focused changes using Read, "
+            "Edit, Write, and Bash. Return a concise summary of what you changed and why."
+        ),
+    ),
+]
+
+
+def default_supervisor_prompt(roles: list[WorkerRole]) -> str:
+    """Supervisor system prompt naming the hired roles and mandating delegation.
+
+    Pure function over the role list — no defaults baked into the prompt, so a
+    custom role set is reflected correctly.
+    """
+    roster = ", ".join(r.name for r in roles)
+    return (
+        "You are the supervisor of a specialist team. Decompose the task into "
+        "subtasks and delegate each to the best-fit worker via the `delegate` tool "
+        "(args: role, task); a worker returns its result text. Synthesize the "
+        f"results into a final answer.\n\nRoles available: {roster}\n\n"
+        "Delegate each subtask rather than implementing directly, then combine the results."
+    )
+
+
 class Team:
     """Centralized topology: a supervisor plus hired specialist workers.
 
@@ -122,4 +158,5 @@ class Team:
             security=self.security,
             provider=ClaudeSdkProvider(delegate=self.delegate),
             allowed_tools=tools,
+            kind="supervisor",
         )

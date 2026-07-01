@@ -6,10 +6,13 @@ export default function Composer() {
   const composing = useStore((s) => s.composing);
   const setComposing = useStore((s) => s.setComposing);
   const dispatch = useStore((s) => s.dispatch);
+  const mode = useStore((s) => s.mode);
+  const setMode = useStore((s) => s.setMode);
   const t = useStore((s) => (s.activeId ? s.transcripts[s.activeId] : undefined));
   const [sysOpen, setSysOpen] = useState(false);
   const [sys, setSys] = useState("");
 
+  const team = mode === "team";
   const busy =
     t?.status === "running" ||
     t?.status === "pending_admission" ||
@@ -42,7 +45,7 @@ export default function Composer() {
         <textarea
           className="input min-h-[44px] resize-none"
           rows={2}
-          placeholder="DISPATCH A PROMPT TO THE AGENT…"
+          placeholder={team ? "DISPATCH A TASK — SUPERVISOR DELEGATES…" : "DISPATCH A PROMPT TO THE AGENT…"}
           value={composing}
           onChange={(e) => setComposing(e.target.value)}
           onKeyDown={onKey}
@@ -53,14 +56,22 @@ export default function Composer() {
           onClick={send}
           disabled={busy || !composing.trim()}
         >
-          {busy ? "·· BUSY" : "DISPATCH"}
+          {busy ? "·· BUSY" : team ? "DEPLOY" : "DISPATCH"}
         </button>
       </div>
       <div className="mt-1.5 flex items-center justify-between text-[9px] text-faint">
-        <span>ENTER ↵ DISPATCH · SHIFT+ENTER NEWLINE</span>
-        <button className="transition-colors hover:text-signal" onClick={() => setSysOpen((v) => !v)}>
-          {sysOpen ? "− HIDE SYS" : "+ SYS PROMPT"}
-        </button>
+        <span>ENTER ↵ {team ? "DEPLOY TEAM" : "DISPATCH"} · SHIFT+ENTER NEWLINE</span>
+        <div className="flex items-center gap-3">
+          <button
+            className={cn("transition-colors hover:text-signal", team && "text-signal")}
+            onClick={() => setMode(team ? "single" : "team")}
+          >
+            {team ? "● TEAM" : "○ TEAM"}
+          </button>
+          <button className="transition-colors hover:text-signal" onClick={() => setSysOpen((v) => !v)}>
+            {sysOpen ? "− HIDE SYS" : "+ SYS PROMPT"}
+          </button>
+        </div>
       </div>
     </div>
   );

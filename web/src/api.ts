@@ -16,6 +16,22 @@ export async function listSessions(): Promise<SessionMeta[]> {
   return r.json();
 }
 
+export async function createTeam(
+  prompt: string,
+  roles?: { name: string; system_prompt: string }[],
+  systemPrompt?: string,
+): Promise<SessionMeta> {
+  // Omit `roles` → server hires the default team (researcher + coder). The
+  // returned session_id is a supervisor AgentSession, streamed like any other.
+  const r = await fetch("/api/teams", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ prompt, system_prompt: systemPrompt || null, roles: roles ?? null }),
+  });
+  if (!r.ok) throw new Error(`createTeam ${r.status}`);
+  return r.json();
+}
+
 export async function approve(sessionId: string, approvalId: string, approve: boolean): Promise<void> {
   await fetch(`/api/sessions/${sessionId}/approve`, {
     method: "POST",

@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { approve as apiApprove, createSession, listSessions, openStream } from "./api";
+import { approve as apiApprove, createSession, createTeam, listSessions, openStream } from "./api";
 import type { ContentBlock, Row, SessionMeta, StreamEvent, Transcript, Usage } from "./types";
 
 // Module-level ID for event-log entries — no need to thread a counter through store state.
@@ -28,8 +28,10 @@ interface State {
   conn: number; // WebSocket readyState of the active stream
   ws: WebSocket | null;
   composing: string;
+  mode: "single" | "team"; // team → dispatch a supervisor (POST /api/teams)
   init: () => Promise<void>;
   setComposing: (v: string) => void;
+  setMode: (m: "single" | "team") => void;
   dispatch: (prompt: string, systemPrompt?: string) => Promise<void>;
   select: (id: string) => Promise<void>;
   approve: (approvalId: string, approve: boolean) => Promise<void>;
@@ -133,6 +135,7 @@ export const useStore = create<State>((set, get) => ({
   conn: 0,
   ws: null,
   composing: "",
+  mode: "single",
 
   init: async () => {
     try {
@@ -145,11 +148,18 @@ export const useStore = create<State>((set, get) => ({
 
   setComposing: (v) => set({ composing: v }),
 
+  setMode: (m) => set({ mode: m }),
+
   dispatch: async (prompt, systemPrompt) => {
     const trimmed = prompt.trim();
     if (!trimmed) return;
     set({ composing: "" });
-    const meta = await createSession(trimmed, systemPrompt);
+    // Team mode spawns a supervisor (POST /api/teams); otherwise a plain session.
+    // Both return a session_id that streams through the identical path below.
+    const meta =
+      get().mode === "team"
+        ? await createTeam(trimmed, undefined, systemPrompt)
+        : await createSession(trimmed, systemPrompt);
     const id = meta.session_id;
 
     // prepend the user's prompt locally

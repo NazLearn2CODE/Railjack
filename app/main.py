@@ -14,6 +14,8 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
 from app.core.agent import AgentSessionManager
+from app.core.orchestrator import DEFAULT_ROLES, Team, WorkerRole, default_supervisor_prompt
+from app.core.provider import ClaudeSdkProvider
 from app.core.scheduler import HiveMindScheduler
 from app.core.sandbox import LandlockSandbox, NoopSandbox
 from app.core.security import SecurityPolicy, WorkspaceBoundary, ShellPolicy, ToolReceiptLedger
@@ -74,6 +76,40 @@ class ApproveTool(BaseModel):
     approve: bool
 
 
+class RoleSpec(BaseModel):
+    name: str
+    system_prompt: str
+
+
+class CreateTeam(BaseModel):
+    prompt: str
+    system_prompt: str | None = None
+    roles: list[RoleSpec] | None = None
+
+
+@app.post("/api/teams")
+async def create_team(req: CreateTeam):
+    """Spawn a Centralized-topology team and register its supervisor.
+
+    The supervisor is an ordinary AgentSession (carrying the `delegate` tool), so
+    the existing /ws/sessions/{id} stream + /approve gate + GET detail drive it
+    like any single-agent run — delegation surfaces as `delegate` tool calls.
+    """
+    team = Team(scheduler, security=security, worker_provider=ClaudeSdkProvider())
+    if req.roles:
+        team.hire(*(WorkerRole(name=r.name, system_prompt=r.system_prompt) for r in req.roles))
+    else:
+        team.hire(*DEFAULT_ROLES)
+    roles = list(team.roles)
+
+    sup = team.supervisor(
+        req.prompt,
+        system_prompt=req.system_prompt or default_supervisor_prompt(list(team.roles.values())),
+    )
+    manager.register(sup)
+    return {"session_id": sup.session_id, "status": sup.status, "prompt": sup.prompt, "kind": sup.kind, "roles": roles}
+
+
 @app.post("/api/sessions")
 async def create_session(req: CreateSession):
     s = manager.create_session(req.prompt, req.system_prompt)
@@ -94,6 +130,7 @@ async def get_session(session_id: str):
         "session_id": s.session_id,
         "prompt": s.prompt,
         "status": s.status,
+        "kind": s.kind,
         "tokens_consumed": s.tokens_consumed,
         "error": s.error_message,
         "messages": s.messages,

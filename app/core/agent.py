@@ -33,7 +33,7 @@ class AgentSession:
     asyncio.Queue (the event bus) consumed by the WebSocket gateway. Dangerous
     tool calls surface as `approval_needed` events resolved via approve_tool().
     """
-    def __init__(self, session_id: str, prompt: str, scheduler: HiveMindScheduler, system_prompt: Optional[str] = None, security: Optional[SecurityPolicy] = None, provider: Optional[Provider] = None, allowed_tools: Optional[list[str]] = None):
+    def __init__(self, session_id: str, prompt: str, scheduler: HiveMindScheduler, system_prompt: Optional[str] = None, security: Optional[SecurityPolicy] = None, provider: Optional[Provider] = None, allowed_tools: Optional[list[str]] = None, kind: str = "single"):
         self.session_id = session_id
         self.prompt = prompt
         self.scheduler = scheduler
@@ -43,6 +43,9 @@ class AgentSession:
         # Per-session tool set. Workers (orchestrator.Team) pass a role-scoped
         # subset excluding "delegate" (leaves); the supervisor passes native + "delegate".
         self.allowed_tools = allowed_tools if allowed_tools is not None else ALLOWED_TOOLS
+        # "single" (plain session) | "supervisor" (a Team's supervisor — carries delegate).
+        # Workers are transient (spawned inside delegate) and never registered, so no "worker" kind surfaces.
+        self.kind = kind
         self.pending_approvals: Dict[str, asyncio.Future] = {}
         self.messages: list = []
         self.events: asyncio.Queue = asyncio.Queue()
@@ -287,6 +290,12 @@ class AgentSessionManager:
         self.sessions[session_id] = session
         return session
 
+    def register(self, session: AgentSession) -> AgentSession:
+        """Adopt an externally-built session (e.g. a Team supervisor) so the shared
+        WS / approve / detail surface drives it like any other."""
+        self.sessions[session.session_id] = session
+        return session
+
     def get_session(self, session_id: str) -> Optional[AgentSession]:
         return self.sessions.get(session_id)
 
@@ -296,6 +305,7 @@ class AgentSessionManager:
                 "session_id": s.session_id,
                 "prompt": s.prompt,
                 "status": s.status,
+                "kind": s.kind,
                 "tokens_consumed": s.tokens_consumed,
                 "error": s.error_message,
             }
