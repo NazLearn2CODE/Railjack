@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 from typing import Any, AsyncIterator, Awaitable, Callable, NamedTuple, Optional, Protocol
 
-from claude_agent_sdk import query, ClaudeAgentOptions
+from claude_agent_sdk import query, ClaudeAgentOptions, create_sdk_mcp_server, tool
 from claude_agent_sdk.types import AssistantMessage, RateLimitEvent, ResultMessage, UserMessage, HookMatcher
 
 logger = logging.getLogger("orbiter.provider")
@@ -67,6 +67,11 @@ async def _prompt_stream(prompt: str):
 class ClaudeSdkProvider:
     """Provider backed by claude-agent-sdk. Absorbs all SDK coupling from agent.py."""
 
+    def __init__(self, delegate: Optional[Callable[[str, str], Awaitable[str]]] = None):
+        # When set, the supervisor gains a `delegate` tool (in-process MCP server)
+        # that runs a worker via the orchestrator. None for workers/standalone sessions.
+        self._delegate = delegate
+
     @staticmethod
     def _verdict_to_hook_output(verdict: ToolDecision) -> dict:
         """Translates an OS-policy verdict into the SDK's PreToolUse hook protocol."""
@@ -99,7 +104,7 @@ class ClaudeSdkProvider:
         # timeout; the hook waits marginally longer (see HOOK_TIMEOUT_MARGIN).
         from app.core.agent import APPROVAL_TIMEOUT
 
-        options = ClaudeAgentOptions(
+        options_kwargs: dict[str, Any] = dict(
             system_prompt=system_prompt,
             allowed_tools=allowed_tools,
             hooks={
@@ -114,6 +119,25 @@ class ClaudeSdkProvider:
             setting_sources=[],
             session_id=session_id,
         )
+
+        # Supervisor wiring: expose delegate(role, task) as an in-process MCP tool.
+        # The SDK's MCP client routes the supervisor's delegate call here, awaits the
+        # worker (orchestrator.Team.delegate), and feeds the result back into the loop.
+        if self._delegate is not None:
+            async def _delegate(args: dict[str, Any]) -> dict[str, Any]:
+                result = await self._delegate(args.get("role", ""), args.get("task", ""))
+                return {"content": [{"type": "text", "text": result}]}
+
+            delegate_tool = tool(
+                "delegate",
+                "Delegate a subtask to a specialist worker role; returns the worker's result text.",
+                {"role": str, "task": str},
+            )(_delegate)
+            options_kwargs["mcp_servers"] = {
+                "orbiter": create_sdk_mcp_server(name="orbiter", tools=[delegate_tool])
+            }
+
+        options = ClaudeAgentOptions(**options_kwargs)
 
         async for message in query(prompt=_prompt_stream(prompt), options=options):
             serialized = self._serialize_message(message)

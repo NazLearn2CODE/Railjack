@@ -46,7 +46,7 @@ Maps the agentic-OS blueprint (`[[agentic-os-guide]]`) onto a Python implementat
 | 5 HiveMind primitives | `asyncio`: semaphore admission, rolling-window rate tracking, AIMD controller, circuit-breaker state machine, token-budget guard |
 | Microkernel / trait abstraction | `typing.Protocol` for `Provider` (LLM) and `Channel` (messaging) — core depends on protocols, not concretes. **`Provider` DONE** (`app/core/provider.py`: `ClaudeSdkProvider` + `FakeProvider`); `Channel` deferred |
 | MCP integration | FastAPI = MCP host; `@modelcontextprotocol/server-obsidian` pattern reused; tools exposed as MCP servers |
-| 2DOT topologies | Centralized first (supervisor + workers); hierarchical/decentralized later |
+| 2DOT topologies | **Centralized DONE** — `Team`/`WorkerRole` (`app/core/orchestrator.py`): supervisor delegates via an in-process `delegate` MCP tool; a worker IS an `AgentSession` (full scheduler + security apply). Hierarchical/decentralized deferred |
 | Tool receipts | `ToolReceiptLedger` (`app/core/security.py`) — HMAC-SHA256 over canonical JSON per gated call → `logs/receipts.jsonl` (L1/L2/L4 at the PreToolUse hook; L3 = self-Landlock at startup, `app/core/sandbox.py`) |
 | Dashboard surface | FastAPI WebSocket gateway + React UI (use **frontend-design**) |
 

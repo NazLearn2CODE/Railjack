@@ -33,13 +33,16 @@ class AgentSession:
     asyncio.Queue (the event bus) consumed by the WebSocket gateway. Dangerous
     tool calls surface as `approval_needed` events resolved via approve_tool().
     """
-    def __init__(self, session_id: str, prompt: str, scheduler: HiveMindScheduler, system_prompt: Optional[str] = None, security: Optional[SecurityPolicy] = None, provider: Optional[Provider] = None):
+    def __init__(self, session_id: str, prompt: str, scheduler: HiveMindScheduler, system_prompt: Optional[str] = None, security: Optional[SecurityPolicy] = None, provider: Optional[Provider] = None, allowed_tools: Optional[list[str]] = None):
         self.session_id = session_id
         self.prompt = prompt
         self.scheduler = scheduler
         self.system_prompt = system_prompt
         self.security = security
         self.provider = provider or ClaudeSdkProvider()
+        # Per-session tool set. Workers (orchestrator.Team) pass a role-scoped
+        # subset excluding "delegate" (leaves); the supervisor passes native + "delegate".
+        self.allowed_tools = allowed_tools if allowed_tools is not None else ALLOWED_TOOLS
         self.pending_approvals: Dict[str, asyncio.Future] = {}
         self.messages: list = []
         self.events: asyncio.Queue = asyncio.Queue()
@@ -112,6 +115,28 @@ class AgentSession:
         if approved:
             return ToolDecision(allow=True)
         return ToolDecision(allow=False, reason="Execution denied by operator via dashboard (or approval timed out).")
+
+    def final_text(self) -> str:
+        """Last assistant text from the session, or '' if none.
+
+        Used by orchestrator.Team.delegate() to return a worker's output to its
+        supervisor as a tool result.
+        """
+        for msg in reversed(self.messages):
+            if msg.get("type") != "message" or msg.get("role") != "assistant":
+                continue
+            content = msg.get("content")
+            if isinstance(content, str):
+                return content
+            if isinstance(content, list):
+                texts = [
+                    b.get("text", "")
+                    for b in content
+                    if isinstance(b, dict) and b.get("type") == "text" and b.get("text")
+                ]
+                if texts:
+                    return "\n".join(texts)
+        return ""
 
     def save_log(self):
         """Saves a session log to B-sessions/ conforming to session-template.md."""
@@ -188,7 +213,7 @@ Run autonomous agent query: "{self.prompt}"
             async for event in self.provider.stream(
                 self.prompt,
                 system_prompt=self.system_prompt,
-                allowed_tools=ALLOWED_TOOLS,
+                allowed_tools=self.allowed_tools,
                 session_id=self.session_id,
                 on_tool_use=self._on_tool_use,
             ):
