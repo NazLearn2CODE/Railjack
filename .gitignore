@@ -11,6 +11,7 @@ venv/
 node_modules/
 dist/
 .vite/
+scripts/screenshots/
 
 # Obsidian — machine-local state + secrets only; vault content is tracked
 .obsidian/workspace*
