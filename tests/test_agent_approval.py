@@ -5,13 +5,27 @@ LOGIC — emit/approve/deny/timeout — without a live query, via asyncio.run.
 Run: .venv/bin/python -m pytest tests/test_agent_approval.py -q
 """
 import asyncio
+import tempfile
+from pathlib import Path
 
-from app.core.agent import AgentSession, APPROVAL_TIMEOUT
+from app.core.agent import AgentSession
 from app.core.scheduler import HiveMindScheduler
+from app.core.security import SecurityPolicy, WorkspaceBoundary, ShellPolicy, ToolReceiptLedger
 
 
 def _make_session() -> AgentSession:
     return AgentSession("s-approval-test", "do a dangerous thing", HiveMindScheduler())
+
+
+def _make_secured_session() -> AgentSession:
+    """A session wired with a SecurityPolicy scoped to a throwaway workspace root."""
+    log = Path(tempfile.mkdtemp()) / "r.jsonl"
+    sec = SecurityPolicy(
+        boundary=WorkspaceBoundary(roots=[Path(tempfile.mkdtemp())]),
+        shell=ShellPolicy(),
+        ledger=ToolReceiptLedger(secret="k", log_path=log),
+    )
+    return AgentSession("s-security-test", "do a catastrophic thing", HiveMindScheduler(), security=sec)
 
 
 async def _allow_deny_scenario():
@@ -65,7 +79,25 @@ def test_approval_gate_denies_on_timeout():
     asyncio.run(_timeout_scenario())
 
 
+async def _policy_short_circuit_scenario():
+    # A catastrophic Bash command hard-denies at the policy floor — no approval card
+    # is emitted, status never reaches waiting_approval, and approve_tool() is unused.
+    s = _make_secured_session()
+    out = await s._pre_tool_use_hook(
+        {"tool_name": "Bash", "tool_input": {"command": "rm -rf /"}}, "tu-pol", {"signal": None}
+    )
+    assert out["hookSpecificOutput"]["permissionDecision"] == "deny", out
+    assert "security policy" in out["hookSpecificOutput"]["permissionDecisionReason"].lower()
+    assert s.status != "waiting_approval", "catastrophic command must not request operator approval"
+    assert s.events.empty(), "catastrophic command must not emit approval_needed"
+
+
+def test_policy_floor_short_circuits_before_approval():
+    asyncio.run(_policy_short_circuit_scenario())
+
+
 if __name__ == "__main__":
     test_approval_gate_allows_and_denies()
     test_approval_gate_denies_on_timeout()
+    test_policy_floor_short_circuits_before_approval()
     print("approval gate self-checks: OK")

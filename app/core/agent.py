@@ -7,6 +7,7 @@ from typing import Dict, Any, Optional
 from claude_agent_sdk import query, ClaudeAgentOptions
 from claude_agent_sdk.types import AssistantMessage, ResultMessage, UserMessage, RateLimitEvent, HookMatcher
 from app.core.scheduler import HiveMindScheduler
+from app.core.security import SecurityPolicy
 
 logger = logging.getLogger("orbiter.agent")
 
@@ -34,11 +35,12 @@ class AgentSession:
     asyncio.Queue (the event bus) consumed by the WebSocket gateway. Dangerous
     tool calls surface as `approval_needed` events resolved via approve_tool().
     """
-    def __init__(self, session_id: str, prompt: str, scheduler: HiveMindScheduler, system_prompt: Optional[str] = None):
+    def __init__(self, session_id: str, prompt: str, scheduler: HiveMindScheduler, system_prompt: Optional[str] = None, security: Optional[SecurityPolicy] = None):
         self.session_id = session_id
         self.prompt = prompt
         self.scheduler = scheduler
         self.system_prompt = system_prompt
+        self.security = security
         self.pending_approvals: Dict[str, asyncio.Future] = {}
         self.messages: list = []
         self.events: asyncio.Queue = asyncio.Queue()
@@ -69,14 +71,35 @@ class AgentSession:
     async def _pre_tool_use_hook(self, hook_input: dict, tool_use_id: Optional[str], context) -> dict:
         """PreToolUse gate for dangerous tools (Bash/Write/Edit).
 
-        Emits an `approval_needed` event and blocks on operator approval from the
-        dashboard (resolved via approve_tool()). Returns allow/deny to the CLI.
-        This is the path that actually fires under the z.ai/GLM backend — see the
-        DANGEROUS_TOOLS comment above for why the hook and not can_use_tool.
+        Two stages:
+        1. POLICY FLOOR (L1/L2) — catastrophic actions hard-deny immediately, never
+           reaching the operator. Outranks approval: irrecoverable commands and
+           out-of-workspace writes are blocked regardless of who clicks Approve.
+        2. OPERATOR APPROVAL — the remaining (risky-but-legitimate) calls surface as
+           `approval_needed` and block on the dashboard, fail-closed at APPROVAL_TIMEOUT.
+
+        L4 mints exactly one HMAC receipt per gated call on every outcome (policy-deny,
+        operator-allow, operator-deny, timeout-deny). This is the path that actually
+        fires under the z.ai/GLM backend — see the DANGEROUS_TOOLS comment above.
         """
         tool_name = hook_input.get("tool_name", "?")
         tool_input = hook_input.get("tool_input", {})
 
+        # 1. Policy floor.
+        if self.security is not None:
+            decision = self.security.evaluate(tool_name, tool_input, self.session_id)
+            if decision.hard_deny:
+                self.security.mint_and_append_receipt(self.session_id, tool_name, tool_input, "deny")
+                logger.warning("Session %s policy-denied %s: %s", self.session_id, tool_name, decision.reason)
+                return {
+                    "hookSpecificOutput": {
+                        "hookEventName": "PreToolUse",
+                        "permissionDecision": "deny",
+                        "permissionDecisionReason": f"Blocked by Orbiter security policy: {decision.reason}",
+                    }
+                }
+
+        # 2. Operator approval.
         approval_id = str(uuid.uuid4())
         future = asyncio.get_running_loop().create_future()
         self.pending_approvals[approval_id] = future
@@ -99,6 +122,10 @@ class AgentSession:
         finally:
             self.pending_approvals.pop(approval_id, None)
             self.status = "running"
+
+        # L4: one receipt for the operator's final decision.
+        if self.security is not None:
+            self.security.mint_and_append_receipt(self.session_id, tool_name, tool_input, "allow" if approved else "deny")
 
         if approved:
             return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow"}}
@@ -306,13 +333,14 @@ Run autonomous agent query: "{self.prompt}"
 
 class AgentSessionManager:
     """Orchestrates all active and historical AgentSession instances."""
-    def __init__(self, scheduler: HiveMindScheduler):
+    def __init__(self, scheduler: HiveMindScheduler, security: Optional[SecurityPolicy] = None):
         self.scheduler = scheduler
+        self.security = security
         self.sessions: Dict[str, AgentSession] = {}
 
     def create_session(self, prompt: str, system_prompt: Optional[str] = None) -> AgentSession:
         session_id = str(uuid.uuid4())
-        session = AgentSession(session_id, prompt, self.scheduler, system_prompt)
+        session = AgentSession(session_id, prompt, self.scheduler, system_prompt, security=self.security)
         self.sessions[session_id] = session
         return session
 

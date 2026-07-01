@@ -7,6 +7,9 @@ venv/
 .pytest_cache/
 .ruff_cache/
 
+# Runtime — security receipt log (HMAC audit trail; generated per-run)
+logs/
+
 # Node / frontend
 node_modules/
 dist/

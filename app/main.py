@@ -3,10 +3,11 @@
 One process = one HiveMindScheduler + one AgentSessionManager (local single-user OS).
 Dashboard mounts at "/" once the React build exists; until then a placeholder is served.
 """
+import os
 import asyncio
 import logging
-from contextlib import suppress
 from pathlib import Path
+from contextlib import suppress
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
@@ -14,13 +15,32 @@ from pydantic import BaseModel
 
 from app.core.agent import AgentSessionManager
 from app.core.scheduler import HiveMindScheduler
+from app.core.security import SecurityPolicy, WorkspaceBoundary, ShellPolicy, ToolReceiptLedger
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s | %(message)s")
 logger = logging.getLogger("orbiter")
 
+# Project root: app/main.py → parents[1] is the Orbiter root (workspace default + receipt log).
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
 # Singletons — created once at import; reused across requests/connections.
 scheduler = HiveMindScheduler()
-manager = AgentSessionManager(scheduler)
+
+# Security floor (blueprint §2.2 L1/L2/L4): workspace boundary, catastrophic-shell
+# blocklist, and an HMAC-signed append-only receipt log. Env-configurable; defaults
+# scope the agent to the project root and log receipts under logs/receipts.jsonl.
+security = SecurityPolicy(
+    boundary=WorkspaceBoundary(
+        roots=[Path(os.environ.get("ORBITER_WORKSPACE_ROOT", PROJECT_ROOT)).resolve(strict=False)]
+    ),
+    shell=ShellPolicy(),
+    ledger=ToolReceiptLedger(
+        secret=os.environ.get("ORBITER_RECEIPT_SECRET", ""),
+        log_path=Path(os.environ.get("ORBITER_RECEIPT_LOG", PROJECT_ROOT / "logs" / "receipts.jsonl")),
+    ),
+)
+
+manager = AgentSessionManager(scheduler, security=security)
 
 app = FastAPI(title="Orbiter", version="0.1.0")
 
