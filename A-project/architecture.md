@@ -33,9 +33,9 @@ Maps the agentic-OS blueprint (`[[agentic-os-guide]]`) onto a Python implementat
 └────────┬────────────────────────────────────────────────┘
          │
 ┌────────┴────────────────────────────────────────────────┐
-│  Security layer (Linux) — enforced at the PreToolUse hook │
-│  L1 workspace boundary · L2 shell policy · L4 HMAC receipts  ← DONE (app/core/security.py)
-│  L3 Landlock→Bubblewrap→Docker                          ← DEFERRED (kernel/process-level)
+│  Security layer (Linux)                                    │
+│  L1 workspace boundary · L2 shell policy · L4 HMAC receipts  ← DONE, PreToolUse hook (app/core/security.py)
+│  L3 Landlock self-sandbox (write-confinement at startup)      ← DONE (app/core/sandbox.py); bwrap/Docker fallback deferred
 └─────────────────────────────────────────────────────────┘
 ```
 
@@ -47,7 +47,7 @@ Maps the agentic-OS blueprint (`[[agentic-os-guide]]`) onto a Python implementat
 | Microkernel / trait abstraction | `typing.Protocol` for `Provider` (LLM) and `Channel` (messaging) — core depends on protocols, not concretes |
 | MCP integration | FastAPI = MCP host; `@modelcontextprotocol/server-obsidian` pattern reused; tools exposed as MCP servers |
 | 2DOT topologies | Centralized first (supervisor + workers); hierarchical/decentralized later |
-| Tool receipts | `ToolReceiptLedger` (`app/core/security.py`) — HMAC-SHA256 over canonical JSON per gated call → `logs/receipts.jsonl` (L1/L2/L4 at the PreToolUse hook; L3 deferred) |
+| Tool receipts | `ToolReceiptLedger` (`app/core/security.py`) — HMAC-SHA256 over canonical JSON per gated call → `logs/receipts.jsonl` (L1/L2/L4 at the PreToolUse hook; L3 = self-Landlock at startup, `app/core/sandbox.py`) |
 | Dashboard surface | FastAPI WebSocket gateway + React UI (use **frontend-design**) |
 
 ## Build phases (from the guide)
