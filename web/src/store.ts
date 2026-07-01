@@ -63,8 +63,13 @@ function applyEvent(t: Transcript, ev: StreamEvent): Transcript {
       }
       next.rows.push(...rows);
       if (ev.usage) {
-        const u = (ev.usage.input_tokens ?? 0) + (ev.usage.output_tokens ?? 0);
-        next.tokens += u;
+        // Full throughput incl. cache (cache_read dominates once the prompt is
+        // cached); mirrors agent.py _throughput(). input+output alone ~100x low.
+        next.tokens +=
+          (ev.usage.input_tokens ?? 0) +
+          (ev.usage.cache_read_input_tokens ?? 0) +
+          (ev.usage.cache_creation_input_tokens ?? 0) +
+          (ev.usage.output_tokens ?? 0);
       }
       break;
     }
@@ -78,8 +83,12 @@ function applyEvent(t: Transcript, ev: StreamEvent): Transcript {
       // set, don't add — assistant-message usage above is incremental only. This is
       // also the sole source under z.ai, where per-message usage is 0.
       if (ev.usage) {
-        const u = (ev.usage.input_tokens ?? 0) + (ev.usage.output_tokens ?? 0);
-        if (u > 0) next.tokens = u;
+        const total =
+          (ev.usage.input_tokens ?? 0) +
+          (ev.usage.cache_read_input_tokens ?? 0) +
+          (ev.usage.cache_creation_input_tokens ?? 0) +
+          (ev.usage.output_tokens ?? 0);
+        if (total > 0) next.tokens = total;
       }
       break;
     case "approval_needed":

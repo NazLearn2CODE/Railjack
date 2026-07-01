@@ -66,6 +66,10 @@ autonomy (the prior ADR's state). All approval plumbing stays in place.
 ## Impact
 
 - Real per-call approval of dangerous tools now works under the z.ai backend.
+  **Browser-verified 2026-07-01** (smoke test, `/tmp/orbiter-smoke`): agent calls
+  `Bash` → approval card renders in the dashboard → operator APPROVE → native Bash
+  executes → result streams back, end-to-end. Upgrades this ADR's "hooks fire" claim
+  from a code spike to a verified UI loop.
 - Read-only tools execute without confirmation (intended — safe, and keeps the
   agent from stalling on every Read/Grep).
 - 600s approval timeout denies (fail-closed); raise `APPROVAL_TIMEOUT` for more

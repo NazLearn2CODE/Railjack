@@ -205,10 +205,12 @@ Run autonomous agent query: "{self.prompt}"
                     await self._emit(msg_data)
 
                 if isinstance(message, AssistantMessage) and message.usage:
-                    turn_tokens = message.usage.get("input_tokens", 0) + message.usage.get("output_tokens", 0)
-                    self.tokens_consumed += turn_tokens
+                    # Budget bounds billable input+output; tokens_consumed (display)
+                    # counts full throughput incl. cache — they intentionally differ; see _throughput().
+                    billable = message.usage.get("input_tokens", 0) + message.usage.get("output_tokens", 0)
+                    self.tokens_consumed += self._throughput(message.usage)
                     # Mid-turn budget enforcement: stop the moment a session crosses its ceiling.
-                    if not self.scheduler.token_budget.consume(self.session_id, turn_tokens):
+                    if not self.scheduler.token_budget.consume(self.session_id, billable):
                         self.error_message = f"Token budget exceeded ({self.scheduler.token_budget.default_ceiling})."
                         over_budget = True
                         break
@@ -218,7 +220,7 @@ Run autonomous agent query: "{self.prompt}"
                         success = False
                         self.error_message = str(message.result)
                     if message.usage:
-                        self.tokens_consumed = message.usage.get("input_tokens", 0) + message.usage.get("output_tokens", 0)
+                        self.tokens_consumed = self._throughput(message.usage)
 
             await self.scheduler.exit_turn(self.session_id, self.start_time, success, actual_tokens=self.tokens_consumed)
             self.status = "failed" if over_budget else "completed"
@@ -251,6 +253,23 @@ Run autonomous agent query: "{self.prompt}"
         if hasattr(obj, "__dataclass_fields__"):  # dataclass (ToolResultBlock, etc.)
             return {k: AgentSession._safe(getattr(obj, k)) for k in obj.__dataclass_fields__}
         return str(obj)
+
+    @staticmethod
+    def _throughput(usage: Any) -> int:
+        """Full token throughput: input + cache read/write + output (observability).
+
+        cache_read_input_tokens is ~99% of volume once the system prompt + tool defs
+        are cached, so input+output alone undercounts by 100x+. The token *budget*
+        bounds input+output only — see run().
+        """
+        if not usage:
+            return 0
+        return (
+            usage.get("input_tokens", 0)
+            + usage.get("cache_read_input_tokens", 0)
+            + usage.get("cache_creation_input_tokens", 0)
+            + usage.get("output_tokens", 0)
+        )
 
     def _serialize_message(self, message: Any) -> Optional[Dict[str, Any]]:
         """Serializes Claude SDK Message types to JSON-friendly dicts."""
