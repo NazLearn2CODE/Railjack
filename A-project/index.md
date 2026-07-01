@@ -30,9 +30,10 @@ web dashboard on `localhost:<port>`. Built from the blueprint in
 - Session logs: `[[../B-sessions]]`
 
 **Current status:**
-- `feat/gateway-dashboard` **merged to `main`** (fast-forward). FastAPI gateway (REST + WS), React 19 dashboard, HiveMind scheduler primitives (AIMD / circuit-breaker / rate-limit / admission / token-budget), streaming agent loop, and **per-call tool approval via a PreToolUse hook** (Bash/Write/Edit gated, read-only auto-run) — see `[[2026-07-01-tool-approval-pretooluse-hook]]`.
-- **Browser smoke-tested end-to-end** (`/tmp/orbiter-smoke`): composer → WS token stream → completion, and approval card → APPROVE → gated Bash executes. The approval gate is **browser-verified to fire under z.ai**, upgrading ADR #8 from a code-spike claim to a confirmed UI loop. Token telemetry **and** the per-session budget both count full throughput (input + cache + output); budget ceiling raised to 200k.
-- Next up (optional): real-backend verification on the native Anthropic API; the L1–L4 sandboxing layers (still TODO per the ADR).
+- **`main` is the working line** — `feat/gateway-dashboard` plus four follow-up branches merged in (all fast-forward). FastAPI gateway (REST + WS), React 19 dashboard, HiveMind scheduler primitives (AIMD / circuit-breaker / rate-limit / admission / token-budget), streaming agent loop, and **per-call tool approval via a PreToolUse hook** (Bash/Write/Edit gated, read-only auto-run) — see `[[2026-07-01-tool-approval-pretooluse-hook]]`.
+- **Browser-verified end-to-end** under the z.ai/GLM backend: composer → WS token stream → completion, and approval card → APPROVE → gated Bash executes. ADR #8's "PreToolUse hooks fire under z.ai" upgraded from a code spike to a confirmed UI loop. Token telemetry **and** the per-session budget both count full throughput (input + cache + output); budget ceiling 200k.
+- **Codebase audit-clean + type-safe:** ponytail audit collapsed the last duplication/dead code; `tsc --noEmit` is green and `npm run build` gates on it.
+- **Next stage — fill in the OS core** (per `[[architecture]]`: dashboard/gateway done, OS core next): (1) **L1–L4 sandboxing** — workspace boundary · shell policy · Landlock→Bubblewrap→Docker · HMAC tool receipts (still TODO, ADR #8); (2) **protocol-based core** — `Provider` (LLM) + `Channel` (messaging) `Protocol`s so the core depends on abstractions, not the SDK; then (3) **orchestration** — MCP host/client/server + 2DOT topologies (guide Phase 2). Native Anthropic-API verification is a lower-priority cross-check (approval gate proven on z.ai only).
 - Last deployed: n/a (dev only, `localhost:8000`).
 
 ## Build Rules
