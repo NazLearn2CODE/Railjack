@@ -1,4 +1,4 @@
-from app.core.sandbox import NoopSandbox, SandboxStatus, write_mask_for_abi
+from app.core.sandbox import NoopSandbox, SandboxStatus, normalize_roots, write_mask_for_abi
 
 
 def test_noop_sandbox_returns_inactive_status():
@@ -26,3 +26,17 @@ def test_write_mask_abi_v2_includes_refer_truncate():
     assert mask & (1 << 13) != 0  # REFER present
     assert mask & (1 << 14) != 0  # TRUNCATE present
     assert mask & 0x7FFF == mask  # within v2 range
+
+
+def test_normalize_roots_expands_and_dedups_preserving_order():
+    from pathlib import Path
+
+    roots = [Path("~/foo"), Path("/tmp"), Path("~/foo/bar")]
+    # extra duplicates /tmp and adds one new
+    out = normalize_roots(roots, extra="/tmp:/opt/orbiter")
+    assert out[0].endswith("/foo")
+    assert out[1] == "/tmp"
+    # endswith, not ==: resolve() follows symlinks, and on ostree hosts /opt → /var/opt.
+    assert out[-1].endswith("/orbiter")
+    assert out.count("/tmp") == 1  # dedup
+    assert all(p.startswith("/") for p in out)  # absolutized

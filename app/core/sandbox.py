@@ -11,7 +11,9 @@ existing L1/L2/approval floor. See ADR 2026-07-01-sandbox-l3-landlock.
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Protocol
 
 logger = logging.getLogger("orbiter.sandbox")
@@ -48,6 +50,21 @@ def write_mask_for_abi(abi: int) -> int:
     if abi <= 1:
         return _WRITE_ACCESSES & _ABI1_FS_MASK
     return (_WRITE_ACCESSES | _FS_REFER | _FS_TRUNCATE) & _ABI2_FS_MASK
+
+
+def normalize_roots(roots: list[Path], extra: str | None = None) -> list[str]:
+    """Expand ~, absolutize, dedup (preserve order). Returns resolved path strings."""
+    seen: set[str] = set()
+    out: list[str] = []
+    sources = list(roots)
+    if extra:
+        sources += [Path(p) for p in extra.split(":") if p.strip()]
+    for r in sources:
+        s = str(Path(os.path.expanduser(str(r))).resolve(strict=False))
+        if s not in seen:
+            seen.add(s)
+            out.append(s)
+    return out
 
 
 @dataclass(frozen=True)
