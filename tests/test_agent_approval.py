@@ -1,7 +1,9 @@
-"""Self-check for the PreToolUse approval gate (task #8).
+"""Self-check for the PreToolUse approval gate.
 
-The hook fires under z.ai (verified by a live spike); this checks the gate
-LOGIC — emit/approve/deny/timeout — without a live query, via asyncio.run.
+The gate fires under z.ai (verified by a live spike); this checks the gate
+LOGIC — emit/approve/deny/timeout — via the _on_tool_use/ToolDecision seam,
+without a live query, via asyncio.run. The SDK-specific hook-output translation
+is covered separately in test_provider.py.
 Run: .venv/bin/python -m pytest tests/test_agent_approval.py -q
 """
 import asyncio
@@ -9,6 +11,7 @@ import tempfile
 from pathlib import Path
 
 from app.core.agent import AgentSession
+from app.core.provider import ToolDecision
 from app.core.scheduler import HiveMindScheduler
 from app.core.security import SecurityPolicy, WorkspaceBoundary, ShellPolicy, ToolReceiptLedger
 
@@ -32,27 +35,24 @@ async def _allow_deny_scenario():
     s = _make_session()
 
     # --- approve -> allow ---
-    task = asyncio.ensure_future(
-        s._pre_tool_use_hook({"tool_name": "Bash", "tool_input": {"command": "echo hi"}}, "tu-1", {"signal": None})
-    )
+    task = asyncio.ensure_future(s._on_tool_use("Bash", {"command": "echo hi"}))
     await asyncio.sleep(0)  # let it register the future + emit
     assert s.status == "waiting_approval"
     approval_id = next(iter(s.pending_approvals))
     await s.approve_tool(approval_id, True)
-    out = await asyncio.wait_for(task, timeout=2.0)
-    assert out["hookSpecificOutput"]["permissionDecision"] == "allow", out
+    verdict = await asyncio.wait_for(task, timeout=2.0)
+    assert isinstance(verdict, ToolDecision)
+    assert verdict.allow is True
     assert s.status == "running"
 
     # --- deny -> deny ---
-    task = asyncio.ensure_future(
-        s._pre_tool_use_hook({"tool_name": "Write", "tool_input": {"path": "/etc/x"}}, "tu-2", {"signal": None})
-    )
+    task = asyncio.ensure_future(s._on_tool_use("Write", {"path": "/etc/x"}))
     await asyncio.sleep(0)
     approval_id = next(iter(s.pending_approvals))
     await s.approve_tool(approval_id, False)
-    out = await asyncio.wait_for(task, timeout=2.0)
-    assert out["hookSpecificOutput"]["permissionDecision"] == "deny", out
-    assert "permissionDecisionReason" in out["hookSpecificOutput"]
+    verdict = await asyncio.wait_for(task, timeout=2.0)
+    assert verdict.allow is False
+    assert verdict.reason  # deny carries a reason
 
 
 async def _timeout_scenario():
@@ -60,12 +60,10 @@ async def _timeout_scenario():
     s = _make_session()
     import app.core.agent as agent_mod
     orig = agent_mod.APPROVAL_TIMEOUT
-    agent_mod.APPROVAL_TIMEOUT = 0.1  # patch the module constant the hook reads
+    agent_mod.APPROVAL_TIMEOUT = 0.1  # patch the module constant the gate reads
     try:
-        out = await s._pre_tool_use_hook(
-            {"tool_name": "Edit", "tool_input": {}}, "tu-3", {"signal": None}
-        )
-        assert out["hookSpecificOutput"]["permissionDecision"] == "deny", out
+        verdict = await s._on_tool_use("Edit", {})
+        assert verdict.allow is False
         assert s.pending_approvals == {}, "timed-out approval must be cleaned up"
     finally:
         agent_mod.APPROVAL_TIMEOUT = orig
@@ -83,11 +81,9 @@ async def _policy_short_circuit_scenario():
     # A catastrophic Bash command hard-denies at the policy floor — no approval card
     # is emitted, status never reaches waiting_approval, and approve_tool() is unused.
     s = _make_secured_session()
-    out = await s._pre_tool_use_hook(
-        {"tool_name": "Bash", "tool_input": {"command": "rm -rf /"}}, "tu-pol", {"signal": None}
-    )
-    assert out["hookSpecificOutput"]["permissionDecision"] == "deny", out
-    assert "security policy" in out["hookSpecificOutput"]["permissionDecisionReason"].lower()
+    verdict = await s._on_tool_use("Bash", {"command": "rm -rf /"})
+    assert verdict.allow is False
+    assert "security policy" in verdict.reason.lower()
     assert s.status != "waiting_approval", "catastrophic command must not request operator approval"
     assert s.events.empty(), "catastrophic command must not emit approval_needed"
 

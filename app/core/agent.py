@@ -4,8 +4,7 @@ import logging
 import datetime
 from pathlib import Path
 from typing import Dict, Any, Optional
-from claude_agent_sdk import query, ClaudeAgentOptions
-from claude_agent_sdk.types import AssistantMessage, ResultMessage, UserMessage, RateLimitEvent, HookMatcher
+from app.core.provider import ClaudeSdkProvider, Provider, ToolDecision
 from app.core.scheduler import HiveMindScheduler
 from app.core.security import SecurityPolicy
 
@@ -21,7 +20,6 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 # Bash executes after it returns allow). So the gate lives on the hook, gating
 # the NATIVE Bash/Write/Edit — no tool reimplementation, full capabilities kept.
 # Read-only tools (Read/Grep/Glob/WebSearch/WebFetch) carry no hook → auto-run.
-DANGEROUS_TOOLS = "Bash|Write|Edit"
 ALLOWED_TOOLS = ["Read", "Write", "Edit", "Bash", "Grep", "Glob", "WebSearch", "WebFetch"]
 
 # Seconds the operator has to decide on a dangerous tool call. On expiry the
@@ -35,12 +33,13 @@ class AgentSession:
     asyncio.Queue (the event bus) consumed by the WebSocket gateway. Dangerous
     tool calls surface as `approval_needed` events resolved via approve_tool().
     """
-    def __init__(self, session_id: str, prompt: str, scheduler: HiveMindScheduler, system_prompt: Optional[str] = None, security: Optional[SecurityPolicy] = None):
+    def __init__(self, session_id: str, prompt: str, scheduler: HiveMindScheduler, system_prompt: Optional[str] = None, security: Optional[SecurityPolicy] = None, provider: Optional[Provider] = None):
         self.session_id = session_id
         self.prompt = prompt
         self.scheduler = scheduler
         self.system_prompt = system_prompt
         self.security = security
+        self.provider = provider or ClaudeSdkProvider()
         self.pending_approvals: Dict[str, asyncio.Future] = {}
         self.messages: list = []
         self.events: asyncio.Queue = asyncio.Queue()
@@ -52,15 +51,6 @@ class AgentSession:
     async def _emit(self, event: Dict[str, Any]) -> None:
         await self.events.put(event)
 
-    async def _prompt_stream(self):
-        """Yields the user prompt as a stream-json message (streaming mode)."""
-        yield {
-            "type": "user",
-            "message": {"role": "user", "content": self.prompt},
-            "parent_tool_use_id": None,
-            "session_id": "default",
-        }
-
     async def approve_tool(self, approval_id: str, approve: bool):
         """Resolves a pending tool-execution approval from the dashboard."""
         future = self.pending_approvals.pop(approval_id, None)
@@ -68,8 +58,9 @@ class AgentSession:
             future.set_result(approve)
             logger.info("Session %s tool approval %s: %s", self.session_id, approval_id, approve)
 
-    async def _pre_tool_use_hook(self, hook_input: dict, tool_use_id: Optional[str], context) -> dict:
-        """PreToolUse gate for dangerous tools (Bash/Write/Edit).
+    async def _on_tool_use(self, tool_name: str, tool_input: dict) -> ToolDecision:
+        """OS-policy gate for dangerous tools (Bash/Write/Edit). Returns a verdict
+        the provider translates into the SDK's PreToolUse hook protocol.
 
         Two stages:
         1. POLICY FLOOR (L1/L2) — catastrophic actions hard-deny immediately, never
@@ -80,24 +71,15 @@ class AgentSession:
 
         L4 mints exactly one HMAC receipt per gated call on every outcome (policy-deny,
         operator-allow, operator-deny, timeout-deny). This is the path that actually
-        fires under the z.ai/GLM backend — see the DANGEROUS_TOOLS comment above.
+        fires under the z.ai/GLM backend (see provider.DANGEROUS_TOOLS).
         """
-        tool_name = hook_input.get("tool_name", "?")
-        tool_input = hook_input.get("tool_input", {})
-
         # 1. Policy floor.
         if self.security is not None:
             decision = self.security.evaluate(tool_name, tool_input, self.session_id)
             if decision.hard_deny:
                 self.security.mint_and_append_receipt(self.session_id, tool_name, tool_input, "deny")
                 logger.warning("Session %s policy-denied %s: %s", self.session_id, tool_name, decision.reason)
-                return {
-                    "hookSpecificOutput": {
-                        "hookEventName": "PreToolUse",
-                        "permissionDecision": "deny",
-                        "permissionDecisionReason": f"Blocked by Orbiter security policy: {decision.reason}",
-                    }
-                }
+                return ToolDecision(allow=False, reason=f"Blocked by Orbiter security policy: {decision.reason}")
 
         # 2. Operator approval.
         approval_id = str(uuid.uuid4())
@@ -128,14 +110,8 @@ class AgentSession:
             self.security.mint_and_append_receipt(self.session_id, tool_name, tool_input, "allow" if approved else "deny")
 
         if approved:
-            return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow"}}
-        return {
-            "hookSpecificOutput": {
-                "hookEventName": "PreToolUse",
-                "permissionDecision": "deny",
-                "permissionDecisionReason": "Execution denied by operator via dashboard (or approval timed out).",
-            }
-        }
+            return ToolDecision(allow=True)
+        return ToolDecision(allow=False, reason="Execution denied by operator via dashboard (or approval timed out).")
 
     def save_log(self):
         """Saves a session log to B-sessions/ conforming to session-template.md."""
@@ -194,10 +170,10 @@ Run autonomous agent query: "{self.prompt}"
 
     async def run(self) -> None:
         """
-        Runs the agent loop under scheduler control via the streaming query() API,
-        pushing structured events onto self.events. Emits a terminal `stream_end`
-        when done. The AsyncIterable prompt keeps the SDK in streaming/control-
-        protocol mode, which is what lets the PreToolUse approval hook fire.
+        Runs the agent loop under scheduler control, streaming normalized provider
+        events onto self.events. Emits a terminal `stream_end` when done. The
+        provider keeps the underlying LLM in streaming/control-protocol mode, which
+        is what lets the PreToolUse approval gate fire.
         """
         self.status = "pending_admission"
         await self._emit({"type": "status", "status": self.status})
@@ -207,34 +183,22 @@ Run autonomous agent query: "{self.prompt}"
             self.status = "running"
             await self._emit({"type": "status", "status": self.status})
 
-            options = ClaudeAgentOptions(
-                system_prompt=self.system_prompt,
-                allowed_tools=ALLOWED_TOOLS,
-                hooks={
-                    "PreToolUse": [
-                        HookMatcher(
-                            matcher=DANGEROUS_TOOLS,
-                            hooks=[self._pre_tool_use_hook],
-                            timeout=APPROVAL_TIMEOUT + 10,  # CLI waits slightly longer than our fail-closed deadline
-                        )
-                    ]
-                },
-                setting_sources=[],
-                session_id=self.session_id,
-            )
-
             success = True
             over_budget = False
-            async for message in query(prompt=self._prompt_stream(), options=options):
-                msg_data = self._serialize_message(message)
-                if msg_data:
-                    self.messages.append(msg_data)
-                    await self._emit(msg_data)
+            async for event in self.provider.stream(
+                self.prompt,
+                system_prompt=self.system_prompt,
+                allowed_tools=ALLOWED_TOOLS,
+                session_id=self.session_id,
+                on_tool_use=self._on_tool_use,
+            ):
+                self.messages.append(event)
+                await self._emit(event)
 
-                if isinstance(message, AssistantMessage) and message.usage:
+                if event.get("type") == "message" and event.get("role") == "assistant" and event.get("usage"):
                     # Both display and budget count full throughput (input + cache + output);
                     # see _throughput(). The budget ceiling is tuned for this — scheduler.py.
-                    used = self._throughput(message.usage)
+                    used = self._throughput(event["usage"])
                     self.tokens_consumed += used
                     # Mid-turn budget enforcement: stop the moment a session crosses its ceiling.
                     if not self.scheduler.token_budget.consume(self.session_id, used):
@@ -242,12 +206,12 @@ Run autonomous agent query: "{self.prompt}"
                         over_budget = True
                         break
 
-                if isinstance(message, ResultMessage):
-                    if message.is_error:
+                if event.get("type") == "result":
+                    if event.get("is_error"):
                         success = False
-                        self.error_message = str(message.result)
-                    if message.usage:
-                        self.tokens_consumed = self._throughput(message.usage)
+                        self.error_message = str(event.get("result"))
+                    if event.get("usage"):
+                        self.tokens_consumed = self._throughput(event["usage"])
 
             await self.scheduler.exit_turn(self.session_id, self.start_time, success, actual_tokens=self.tokens_consumed)
             self.status = "failed" if over_budget else "completed"
@@ -267,21 +231,6 @@ Run autonomous agent query: "{self.prompt}"
             self.save_log()
 
     @staticmethod
-    def _safe(obj: Any) -> Any:
-        """Recursively coerce SDK block objects into JSON-serializable structures."""
-        if obj is None or isinstance(obj, (str, int, float, bool)):
-            return obj
-        if isinstance(obj, list):
-            return [AgentSession._safe(x) for x in obj]
-        if isinstance(obj, dict):
-            return {k: AgentSession._safe(v) for k, v in obj.items()}
-        if hasattr(obj, "model_dump"):  # pydantic
-            return obj.model_dump()
-        if hasattr(obj, "__dataclass_fields__"):  # dataclass (ToolResultBlock, etc.)
-            return {k: AgentSession._safe(getattr(obj, k)) for k in obj.__dataclass_fields__}
-        return str(obj)
-
-    @staticmethod
     def _throughput(usage: Any) -> int:
         """Full token throughput: input + cache read/write + output (observability).
 
@@ -298,49 +247,18 @@ Run autonomous agent query: "{self.prompt}"
             + usage.get("output_tokens", 0)
         )
 
-    def _serialize_message(self, message: Any) -> Optional[Dict[str, Any]]:
-        """Serializes Claude SDK Message types to JSON-friendly dicts."""
-        if isinstance(message, UserMessage):
-            # content may be a string or a list of block objects (e.g. ToolResultBlock)
-            return {"type": "message", "role": "user", "content": self._safe(message.content), "uuid": message.uuid}
-        elif isinstance(message, AssistantMessage):
-            content_blocks = []
-            for block in message.content:
-                if hasattr(block, "text"):
-                    content_blocks.append({"type": "text", "text": block.text})
-                elif hasattr(block, "thinking"):
-                    content_blocks.append({"type": "thinking", "thinking": block.thinking})
-                elif hasattr(block, "name") and hasattr(block, "id"):
-                    content_blocks.append({
-                        "type": "tool_use",
-                        "tool_use_id": block.id,
-                        "name": block.name,
-                        "input": getattr(block, "input", {}),
-                    })
-            return {
-                "type": "message",
-                "role": "assistant",
-                "content": content_blocks,
-                "uuid": message.uuid,
-                "usage": message.usage,
-            }
-        elif isinstance(message, ResultMessage):
-            return {"type": "result", "result": message.result, "is_error": message.is_error, "usage": message.usage, "uuid": message.uuid}
-        elif isinstance(message, RateLimitEvent):
-            return {"type": "rate_limit", "rate_limit_type": message.rate_limit_type, "info": getattr(message, "info", None)}
-        return None
-
-
 class AgentSessionManager:
     """Orchestrates all active and historical AgentSession instances."""
-    def __init__(self, scheduler: HiveMindScheduler, security: Optional[SecurityPolicy] = None):
+    def __init__(self, scheduler: HiveMindScheduler, security: Optional[SecurityPolicy] = None, provider: Optional[Provider] = None):
         self.scheduler = scheduler
         self.security = security
+        self.provider = provider
         self.sessions: Dict[str, AgentSession] = {}
 
     def create_session(self, prompt: str, system_prompt: Optional[str] = None) -> AgentSession:
         session_id = str(uuid.uuid4())
-        session = AgentSession(session_id, prompt, self.scheduler, system_prompt, security=self.security)
+        session = AgentSession(session_id, prompt, self.scheduler, system_prompt,
+                               security=self.security, provider=self.provider)
         self.sessions[session_id] = session
         return session
 
