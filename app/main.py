@@ -4,6 +4,7 @@ One process = one HiveMindScheduler + one AgentSessionManager (local single-user
 Dashboard mounts at "/" once the React build exists; until then a placeholder is served.
 """
 import os
+import json
 import asyncio
 import logging
 from pathlib import Path
@@ -43,7 +44,38 @@ security = SecurityPolicy(
     ),
 )
 
-manager = AgentSessionManager(scheduler, security=security)
+def _load_mcp_servers() -> dict[str, dict]:
+    """Parse ORBITER_MCP_SERVERS (JSON: {name: McpServerConfig}).
+
+    External MCP servers are operator-configured tool sources (blueprint §3.2). A
+    malformed value logs an error and yields {} so the gateway still boots — verify
+    what loaded via GET /api/health (which reports names + types, never secrets).
+    """
+    raw = os.environ.get("ORBITER_MCP_SERVERS", "").strip()
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as e:
+        logger.error("ORBITER_MCP_SERVERS is not valid JSON (%s); no external MCP servers loaded", e)
+        return {}
+    if not isinstance(parsed, dict):
+        logger.error("ORBITER_MCP_SERVERS must be a JSON object of {name: spec}; got %s", type(parsed).__name__)
+        return {}
+    # Each value must be a server-spec dict; the SDK validates the full shape at run
+    # time, but a non-dict here would crash /api/health's spec.get("type"). Drop + log.
+    valid = {k: v for k, v in parsed.items() if isinstance(v, dict)}
+    if len(valid) != len(parsed):
+        logger.error("ORBITER_MCP_SERVERS: dropped %d non-object spec(s)", len(parsed) - len(valid))
+    return valid
+
+
+# External MCP servers applied to every session (single-agent + supervisor + workers).
+# ponytail: global, not per-session — local single-user OS, one config. Per-session
+# config when an operator needs different MCP sets per run.
+EXTERNAL_MCP = _load_mcp_servers()
+provider = ClaudeSdkProvider(mcp_servers=EXTERNAL_MCP)
+manager = AgentSessionManager(scheduler, security=security, provider=provider)
 
 # L3 OS sandbox (blueprint §2.2): self-Landlock write-confinement at startup.
 # Fail-open: NoopSandbox when disabled OR if Landlock is unavailable on this host.
@@ -95,7 +127,7 @@ async def create_team(req: CreateTeam):
     the existing /ws/sessions/{id} stream + /approve gate + GET detail drive it
     like any single-agent run — delegation surfaces as `delegate` tool calls.
     """
-    team = Team(scheduler, security=security, worker_provider=ClaudeSdkProvider())
+    team = Team(scheduler, security=security, worker_provider=ClaudeSdkProvider(mcp_servers=EXTERNAL_MCP))
     if req.roles:
         team.hire(*(WorkerRole(name=r.name, system_prompt=r.system_prompt) for r in req.roles))
     else:
@@ -194,6 +226,11 @@ async def health():
             "writable_roots": sandbox_status.writable_roots,
             "reason": sandbox_status.reason,
         },
+        # Names + transport only — never env/headers (may carry secrets).
+        "mcp_servers": [
+            {"name": name, "type": spec.get("type") or "stdio"}
+            for name, spec in EXTERNAL_MCP.items()
+        ],
     }
 
 

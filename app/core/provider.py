@@ -67,10 +67,19 @@ async def _prompt_stream(prompt: str):
 class ClaudeSdkProvider:
     """Provider backed by claude-agent-sdk. Absorbs all SDK coupling from agent.py."""
 
-    def __init__(self, delegate: Optional[Callable[[str, str], Awaitable[str]]] = None):
+    def __init__(
+        self,
+        delegate: Optional[Callable[[str, str], Awaitable[str]]] = None,
+        mcp_servers: Optional[dict[str, dict[str, Any]]] = None,
+    ):
         # When set, the supervisor gains a `delegate` tool (in-process MCP server)
         # that runs a worker via the orchestrator. None for workers/standalone sessions.
         self._delegate = delegate
+        # External operator-configured MCP servers (blueprint §3.2): plain SDK specs
+        # ({type:"stdio",command,args?,env?} | {type:"sse"|"http",url,headers?}). A
+        # concrete-impl concern — the Provider Protocol stays SDK-free; FakeProvider
+        # ignores it. Merged with the in-process `orbiter` server in stream().
+        self._external_mcp = mcp_servers
 
     @staticmethod
     def _verdict_to_hook_output(verdict: ToolDecision) -> dict:
@@ -84,6 +93,26 @@ class ClaudeSdkProvider:
         if not verdict.allow:
             out["hookSpecificOutput"]["permissionDecisionReason"] = verdict.reason
         return out
+
+    @staticmethod
+    def _merge_mcp_servers(
+        external: Optional[dict[str, dict[str, Any]]],
+        delegate_server: Any,
+    ) -> Optional[dict[str, Any]]:
+        """Merge external MCP server specs with the in-process orbiter delegate server.
+
+        External specs are plain dicts the SDK accepts as McpServerConfig
+        (stdio/sse/http). A supervisor's `orbiter` server is added under its reserved
+        key and wins on collision. Returns None when nothing is registered, so the
+        option is omitted entirely (no empty mcp_servers dict reaches the SDK).
+        """
+        # ponytail: external MCP tools are operator-configured → trusted, like the
+        # delegate tool; they bypass the PreToolUse gate (which matches only
+        # Bash|Write|Edit). Gate them too if an untrusted server is ever admitted.
+        out: dict[str, Any] = dict(external or {})
+        if delegate_server is not None:
+            out["orbiter"] = delegate_server
+        return out or None
 
     async def stream(
         self,
@@ -120,9 +149,11 @@ class ClaudeSdkProvider:
             session_id=session_id,
         )
 
-        # Supervisor wiring: expose delegate(role, task) as an in-process MCP tool.
+        # MCP servers (blueprint §3.2 host/client): external operator-configured
+        # servers, plus — for a supervisor — the in-process `orbiter` delegate server.
         # The SDK's MCP client routes the supervisor's delegate call here, awaits the
         # worker (orchestrator.Team.delegate), and feeds the result back into the loop.
+        orbiter_server = None
         if self._delegate is not None:
             async def _delegate(args: dict[str, Any]) -> dict[str, Any]:
                 result = await self._delegate(args.get("role", ""), args.get("task", ""))
@@ -133,9 +164,11 @@ class ClaudeSdkProvider:
                 "Delegate a subtask to a specialist worker role; returns the worker's result text.",
                 {"role": str, "task": str},
             )(_delegate)
-            options_kwargs["mcp_servers"] = {
-                "orbiter": create_sdk_mcp_server(name="orbiter", tools=[delegate_tool])
-            }
+            orbiter_server = create_sdk_mcp_server(name="orbiter", tools=[delegate_tool])
+
+        merged = self._merge_mcp_servers(self._external_mcp, orbiter_server)
+        if merged is not None:
+            options_kwargs["mcp_servers"] = merged
 
         options = ClaudeAgentOptions(**options_kwargs)
 
