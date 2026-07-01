@@ -205,12 +205,12 @@ Run autonomous agent query: "{self.prompt}"
                     await self._emit(msg_data)
 
                 if isinstance(message, AssistantMessage) and message.usage:
-                    # Budget bounds billable input+output; tokens_consumed (display)
-                    # counts full throughput incl. cache — they intentionally differ; see _throughput().
-                    billable = message.usage.get("input_tokens", 0) + message.usage.get("output_tokens", 0)
-                    self.tokens_consumed += self._throughput(message.usage)
+                    # Both display and budget count full throughput (input + cache + output);
+                    # see _throughput(). The budget ceiling is tuned for this — scheduler.py.
+                    used = self._throughput(message.usage)
+                    self.tokens_consumed += used
                     # Mid-turn budget enforcement: stop the moment a session crosses its ceiling.
-                    if not self.scheduler.token_budget.consume(self.session_id, billable):
+                    if not self.scheduler.token_budget.consume(self.session_id, used):
                         self.error_message = f"Token budget exceeded ({self.scheduler.token_budget.default_ceiling})."
                         over_budget = True
                         break

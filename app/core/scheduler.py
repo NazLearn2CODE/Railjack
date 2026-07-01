@@ -13,9 +13,13 @@ logger = logging.getLogger("orbiter.scheduler")
 
 class TokenBudgetManager:
     """
-    Tracks and limits cumulative token usage (input + output) per agent session.
+    Tracks and limits cumulative token throughput (input + cache + output) per
+    agent session. The default ceiling is tuned for full-throughput counting: a
+    cached turn flows ~18k (system prompt + tool defs), so 200k allows ~10 working
+    turns before a session is flagged over-budget. Raise/lower via the constructor
+    for tighter or looser sessions.
     """
-    def __init__(self, default_ceiling: int = 50000):
+    def __init__(self, default_ceiling: int = 200000):
         self.default_ceiling = default_ceiling
         self.usage: Dict[str, int] = {}
 
@@ -217,7 +221,7 @@ class HiveMindScheduler:
     """
     Combines the five HiveMind scheduler primitives.
     """
-    def __init__(self, max_rpm: int = 50, max_tpm: int = 40000, default_ceiling: int = 50000):
+    def __init__(self, max_rpm: int = 50, max_tpm: int = 40000, default_ceiling: int = 200000):
         self.aimd = AIMDController()
         self.admission = AdmissionControl(self.aimd)
         self.rate_tracker = RateLimitTracker(max_rpm=max_rpm, max_tpm=max_tpm)

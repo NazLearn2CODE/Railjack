@@ -31,8 +31,8 @@ web dashboard on `localhost:<port>`. Built from the blueprint in
 
 **Current status:**
 - `feat/gateway-dashboard` **merged to `main`** (fast-forward). FastAPI gateway (REST + WS), React 19 dashboard, HiveMind scheduler primitives (AIMD / circuit-breaker / rate-limit / admission / token-budget), streaming agent loop, and **per-call tool approval via a PreToolUse hook** (Bash/Write/Edit gated, read-only auto-run) — see `[[2026-07-01-tool-approval-pretooluse-hook]]`.
-- **Browser smoke-tested end-to-end** (`/tmp/orbiter-smoke`): composer → WS token stream → completion, and approval card → APPROVE → gated Bash executes. The approval gate is **browser-verified to fire under z.ai**, upgrading ADR #8 from a code-spike claim to a confirmed UI loop. Token telemetry now counts full throughput (input + cache + output), not just input+output.
-- Next up (optional): real-backend verification on the native Anthropic API; the L1–L4 sandboxing layers (still TODO per the ADR); and a decision on whether the token *budget* should also count cache tokens (currently bounds input+output only).
+- **Browser smoke-tested end-to-end** (`/tmp/orbiter-smoke`): composer → WS token stream → completion, and approval card → APPROVE → gated Bash executes. The approval gate is **browser-verified to fire under z.ai**, upgrading ADR #8 from a code-spike claim to a confirmed UI loop. Token telemetry **and** the per-session budget both count full throughput (input + cache + output); budget ceiling raised to 200k.
+- Next up (optional): real-backend verification on the native Anthropic API; the L1–L4 sandboxing layers (still TODO per the ADR).
 - Last deployed: n/a (dev only, `localhost:8000`).
 
 ## Build Rules
