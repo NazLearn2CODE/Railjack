@@ -189,7 +189,10 @@ export const useStore = create<State>((set, get) => ({
       conn: ws.readyState,
       sessions: s.sessions.some((x) => x.session_id === id) ? s.sessions : [meta, ...s.sessions],
       transcripts: { ...s.transcripts, [id]: t },
-      log: [{ id: nextLogId(), label: `DISPATCH ▸ ${id.slice(0, 8)}`, tone: "signal" }, ...s.log].slice(0, 60),
+      log: [
+        { id: nextLogId(), label: `DISPATCH ▸ ${id.slice(0, 8)}`, tone: "signal" } satisfies LogEntry,
+        ...s.log,
+      ].slice(0, 60),
     }));
   },
 

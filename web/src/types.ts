@@ -58,6 +58,7 @@ export interface StreamEvent {
   // approval_needed
   approval_id?: string;
   tool?: string;
+  input?: unknown;
 }
 
 // Normalized render rows derived from the stream.
