@@ -31,7 +31,6 @@ logger = logging.getLogger("orbiter.security")
 @dataclass(frozen=True)
 class PolicyDecision:
     """Outcome of SecurityPolicy.evaluate. hard_deny=True ⇒ skip operator approval."""
-    allow: bool
     reason: str = ""
     hard_deny: bool = False
 
@@ -156,19 +155,19 @@ class SecurityPolicy:
             command = (tool_input or {}).get("command", "")
             dangerous, desc = self.shell.is_dangerous(command)
             if dangerous:
-                return PolicyDecision(allow=False, reason=f"blocked shell command ({desc})", hard_deny=True)
-            return PolicyDecision(allow=True)  # benign Bash -> operator approval
+                return PolicyDecision(reason=f"blocked shell command ({desc})", hard_deny=True)
+            return PolicyDecision()  # benign Bash -> operator approval
 
         # L1 — Write/Edit paths must resolve inside a workspace root.
         if tool_name in ("Write", "Edit"):
             path = (tool_input or {}).get("file_path", "")
             ok, reason = self.boundary.check(path)
             if not ok:
-                return PolicyDecision(allow=False, reason=reason, hard_deny=True)
-            return PolicyDecision(allow=True)  # in-bounds -> operator approval
+                return PolicyDecision(reason=reason, hard_deny=True)
+            return PolicyDecision()  # in-bounds -> operator approval
 
         # Read-only / unknown tools: no policy floor (would need matcher widen for L4).
-        return PolicyDecision(allow=True)
+        return PolicyDecision()
 
     def mint_and_append_receipt(
         self, session_id: str, tool_name: str, tool_input: Any, decision: str

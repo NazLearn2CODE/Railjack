@@ -19,11 +19,6 @@ logger = logging.getLogger("orbiter.provider")
 # ponytail: not parameterized; must match the agent's gated set (Bash/Write/Edit).
 DANGEROUS_TOOLS = "Bash|Write|Edit"
 
-# The CLI hook waits marginally longer than the agent's operator-timeout
-# (agent.APPROVAL_TIMEOUT + HOOK_TIMEOUT_MARGIN) so our fail-closed deadline
-# fires before the hook itself times out.
-HOOK_TIMEOUT_MARGIN = 10.0
-
 
 class ToolDecision(NamedTuple):
     """Verdict the agent returns from on_tool_use: allow the tool call, or deny (+reason)."""
@@ -112,7 +107,7 @@ class ClaudeSdkProvider:
                     HookMatcher(
                         matcher=DANGEROUS_TOOLS,
                         hooks=[_hook],
-                        timeout=APPROVAL_TIMEOUT + HOOK_TIMEOUT_MARGIN,
+                        timeout=APPROVAL_TIMEOUT + 10,  # CLI waits slightly longer than our fail-closed deadline
                     )
                 ]
             },

@@ -181,33 +181,33 @@ def _policy(roots: list[Path]) -> SecurityPolicy:
 def test_policy_bash_catastrophic_hard_denies():
     p = _policy([Path(tempfile.mkdtemp())])
     d = p.evaluate("Bash", {"command": "rm -rf /"}, "s")
-    assert d.hard_deny and not d.allow
+    assert d.hard_deny
 
 
 def test_policy_bash_benign_not_hard_deny():
     p = _policy([Path(tempfile.mkdtemp())])
     d = p.evaluate("Bash", {"command": "ls -la"}, "s")
-    assert not d.hard_deny and d.allow
+    assert not d.hard_deny
 
 
 def test_policy_write_outside_root_hard_denies():
     p = _policy([Path(tempfile.mkdtemp())])
     d = p.evaluate("Write", {"file_path": "/etc/passwd"}, "s")
-    assert d.hard_deny and not d.allow
+    assert d.hard_deny
 
 
 def test_policy_write_inside_root_not_hard_deny():
     root = Path(tempfile.mkdtemp())
     p = _policy([root])
     d = p.evaluate("Write", {"file_path": str(root / "f.txt")}, "s")
-    assert not d.hard_deny and d.allow
+    assert not d.hard_deny
 
 
 def test_policy_readonly_tool_allowed():
     # No hook covers read-only tools today; evaluate must still return allow.
     p = _policy([Path(tempfile.mkdtemp())])
     d = p.evaluate("Read", {"file_path": "/etc/passwd"}, "s")
-    assert d.allow and not d.hard_deny
+    assert not d.hard_deny
 
 
 if __name__ == "__main__":
