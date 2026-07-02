@@ -69,12 +69,13 @@ class ClaudeSdkProvider:
 
     def __init__(
         self,
-        delegate: Optional[Callable[[str, str], Awaitable[str]]] = None,
+        delegate_many: Optional[Callable[[list[dict[str, Any]]], Awaitable[str]]] = None,
         mcp_servers: Optional[dict[str, dict[str, Any]]] = None,
     ):
-        # When set, the supervisor gains a `delegate` tool (in-process MCP server)
-        # that runs a worker via the orchestrator. None for workers/standalone sessions.
-        self._delegate = delegate
+        # When set, the supervisor gains a `delegate_many` tool (in-process MCP
+        # server) that fans out workers via the orchestrator. None for
+        # workers/standalone sessions.
+        self._delegate_many = delegate_many
         # External operator-configured MCP servers (blueprint §3.2): plain SDK specs
         # ({type:"stdio",command,args?,env?} | {type:"sse"|"http",url,headers?}). A
         # concrete-impl concern — the Provider Protocol stays SDK-free; FakeProvider
@@ -150,21 +151,24 @@ class ClaudeSdkProvider:
         )
 
         # MCP servers (blueprint §3.2 host/client): external operator-configured
-        # servers, plus — for a supervisor — the in-process `orbiter` delegate server.
-        # The SDK's MCP client routes the supervisor's delegate call here, awaits the
-        # worker (orchestrator.Team.delegate), and feeds the result back into the loop.
+        # servers, plus — for a supervisor — the in-process `orbiter` delegate_many
+        # server. The SDK's MCP client routes the supervisor's delegate_many call
+        # here, awaits the fan-out (orchestrator.Team.delegate_many), and feeds the
+        # per-role results back into the loop.
         orbiter_server = None
-        if self._delegate is not None:
-            async def _delegate(args: dict[str, Any]) -> dict[str, Any]:
-                result = await self._delegate(args.get("role", ""), args.get("task", ""))
+        if self._delegate_many is not None:
+            async def _delegate_many(args: dict[str, Any]) -> dict[str, Any]:
+                result = await self._delegate_many(args.get("delegations", []))
                 return {"content": [{"type": "text", "text": result}]}
 
-            delegate_tool = tool(
-                "delegate",
-                "Delegate a subtask to a specialist worker role; returns the worker's result text.",
-                {"role": str, "task": str},
-            )(_delegate)
-            orbiter_server = create_sdk_mcp_server(name="orbiter", tools=[delegate_tool])
+            delegate_many_tool = tool(
+                "delegate_many",
+                "Fan out subtasks to specialist workers concurrently. `delegations` is "
+                "a list of {role, task}; each runs a worker in parallel. Returns "
+                "per-role results under role headings.",
+                {"delegations": [{"role": str, "task": str}]},
+            )(_delegate_many)
+            orbiter_server = create_sdk_mcp_server(name="orbiter", tools=[delegate_many_tool])
 
         merged = self._merge_mcp_servers(self._external_mcp, orbiter_server)
         if merged is not None:

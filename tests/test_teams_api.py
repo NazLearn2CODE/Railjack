@@ -4,7 +4,7 @@ The endpoint builds a Team, hires roles (default or supplied), spawns the
 supervisor, and registers it — so the shared /ws/sessions/{id} + /approve +
 GET detail surface drives the supervisor like any single-agent run. Construction
 is network-free, so this is fully SDK-free testable here; the supervisor *LLM
-choosing* to call delegate remains the real-LLM integration boundary (see ADR
+choosing* to call delegate_many remains the real-LLM integration boundary (see ADR
 2026-07-02-centralized-2dot-topology, test_orchestrator.py).
 
 Run: .venv/bin/python -m pytest tests/test_teams_api.py -q
@@ -44,12 +44,12 @@ def test_create_team_custom_roles_override_default(client):
     assert r.json()["roles"] == ["qa"]
 
 
-def test_supervisor_carries_delegate_tool(client):
-    """Construction-time guarantee: the registered supervisor has the delegate tool."""
+def test_supervisor_carries_delegate_many_tool(client):
+    """Construction-time guarantee: the registered supervisor has the delegate_many tool."""
     data = client.post("/api/teams", json={"prompt": "x"}).json()
     sup = main.manager.get_session(data["session_id"])
     assert sup is not None
-    assert "delegate" in sup.allowed_tools
+    assert "delegate_many" in sup.allowed_tools
     assert sup.kind == "supervisor"
 
 
@@ -59,13 +59,13 @@ def test_default_supervisor_prompt_names_every_role():
     roles = [WorkerRole(name="alpha", system_prompt="a"), WorkerRole(name="beta", system_prompt="b")]
     prompt = default_supervisor_prompt(roles)
     assert "alpha" in prompt and "beta" in prompt
-    assert "delegate" in prompt
+    assert "delegate_many" in prompt
 
 
 if __name__ == "__main__":
     c = TestClient(main.app)
     test_create_team_default_roles_returns_supervisor(c)
     test_create_team_custom_roles_override_default(c)
-    test_supervisor_carries_delegate_tool(c)
+    test_supervisor_carries_delegate_many_tool(c)
     test_default_supervisor_prompt_names_every_role()
     print("teams-api self-checks: OK")
