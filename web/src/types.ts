@@ -83,8 +83,9 @@ export interface StreamEvent {
   approval_id?: string;
   tool?: string;
   input?: unknown;
-  // worker_event (nested worker activity forwarded by Team.delegate)
+  // worker_event (nested worker activity forwarded by Team.delegate_many)
   worker_id?: string;
+  fanout_id?: string;
   event?: StreamEvent;
 }
 
@@ -102,6 +103,12 @@ export type Row =
       rows: Row[];
       status: SessionStatus;
       approval?: { approvalId: string; tool: string; input: unknown };
+    }
+  | {
+      // A delegate_many fan-out: N concurrent worker lanes grouped under one call.
+      kind: "fanout";
+      fanoutId: string;
+      lanes: Extract<Row, { kind: "worker_lane" }>[];
     };
 
 export interface Transcript {

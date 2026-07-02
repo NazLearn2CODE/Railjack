@@ -94,15 +94,25 @@ function applyEvent(t: Transcript, ev: StreamEvent): Transcript {
         next.pendingTools[ev.approval_id] = { name: ev.tool, input: ev.input };
       break;
     case "worker_event": {
-      // A worker's inner activity, forwarded by Team.delegate. Route it into an
-      // inline lane keyed by worker_id, appended at the point delegation occurred.
+      // A worker's inner activity, forwarded by Team.delegate_many. Nest it into a
+      // lane keyed by worker_id, inside the fanout container keyed by fanout_id —
+      // the grouped block appears between the delegate_many tool_use and its result.
       type Lane = Extract<Row, { kind: "worker_lane" }>;
+      type Fanout = Extract<Row, { kind: "fanout" }>;
+      const fid = ev.fanout_id!;
       const wid = ev.worker_id!;
-      const idx = next.rows.findIndex((r) => r.kind === "worker_lane" && r.workerId === wid);
-      const prev = idx >= 0 ? (next.rows[idx] as Lane) : undefined;
-      const lane: Lane = prev
-        ? { ...prev, rows: [...prev.rows] }
-        : { kind: "worker_lane", workerId: wid, role: ev.role ?? "?", rows: [], status: "running" };
+      // find-or-create the fanout container (top-level row)
+      const fIdx = next.rows.findIndex((r) => r.kind === "fanout" && r.fanoutId === fid);
+      const fanout: Fanout =
+        fIdx >= 0
+          ? { ...(next.rows[fIdx] as Fanout), lanes: [...(next.rows[fIdx] as Fanout).lanes] }
+          : { kind: "fanout", fanoutId: fid, lanes: [] };
+      // find-or-create the lane within the fanout
+      const lIdx = fanout.lanes.findIndex((l) => l.workerId === wid);
+      const lane: Lane =
+        lIdx >= 0
+          ? { ...fanout.lanes[lIdx], rows: [...fanout.lanes[lIdx].rows] }
+          : { kind: "worker_lane", workerId: wid, role: ev.role ?? "?", rows: [], status: "running" };
       const inner = ev.event!;
       if (inner.type === "status" && inner.status) lane.status = inner.status;
       else if (inner.type === "message" && inner.role !== "user")
@@ -115,8 +125,10 @@ function applyEvent(t: Transcript, ev: StreamEvent): Transcript {
         });
       else if (inner.type === "approval_needed" && inner.approval_id && inner.tool)
         lane.approval = { approvalId: inner.approval_id, tool: inner.tool, input: inner.input };
-      if (idx >= 0) next.rows[idx] = lane;
-      else next.rows.push(lane);
+      if (lIdx >= 0) fanout.lanes[lIdx] = lane;
+      else fanout.lanes.push(lane);
+      if (fIdx >= 0) next.rows[fIdx] = fanout;
+      else next.rows.push(fanout);
       break;
     }
     default:
@@ -278,11 +290,13 @@ export const useStore = create<State>((set, get) => ({
       if (!id) return {};
       const t = s.transcripts[id];
       if (!t) return {};
-      const rows = t.rows.map((r) =>
-        r.kind === "worker_lane" && r.approval?.approvalId === approvalId
-          ? { ...r, approval: undefined }
-          : r,
-      );
+      const rows = t.rows.map((r) => {
+        if (r.kind !== "fanout") return r;
+        const lanes = r.lanes.map((l) =>
+          l.approval?.approvalId === approvalId ? { ...l, approval: undefined } : l,
+        );
+        return { ...r, lanes };
+      });
       return { transcripts: { ...s.transcripts, [id]: { ...t, rows } } };
     });
   },

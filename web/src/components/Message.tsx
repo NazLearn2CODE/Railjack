@@ -82,6 +82,36 @@ export default function Message({ row }: { row: Row }) {
         </div>
       );
 
+    case "fanout": {
+      // A delegate_many fan-out: N concurrent worker lanes grouped under one call.
+      // Live/done derive from lane statuses (not stored). Each lane reuses the
+      // worker_lane renderer below (header + inner rows + ApprovalCard).
+      const live = row.lanes.filter(
+        (l) =>
+          l.status === "running" ||
+          l.status === "pending_admission" ||
+          l.status === "waiting_approval",
+      ).length;
+      const done = row.lanes.length - live;
+      return (
+        <div className="row-in space-y-2 border border-edge bg-void/60 px-3 py-2.5">
+          <div className="flex items-center justify-between border-b border-edge-soft pb-1.5">
+            <span className="label">
+              <span className="text-signal">▾ FAN-OUT</span> · {row.lanes.length} worker
+              {row.lanes.length === 1 ? "" : "s"}
+            </span>
+            <span className="label text-faint">
+              {live} live · {done} done
+            </span>
+          </div>
+          {row.lanes.length === 0 && <div className="label text-faint">WORKERS SPINNING UP…</div>}
+          {row.lanes.map((l, i) => (
+            <Message key={i} row={l} />
+          ))}
+        </div>
+      );
+    }
+
     case "worker_lane": {
       // A delegated worker's run, inlined where the supervisor called delegate.
       const meta = statusMeta(row.status);
