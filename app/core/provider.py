@@ -6,6 +6,7 @@ the trait and enables SDK-free agent-loop tests. See ADR 2026-07-01-provider-pro
 """
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any, AsyncIterator, Awaitable, Callable, NamedTuple, Optional, Protocol
 
@@ -18,6 +19,13 @@ logger = logging.getLogger("orbiter.provider")
 # because it is the provider's job to register the hook.
 # ponytail: not parameterized; must match the agent's gated set (Bash/Write/Edit).
 DANGEROUS_TOOLS = "Bash|Write|Edit"
+
+# In-process MCP server exposing the supervisor's delegate tool. The CLI surfaces
+# such tools as mcp__<server>__<tool>; allowed_tools must carry that namespaced
+# form or the CLI denies the call as unpermitted (bare "delegate_many" won't
+# match). One constant for the server name → no two-place rename footgun.
+_DELEGATE_SERVER = "orbiter"
+_DELEGATE_MANY_TOOL = f"mcp__{_DELEGATE_SERVER}__delegate_many"
 
 
 class ToolDecision(NamedTuple):
@@ -158,7 +166,16 @@ class ClaudeSdkProvider:
         orbiter_server = None
         if self._delegate_many is not None:
             async def _delegate_many(args: dict[str, Any]) -> dict[str, Any]:
-                result = await self._delegate_many(args.get("delegations", []))
+                delegations = args.get("delegations", [])
+                # LLM-facing trust boundary: the schema is an array, but the model
+                # occasionally stringifies it (observed under z.ai/GLM). Coerce so a
+                # valid JSON string still fans out; a malformed one becomes empty.
+                if isinstance(delegations, str):
+                    try:
+                        delegations = json.loads(delegations)
+                    except json.JSONDecodeError:
+                        delegations = []
+                result = await self._delegate_many(delegations)
                 return {"content": [{"type": "text", "text": result}]}
 
             delegate_many_tool = tool(
@@ -168,11 +185,15 @@ class ClaudeSdkProvider:
                 "per-role results under role headings.",
                 {"delegations": [{"role": str, "task": str}]},
             )(_delegate_many)
-            orbiter_server = create_sdk_mcp_server(name="orbiter", tools=[delegate_many_tool])
+            orbiter_server = create_sdk_mcp_server(name=_DELEGATE_SERVER, tools=[delegate_many_tool])
 
         merged = self._merge_mcp_servers(self._external_mcp, orbiter_server)
         if merged is not None:
             options_kwargs["mcp_servers"] = merged
+        # The CLI denies an in-process MCP tool unless its namespaced name is in
+        # allowed_tools — bare "delegate_many" won't match mcp__orbiter__delegate_many.
+        if orbiter_server is not None and _DELEGATE_MANY_TOOL not in options_kwargs["allowed_tools"]:
+            options_kwargs["allowed_tools"] = [*options_kwargs["allowed_tools"], _DELEGATE_MANY_TOOL]
 
         options = ClaudeAgentOptions(**options_kwargs)
 

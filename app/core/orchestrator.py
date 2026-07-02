@@ -131,8 +131,11 @@ class Team:
             available = ", ".join(sorted(self.roles)) or "(none hired)"
             return f"Unknown role '{role}'. Available: {available}."
 
+        # The CLI requires a valid UUID for --session-id (it rejects prefixed ids at
+        # init: "Error: Invalid session ID. Must be a valid UUID."). The role is
+        # carried by the worker_event frame + AgentSession.kind, not the id.
         worker = AgentSession(
-            session_id=f"worker-{role}-{uuid.uuid4().hex[:8]}",
+            session_id=str(uuid.uuid4()),
             prompt=task,
             scheduler=self.scheduler,
             system_prompt=r.system_prompt,
@@ -214,7 +217,7 @@ class Team:
         if "delegate_many" not in tools:
             tools.append("delegate_many")
         sup = AgentSession(
-            session_id=f"supervisor-{uuid.uuid4().hex[:8]}",
+            session_id=str(uuid.uuid4()),  # must be a valid UUID (CLI rejects prefixed ids)
             prompt=prompt,
             scheduler=self.scheduler,
             system_prompt=system_prompt,

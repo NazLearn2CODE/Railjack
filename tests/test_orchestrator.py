@@ -123,7 +123,9 @@ def test_supervisor_session_has_delegate_many_tool():
     team = Team(HiveMindScheduler(), worker_provider=FakeProvider([]))
     sup = team.supervisor("plan the work", system_prompt="you delegate")
     assert "delegate_many" in sup.allowed_tools
-    assert sup.session_id.startswith("supervisor-")
+    # session_id must be a valid UUID (36 chars, 4 hyphens): the CLI rejects a
+    # prefixed id like 'supervisor-…' at init. See ADR 2026-07-02-delegate-many-verified.
+    assert len(sup.session_id) == 36 and sup.session_id.count("-") == 4
 
 
 def test_delegate_many_forwards_worker_events_with_fanout_id():
@@ -146,7 +148,7 @@ def test_delegate_many_forwards_worker_events_with_fanout_id():
         we = [e for e in drained if e.get("type") == "worker_event"]
         assert we, "expected worker events forwarded to the supervisor bus"
         # Every forwarded frame is tagged with role + worker id + a shared fanout id.
-        assert all(e["role"] == "coder" and e["worker_id"].startswith("worker-coder-") for e in we)
+        assert all(e["role"] == "coder" and len(e["worker_id"]) == 36 and e["worker_id"].count("-") == 4 for e in we)
         ids = {e["fanout_id"] for e in we}
         assert len(ids) == 1 and ids.pop().startswith("fanout-")
         inner_types = {e["event"]["type"] for e in we}

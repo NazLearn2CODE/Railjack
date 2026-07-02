@@ -28,7 +28,7 @@ def test_create_team_default_roles_returns_supervisor(client):
     assert r.status_code == 200
     data = r.json()
     assert data["kind"] == "supervisor"
-    assert data["session_id"].startswith("supervisor-")
+    assert len(data["session_id"]) == 36 and data["session_id"].count("-") == 4  # valid UUID (CLI rejects prefixed ids)
     assert data["roles"] == [r.name for r in DEFAULT_ROLES]  # researcher + coder
     # Registered → reachable via the shared session surface, kind preserved.
     g = client.get(f"/api/sessions/{data['session_id']}").json()
