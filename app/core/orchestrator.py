@@ -99,7 +99,6 @@ class Team:
         security: Optional[SecurityPolicy] = None,
         worker_provider: Optional[Provider] = None,
         register: Optional[Callable[[AgentSession], None]] = None,
-        team_budget_ceiling: Optional[int] = None,
     ):
         self.scheduler = scheduler
         self.security = security
@@ -118,7 +117,6 @@ class Team:
         # worker an independent ceiling. The ceiling is set on the scheduler when
         # the pool is established (supervisor()); see ADR 2026-07-02-team-budget-pool.
         self.budget_key = f"team-{uuid.uuid4().hex[:8]}"
-        self.team_budget_ceiling = team_budget_ceiling
 
     def hire(self, *roles: WorkerRole) -> "Team":
         for role in roles:
@@ -228,11 +226,12 @@ class Team:
         if "delegate_many" not in tools:
             tools.append("delegate_many")
         # Establish the team's shared token-budget pool: supervisor + every worker
-        # bill against one key, bounding the whole fan-out. Default scales with
-        # hired breadth (supervisor + N roles); team_budget_ceiling overrides it.
+        # bill against one key, bounding the whole fan-out. Ceiling scales with
+        # hired breadth (supervisor + N roles); override via the scheduler's public
+        # set_ceiling(self.budget_key, n) if a run needs a different cap.
         # ponytail: breadth proxy is hired roles, not fan-out cardinality — a role
         # delegated twice reuses its slice; revisit if real fan-outs overshoot.
-        ceiling = self.team_budget_ceiling or self.scheduler.token_budget.default_ceiling * (1 + len(self.roles))
+        ceiling = self.scheduler.token_budget.default_ceiling * (1 + len(self.roles))
         self.scheduler.token_budget.set_ceiling(self.budget_key, ceiling)
         sup = AgentSession(
             session_id=str(uuid.uuid4()),  # must be a valid UUID (CLI rejects prefixed ids)

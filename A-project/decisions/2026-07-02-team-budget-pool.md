@@ -49,18 +49,21 @@ still fires. The lazy one.
   pool or default — not a stale 200k).
 - **`Team`** (`app/core/orchestrator.py`) — mints `self.budget_key =
   "team-<hex8>"` at construction. `supervisor()` **establishes the pool**:
-  `team_budget_ceiling or default_ceiling * (1 + len(roles))`, then
+  `default_ceiling * (1 + len(roles))`, then
   `set_ceiling(self.budget_key, ceiling)`, and stamps `budget_key` on the
   supervisor. `_run_worker` stamps the same `budget_key` on every worker. So the
   whole fan-out — supervisor + all its workers, across every `delegate_many`
   call in the session — bills against one team-sized pool.
 
 **Ceiling sizing:** default scales with hired breadth (supervisor + N roles): a
-default 2-role team gets 600k. `team_budget_ceiling` overrides it for tests /
-tight pools. `# ponytail:` breadth is proxied by *hired roles*, not fan-out
-cardinality — a role delegated twice reuses its slice; revisit if real fan-outs
-overshoot. No env knob added (YAGNI; add `ORBITER_TEAM_BUDGET` when a run needs
-to override it).
+default 2-role team gets 600k. A run needing a different cap overrides it via the
+scheduler's public `set_ceiling(team.budget_key, n)` after `supervisor()` — no
+constructor knob, since production never overrides (a `team_budget_ceiling` param
+was cut in the post-ship audit as unused flexibility; the capability lives on
+through `set_ceiling`). `# ponytail:` breadth is proxied by *hired roles*, not
+fan-out cardinality — a role delegated twice reuses its slice; revisit if real
+fan-outs overshoot. No env knob added (YAGNI; add `ORBITER_TEAM_BUDGET` when a
+run needs to override it).
 
 ## Reversible?
 
@@ -68,9 +71,9 @@ Yes, fully additive. Plain sessions are untouched (`budget_key=None` → keys on
 `session_id`, falls through to `default_ceiling` — identical to before). Revert
 drops: the `ceilings` map + `set_ceiling`/`effective_ceiling` + the renamed
 params on `TokenBudgetManager`; the `budget_key` field + the one resolved local
-in `run()` from `AgentSession`; the `team_budget_ceiling` param, `budget_key`
-field, and the two stamps + `set_ceiling` call from `Team`. With no `budget_key`
-stamped, every session bills independently again exactly as before.
+in `run()` from `AgentSession`; the `budget_key` field and the two stamps +
+`set_ceiling` call from `Team`. With no `budget_key` stamped, every session
+bills independently again exactly as before.
 
 ## Impact
 
@@ -98,8 +101,10 @@ stamped, every session bills independently again exactly as before.
   `default_ceiling`; `effective_ceiling` reports both correctly.
 - `tests/test_orchestrator.py` — `test_team_fan_out_shares_one_budget_pool`:
   two workers each consuming 60 tokens against a 100-token team pool → exactly
-  one goes over budget (combined 120 > 100). Deterministic because `consume` is
-  an atomic sync block: the first caller lands at 60 (under), the second at 120
-  (over). Under independent budgets both would succeed — the red state ruled out.
+  one goes over budget (combined 120 > 100). The pool is tightened to 100 via
+  the public `set_ceiling(team.budget_key, 100)` after `supervisor()`.
+  Deterministic because `consume` is an atomic sync block: the first caller
+  lands at 60 (under), the second at 120 (over). Under independent budgets both
+  would succeed — the red state ruled out.
 - 61 pytest green (+2), ruff clean, `tsc --noEmit` + `npm run build` clean
   (frontend untouched).

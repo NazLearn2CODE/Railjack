@@ -261,10 +261,11 @@ def test_team_fan_out_shares_one_budget_pool():
         team = Team(
             sched,
             worker_provider=FakeProvider([sixty, {"type": "result", "result": "ok", "is_error": False, "usage": {}}]),
-            team_budget_ceiling=100,
         )
         team.hire(WorkerRole(name="coder", system_prompt="x"))
-        team.supervisor("plan the work")  # establishes the shared pool + its 100-token ceiling
+        team.supervisor("plan the work")  # establishes the shared pool (auto-sized ceiling)
+        # Tighten the pool to 100 for this test via the public override API.
+        sched.token_budget.set_ceiling(team.budget_key, 100)
         out = await team.delegate_many([
             {"role": "coder", "task": "a"}, {"role": "coder", "task": "b"},
         ])
