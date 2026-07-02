@@ -50,7 +50,10 @@ export default function Telemetry() {
   const conn = useStore((s) => s.conn);
   const activeId = useStore((s) => s.activeId);
   const t = useStore((s) => (s.activeId ? s.transcripts[s.activeId] : undefined));
+  const health = useStore((s) => s.health);
   const c = connMeta(conn);
+  const sb = health?.sandbox;
+  const mcp = health?.mcp_servers ?? [];
 
   return (
     <aside className="reveal reveal-4 m-2 ml-1 flex min-h-0 flex-col gap-2.5 overflow-y-auto p-1">
@@ -78,6 +81,29 @@ export default function Telemetry() {
             ))
           )}
         </div>
+      </Panel>
+
+      <Panel idx="04" title="HOST">
+        <Readout
+          label="SANDBOX"
+          value={sb ? (sb.active ? sb.mechanism.toUpperCase() : "FAIL-OPEN") : "—"}
+          muted={!sb?.active}
+        />
+        <Readout
+          label="MCP"
+          value={mcp.length ? `${mcp.length} SERVER${mcp.length > 1 ? "S" : ""}` : "NONE LOADED"}
+          muted={!mcp.length}
+        />
+        {mcp.map((s) => (
+          <div
+            key={s.name}
+            className="mono flex items-center gap-2 border-b border-edge-soft py-1 text-[10px] last:border-0"
+          >
+            <span className="text-signal">▸</span>
+            <span className="truncate text-phosphor-dim">{s.name}</span>
+            <span className="ml-auto uppercase text-faint">{s.type}</span>
+          </div>
+        ))}
       </Panel>
     </aside>
   );

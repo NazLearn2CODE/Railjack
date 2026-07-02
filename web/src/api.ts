@@ -1,4 +1,10 @@
-import type { SessionMeta } from "./types";
+import type { Health, SessionMeta } from "./types";
+
+export async function getHealth(): Promise<Health> {
+  const r = await fetch("/api/health");
+  if (!r.ok) throw new Error(`getHealth ${r.status}`);
+  return r.json();
+}
 
 export async function createSession(prompt: string, systemPrompt?: string): Promise<SessionMeta> {
   const r = await fetch("/api/sessions", {

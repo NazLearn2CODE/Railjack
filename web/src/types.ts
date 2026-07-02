@@ -16,6 +16,24 @@ export interface SessionMeta {
   error: string | null;
 }
 
+// GET /api/health — OS-host posture. Names + transport only; never secrets.
+export interface SandboxStatus {
+  active: boolean;
+  mechanism: string;
+  abi: string | null;
+  writable_roots: string[];
+  reason: string | null;
+}
+export interface McpServer {
+  name: string;
+  type: string;
+}
+export interface Health {
+  status: string;
+  sandbox: SandboxStatus;
+  mcp_servers: McpServer[];
+}
+
 export interface Usage {
   input_tokens?: number;
   cache_read_input_tokens?: number;

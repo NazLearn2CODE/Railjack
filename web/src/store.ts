@@ -1,6 +1,6 @@
 import { create } from "zustand";
-import { approve as apiApprove, createSession, createTeam, listSessions, openStream } from "./api";
-import type { ContentBlock, Row, SessionMeta, StreamEvent, Transcript, Usage } from "./types";
+import { approve as apiApprove, createSession, createTeam, getHealth, listSessions, openStream } from "./api";
+import type { ContentBlock, Health, Row, SessionMeta, StreamEvent, Transcript, Usage } from "./types";
 
 // Module-level ID for event-log entries — no need to thread a counter through store state.
 let _logSeq = 0;
@@ -27,6 +27,7 @@ interface State {
   log: LogEntry[];
   conn: number; // WebSocket readyState of the active stream
   ws: WebSocket | null;
+  health: Health | null; // OS-host posture from GET /api/health
   composing: string;
   mode: "single" | "team"; // team → dispatch a supervisor (POST /api/teams)
   init: () => Promise<void>;
@@ -164,16 +165,15 @@ export const useStore = create<State>((set, get) => ({
   log: [],
   conn: 0,
   ws: null,
+  health: null,
   composing: "",
   mode: "single",
 
   init: async () => {
-    try {
-      const sessions = await listSessions();
-      set({ sessions });
-    } catch {
-      /* backend not up yet — sidebar will retry on next action */
-    }
+    // Fetch in parallel; a failure in either leaves the other's slice intact.
+    const [s, h] = await Promise.allSettled([listSessions(), getHealth()]);
+    if (s.status === "fulfilled") set({ sessions: s.value });
+    if (h.status === "fulfilled") set({ health: h.value });
   },
 
   setComposing: (v) => set({ composing: v }),
