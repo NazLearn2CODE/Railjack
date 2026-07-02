@@ -15,6 +15,20 @@ def test_consume_enforces_ceiling_mid_turn():
     assert budget.consume("s1", 20) is False  # 110 >= 100 -> over -> caller breaks
 
 
+def test_set_ceiling_overrides_default_for_one_key_only():
+    """A team pool sets a per-key ceiling; other keys still get default_ceiling."""
+    budget = TokenBudgetManager(default_ceiling=100)
+    budget.set_ceiling("team-a", 250)
+    assert budget.effective_ceiling("team-a") == 250
+    assert budget.effective_ceiling("plain-session") == 100  # untouched
+    # The override keys the accounting: 200 < 250 (under team pool) but would be
+    # over the default ceiling — proves the override is honored, not the default.
+    assert budget.consume("team-a", 200) is True
+    assert budget.consume("team-a", 60) is False   # 260 >= 250 -> over
+    # A different key is independently bounded by the default ceiling.
+    assert budget.consume("team-b", 100) is False  # 100 >= 100 -> over (default)
+
+
 async def _shrink_scenario():
     """Limit drops BELOW in-flight count: new acquires must block until a release."""
     aimd = AIMDController(initial_limit=3)

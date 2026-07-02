@@ -33,7 +33,7 @@ class AgentSession:
     asyncio.Queue (the event bus) consumed by the WebSocket gateway. Dangerous
     tool calls surface as `approval_needed` events resolved via approve_tool().
     """
-    def __init__(self, session_id: str, prompt: str, scheduler: HiveMindScheduler, system_prompt: Optional[str] = None, security: Optional[SecurityPolicy] = None, provider: Optional[Provider] = None, allowed_tools: Optional[list[str]] = None, kind: str = "single", event_sink: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None):
+    def __init__(self, session_id: str, prompt: str, scheduler: HiveMindScheduler, system_prompt: Optional[str] = None, security: Optional[SecurityPolicy] = None, provider: Optional[Provider] = None, allowed_tools: Optional[list[str]] = None, kind: str = "single", event_sink: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None, budget_key: Optional[str] = None):
         self.session_id = session_id
         self.prompt = prompt
         self.scheduler = scheduler
@@ -43,6 +43,11 @@ class AgentSession:
         # Per-session tool set. Workers (orchestrator.Team) pass a role-scoped
         # subset excluding "delegate" (leaves); the supervisor passes native + "delegate".
         self.allowed_tools = allowed_tools if allowed_tools is not None else ALLOWED_TOOLS
+        # Budget-accounting key. Defaults to this session's id (independent 200k
+        # ceiling). A Team sets one shared key on its supervisor + every worker so
+        # the whole fan-out bills against one team-sized pool — see ADR
+        # 2026-07-02-team-budget-pool. None everywhere except Team wiring.
+        self.budget_key = budget_key
         # "single" (plain session) | "supervisor" (a Team's supervisor — carries
         # delegate) | "worker" (a Team's delegated leaf). Workers are registered so
         # their approval gates are actionable via the shared /approve surface, but
@@ -224,7 +229,10 @@ Run autonomous agent query: "{self.prompt}"
         await self._emit({"type": "status", "status": self.status})
 
         try:
-            self.start_time = await self.scheduler.enter_turn(self.session_id)
+            # Budget key: the team's shared pool id for a Team's supervisor/workers,
+            # else this session's own id (independent ceiling).
+            budget_key = self.budget_key or self.session_id
+            self.start_time = await self.scheduler.enter_turn(budget_key)
             self.status = "running"
             await self._emit({"type": "status", "status": self.status})
 
@@ -245,9 +253,9 @@ Run autonomous agent query: "{self.prompt}"
                     # see _throughput(). The budget ceiling is tuned for this — scheduler.py.
                     used = self._throughput(event["usage"])
                     self.tokens_consumed += used
-                    # Mid-turn budget enforcement: stop the moment a session crosses its ceiling.
-                    if not self.scheduler.token_budget.consume(self.session_id, used):
-                        self.error_message = f"Token budget exceeded ({self.scheduler.token_budget.default_ceiling})."
+                    # Mid-turn budget enforcement: stop the moment a key crosses its ceiling.
+                    if not self.scheduler.token_budget.consume(budget_key, used):
+                        self.error_message = f"Token budget exceeded ({self.scheduler.token_budget.effective_ceiling(budget_key)})."
                         over_budget = True
                         break
 

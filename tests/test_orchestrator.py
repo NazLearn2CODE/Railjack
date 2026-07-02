@@ -246,6 +246,35 @@ def test_delegate_many_registers_worker_so_approval_is_actionable():
     asyncio.run(go())
 
 
+def test_team_fan_out_shares_one_budget_pool():
+    """A Team's supervisor + workers bill against ONE shared pool, not N
+    independent per-session ceilings. Two workers each consuming 60 tokens
+    against a 100-token team pool -> exactly one goes over budget (combined
+    120 > 100). Under independent budgets (60 < 100 each) BOTH would succeed --
+    the red state this rules out. Deterministic: consume() is an atomic sync
+    block, so the first caller lands at 60 (under) and the second at 120 (over)."""
+    async def go():
+        sched = HiveMindScheduler(default_ceiling=10**9)  # per-session ceiling irrelevant here
+        sixty = {"type": "message", "role": "assistant", "content": [], "uuid": "u1",
+                 "usage": {"input_tokens": 60, "cache_read_input_tokens": 0,
+                           "cache_creation_input_tokens": 0, "output_tokens": 0}}
+        team = Team(
+            sched,
+            worker_provider=FakeProvider([sixty, {"type": "result", "result": "ok", "is_error": False, "usage": {}}]),
+            team_budget_ceiling=100,
+        )
+        team.hire(WorkerRole(name="coder", system_prompt="x"))
+        team.supervisor("plan the work")  # establishes the shared pool + its 100-token ceiling
+        out = await team.delegate_many([
+            {"role": "coder", "task": "a"}, {"role": "coder", "task": "b"},
+        ])
+        # Two sections, exactly one hit the shared ceiling (120 combined > 100).
+        assert out.count("### coder") == 2
+        assert out.lower().count("budget exceeded") == 1
+
+    asyncio.run(go())
+
+
 if __name__ == "__main__":
     test_delegate_many_returns_worker_final_text()
     test_delegate_many_unknown_role_returns_error_string_listing_roles()
@@ -258,4 +287,5 @@ if __name__ == "__main__":
     test_delegate_many_runs_workers_concurrently()
     test_delegate_many_aggregates_per_role_results_in_input_order()
     test_delegate_many_registers_worker_so_approval_is_actionable()
+    test_team_fan_out_shares_one_budget_pool()
     print("orchestrator self-checks: OK")

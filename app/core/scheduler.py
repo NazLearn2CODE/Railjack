@@ -2,7 +2,7 @@ import asyncio
 import time
 import logging
 from collections import deque
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 logger = logging.getLogger("orbiter.scheduler")
 
@@ -22,20 +22,32 @@ class TokenBudgetManager:
     def __init__(self, default_ceiling: int = 200000):
         self.default_ceiling = default_ceiling
         self.usage: Dict[str, int] = {}
+        # Per-key ceiling overrides. A single AgentSession keys on its session_id
+        # and falls through to default_ceiling; a Team's shared pool (supervisor +
+        # workers all billing under one key) sets a team-sized ceiling here. See
+        # orchestrator.Team.supervisor() and ADR 2026-07-02-team-budget-pool.
+        self.ceilings: Dict[str, int] = {}
 
-    def consume(self, session_id: str, tokens: int) -> bool:
+    def set_ceiling(self, key: str, ceiling: int) -> None:
+        """Override the ceiling for one budget key (e.g. a team's shared pool)."""
+        self.ceilings[key] = ceiling
+
+    def effective_ceiling(self, key: str) -> int:
+        return self.ceilings.get(key, self.default_ceiling)
+
+    def consume(self, key: str, tokens: int) -> bool:
         """
-        Records token usage and returns whether the session is still under its
+        Records token usage and returns whether the key is still under its
         ceiling. Single mid-turn entry point — callers break the agent loop
-        when this returns False (budget enforcement).
+        when this returns False (budget enforcement). `key` is a session_id for
+        a plain session, or a team's shared pool id for a fanned-out Team.
         """
-        self.usage[session_id] = self.usage.get(session_id, 0) + tokens
-        logger.info("Session %s consumed %s tokens. Total: %s", session_id, tokens, self.usage[session_id])
-        return self.check_budget(session_id)
+        self.usage[key] = self.usage.get(key, 0) + tokens
+        logger.info("Budget key %s consumed %s tokens. Total: %s", key, tokens, self.usage[key])
+        return self.check_budget(key)
 
-    def check_budget(self, session_id: str, ceiling: Optional[int] = None) -> bool:
-        limit = ceiling if ceiling is not None else self.default_ceiling
-        return self.usage.get(session_id, 0) < limit
+    def check_budget(self, key: str) -> bool:
+        return self.usage.get(key, 0) < self.effective_ceiling(key)
 
 
 class CircuitBreaker:

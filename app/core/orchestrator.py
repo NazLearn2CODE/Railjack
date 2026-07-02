@@ -87,7 +87,10 @@ class Team:
     `AgentSession`s concurrently (`asyncio.gather`) on the Team's shared
     scheduler/security and returns their results as per-role sections. Both
     supervisor and workers bill against the same `HiveMindScheduler` (admission
-    bounds their concurrency; AIMD/breaker react).
+    bounds their concurrency; AIMD/breaker react) AND one shared token-budget
+    pool (supervisor + workers under one team-sized ceiling — set in
+    `supervisor()`), so a fan-out is bounded as a whole rather than giving each
+    worker an independent ceiling.
     """
 
     def __init__(
@@ -96,6 +99,7 @@ class Team:
         security: Optional[SecurityPolicy] = None,
         worker_provider: Optional[Provider] = None,
         register: Optional[Callable[[AgentSession], None]] = None,
+        team_budget_ceiling: Optional[int] = None,
     ):
         self.scheduler = scheduler
         self.security = security
@@ -109,6 +113,12 @@ class Team:
         self.register = register
         # The supervisor whose bus worker events forward onto (set by supervisor()).
         self._supervisor: Optional[AgentSession] = None
+        # Shared token-budget pool: the supervisor and every worker bill against
+        # this one key, so a fan-out is bounded as a whole rather than giving each
+        # worker an independent ceiling. The ceiling is set on the scheduler when
+        # the pool is established (supervisor()); see ADR 2026-07-02-team-budget-pool.
+        self.budget_key = f"team-{uuid.uuid4().hex[:8]}"
+        self.team_budget_ceiling = team_budget_ceiling
 
     def hire(self, *roles: WorkerRole) -> "Team":
         for role in roles:
@@ -143,6 +153,7 @@ class Team:
             provider=self.worker_provider,
             allowed_tools=r.allowed_tools,
             kind="worker",
+            budget_key=self.budget_key,  # bill against the team's shared pool
         )
 
         # Forward every worker event onto the supervisor's bus as a nested
@@ -216,6 +227,13 @@ class Team:
         tools = list(allowed_tools if allowed_tools is not None else ALLOWED_TOOLS)
         if "delegate_many" not in tools:
             tools.append("delegate_many")
+        # Establish the team's shared token-budget pool: supervisor + every worker
+        # bill against one key, bounding the whole fan-out. Default scales with
+        # hired breadth (supervisor + N roles); team_budget_ceiling overrides it.
+        # ponytail: breadth proxy is hired roles, not fan-out cardinality — a role
+        # delegated twice reuses its slice; revisit if real fan-outs overshoot.
+        ceiling = self.team_budget_ceiling or self.scheduler.token_budget.default_ceiling * (1 + len(self.roles))
+        self.scheduler.token_budget.set_ceiling(self.budget_key, ceiling)
         sup = AgentSession(
             session_id=str(uuid.uuid4()),  # must be a valid UUID (CLI rejects prefixed ids)
             prompt=prompt,
@@ -225,6 +243,7 @@ class Team:
             provider=ClaudeSdkProvider(delegate_many=self.delegate_many),
             allowed_tools=tools,
             kind="supervisor",
+            budget_key=self.budget_key,  # bill against the team's shared pool
         )
         # Remember the supervisor so worker events (delegate) forward onto its bus.
         self._supervisor = sup

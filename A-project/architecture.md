@@ -29,7 +29,7 @@ Maps the agentic-OS blueprint (`[[agentic-os-guide]]`) onto a Python implementat
 │  ├─ Rate-limit tracking (RPM / TPM windows)             │
 │  ├─ AIMD backpressure   (concurrency controller)        │
 │  ├─ Circuit breaker     (closed/open/half-open)         │
-│  └─ Token budgeting     (per-agent ceiling → checkpoint)│
+│  └─ Token budgeting     (per-key ceiling → checkpoint)  │
 └────────┬────────────────────────────────────────────────┘
          │
 ┌────────┴────────────────────────────────────────────────┐
