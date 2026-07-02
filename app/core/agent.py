@@ -139,8 +139,8 @@ class AgentSession:
     def final_text(self) -> str:
         """Last assistant text from the session, or '' if none.
 
-        Used by orchestrator.Team.delegate() to return a worker's output to its
-        supervisor as a tool result.
+        Used by orchestrator.Team._run_worker() (the per-worker step of
+        delegate_many) to return a worker's output to its supervisor as a tool result.
         """
         for msg in reversed(self.messages):
             if msg.get("type") != "message" or msg.get("role") != "assistant":
