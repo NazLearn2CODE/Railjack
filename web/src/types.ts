@@ -16,6 +16,12 @@ export interface SessionMeta {
   error: string | null;
 }
 
+// POST /api/teams `roles` — hires these verbatim; null → server DEFAULT_ROLES.
+export interface RoleSpec {
+  name: string;
+  system_prompt: string;
+}
+
 // GET /api/health — OS-host posture. Names + transport only; never secrets.
 export interface SandboxStatus {
   active: boolean;

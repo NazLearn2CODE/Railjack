@@ -1,4 +1,4 @@
-import type { Health, SessionMeta } from "./types";
+import type { Health, RoleSpec, SessionMeta } from "./types";
 
 export async function getHealth(): Promise<Health> {
   const r = await fetch("/api/health");
@@ -24,7 +24,7 @@ export async function listSessions(): Promise<SessionMeta[]> {
 
 export async function createTeam(
   prompt: string,
-  roles?: { name: string; system_prompt: string }[],
+  roles?: RoleSpec[],
   systemPrompt?: string,
 ): Promise<SessionMeta> {
   // Omit `roles` → server hires the default team (researcher + coder). The

@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { approve as apiApprove, createSession, createTeam, getHealth, listSessions, openStream } from "./api";
-import type { ContentBlock, Health, Row, SessionMeta, StreamEvent, Transcript, Usage } from "./types";
+import type { ContentBlock, Health, RoleSpec, Row, SessionMeta, StreamEvent, Transcript, Usage } from "./types";
 
 // Module-level ID for event-log entries — no need to thread a counter through store state.
 let _logSeq = 0;
@@ -33,7 +33,7 @@ interface State {
   init: () => Promise<void>;
   setComposing: (v: string) => void;
   setMode: (m: "single" | "team") => void;
-  dispatch: (prompt: string, systemPrompt?: string) => Promise<void>;
+  dispatch: (prompt: string, systemPrompt?: string, roles?: RoleSpec[]) => Promise<void>;
   select: (id: string) => Promise<void>;
   approve: (approvalId: string, approve: boolean) => Promise<void>;
   approveWorker: (workerId: string, approvalId: string, approve: boolean) => Promise<void>;
@@ -180,15 +180,16 @@ export const useStore = create<State>((set, get) => ({
 
   setMode: (m) => set({ mode: m }),
 
-  dispatch: async (prompt, systemPrompt) => {
+  dispatch: async (prompt, systemPrompt, roles) => {
     const trimmed = prompt.trim();
     if (!trimmed) return;
     set({ composing: "" });
     // Team mode spawns a supervisor (POST /api/teams); otherwise a plain session.
     // Both return a session_id that streams through the identical path below.
+    // Empty roles → server hires DEFAULT_ROLES (researcher + coder).
     const meta =
       get().mode === "team"
-        ? await createTeam(trimmed, undefined, systemPrompt)
+        ? await createTeam(trimmed, roles && roles.length ? roles : undefined, systemPrompt)
         : await createSession(trimmed, systemPrompt);
     const id = meta.session_id;
 
