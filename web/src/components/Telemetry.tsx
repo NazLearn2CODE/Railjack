@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useState, useEffect, type ReactNode } from "react";
 import { useStore } from "../store";
 import { cn, connMeta, activeSkill } from "../util";
 import { setWorkspaceRoot } from "../api";
@@ -53,6 +53,109 @@ const tonePip: Record<LogEntry["tone"], string> = {
   muted: "",
 };
 
+interface FsBrowserModalProps {
+  initialPath: string;
+  onSelect: (path: string) => void;
+  onCancel: () => void;
+}
+
+function FsBrowserModal({ initialPath, onSelect, onCancel }: FsBrowserModalProps) {
+  const [dirs, setDirs] = useState<{ name: string; path: string }[]>([]);
+  const [manualPath, setManualPath] = useState(initialPath || "");
+  const [error, setError] = useState("");
+
+  const loadDirs = async (path: string) => {
+    try {
+      const res = await fetch(`/api/fs/list?path=${encodeURIComponent(path)}`);
+      if (!res.ok) {
+        throw new Error("Failed to read directory");
+      }
+      const data = await res.json();
+      setManualPath(data.current);
+      setDirs(data.dirs);
+      setError("");
+    } catch (e: any) {
+      setError(e.message || "Error reading directory");
+    }
+  };
+
+  useEffect(() => {
+    void loadDirs(initialPath || ".");
+  }, [initialPath]);
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-void/80 backdrop-blur-sm p-4">
+      <div className="reveal hud hud--bracket bg-panel border border-edge w-full max-w-[440px] flex flex-col min-h-0 max-h-[380px]">
+        {/* Header */}
+        <div className="flex shrink-0 items-center justify-between border-b border-edge px-3 py-1.5 bg-void/40">
+          <span className="display text-[10px] font-semibold tracking-wider text-signal uppercase">
+            SELECT WORKSPACE ROOT
+          </span>
+          <button className="text-faint hover:text-signal transition-colors text-[10px]" onClick={onCancel}>
+            ✕
+          </button>
+        </div>
+
+        {/* Manual path input & navigate */}
+        <div className="p-2.5 border-b border-edge bg-void/20 flex gap-2 items-center">
+          <input
+            className="input !py-1 text-[10px]"
+            value={manualPath}
+            onChange={(e) => setManualPath(e.target.value)}
+            placeholder="Absolute folder path..."
+            onKeyDown={(e) => {
+              if (e.key === "Enter") void loadDirs(manualPath);
+            }}
+          />
+          <button
+            className="btn !px-2.5 !py-1 !text-[10px] shrink-0"
+            onClick={() => void loadDirs(manualPath)}
+          >
+            GO
+          </button>
+        </div>
+
+        {/* Directory browser list */}
+        <div className="flex-1 overflow-y-auto p-2.5 min-h-[140px] max-h-[200px]">
+          {error ? (
+            <div className="text-critical text-[10px]">{error}</div>
+          ) : (
+            <div className="space-y-1">
+              {dirs.map((d, i) => (
+                <div
+                  key={i}
+                  onDoubleClick={() => void loadDirs(d.path)}
+                  onClick={() => setManualPath(d.path)}
+                  className={cn(
+                    "mono flex items-center gap-2 cursor-pointer p-1 text-[10px] border border-transparent hover:border-edge-soft hover:bg-void/40 transition-all select-none",
+                    manualPath === d.path && "border-signal bg-void/60 text-signal"
+                  )}
+                >
+                  <span className="text-hazard">{d.name === ".." ? "⬏" : "📁"}</span>
+                  <span className="truncate text-phosphor-dim">{d.name}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* Actions footer */}
+        <div className="p-2.5 border-t border-edge bg-void/40 flex justify-end gap-2 shrink-0">
+          <button className="btn !px-2.5 !py-1 !text-[10px]" onClick={onCancel}>
+            CANCEL
+          </button>
+          <button
+            className="btn btn--signal !px-2.5 !py-1 !text-[10px]"
+            onClick={() => onSelect(manualPath)}
+          >
+            SELECT WORKSPACE
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function Telemetry() {
   const log = useStore((s) => s.log);
   const conn = useStore((s) => s.conn);
@@ -67,15 +170,11 @@ export default function Telemetry() {
   // ROOT editing
   const [editingRoot, setEditingRoot] = useState(false);
   const [rootInput, setRootInput] = useState("");
+  const [showPicker, setShowPicker] = useState(false);
   const rootDisplay = health?.workspace?.root
     ? health.workspace.root.split("/").slice(-3).join("/")
     : "—";
   const fullRoot = health?.workspace?.root ?? "";
-
-  const browseRoot = () => {
-    setRootInput(fullRoot);
-    setEditingRoot(true);
-  };
 
   const applyRoot = async () => {
     const trimmed = rootInput.trim();
@@ -161,28 +260,42 @@ export default function Telemetry() {
           label="ROOT"
           value={rootDisplay}
           interactive={
-            editingRoot ? (
-              <div className="flex items-center gap-1 min-w-0" style={{ maxWidth: "70%" }}>
+            <div className="flex items-center gap-1.5 min-w-0" style={{ maxWidth: "70%" }}>
+              {editingRoot ? (
                 <input
                   autoFocus
                   className="input !py-0.5 !text-[9px] !px-1 min-w-0 flex-1"
                   placeholder="/path/to/workspace"
                   value={rootInput}
                   onChange={(e) => setRootInput(e.target.value)}
-                  onKeyDown={(e) => { if (e.key === "Enter") void applyRoot(); if (e.key === "Escape") setEditingRoot(false); }}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") void applyRoot();
+                    if (e.key === "Escape") setEditingRoot(false);
+                  }}
                   onBlur={() => void applyRoot()}
                 />
-              </div>
-            ) : (
-              <button
-                className="mono truncate text-[9px] text-phosphor-dim hover:text-signal transition-colors text-right min-w-0"
-                style={{ maxWidth: "70%" }}
-                title={`Click to change workspace root\n${fullRoot}`}
-                onClick={browseRoot}
-              >
-                {rootDisplay}
-              </button>
-            )
+              ) : (
+                <>
+                  <span
+                    className="mono truncate text-[9px] text-phosphor-dim hover:text-signal transition-colors cursor-pointer text-right min-w-0 flex-1"
+                    title={`Click to edit manually\n${fullRoot}`}
+                    onClick={() => {
+                      setRootInput(fullRoot);
+                      setEditingRoot(true);
+                    }}
+                  >
+                    {rootDisplay}
+                  </span>
+                  <button
+                    className="mono text-[9px] text-faint hover:text-signal transition-colors shrink-0"
+                    onClick={() => setShowPicker(true)}
+                    title="Browse directories to change workspace root"
+                  >
+                    [BROWSE]
+                  </button>
+                </>
+              )}
+            </div>
           }
         />
         <div className="flex items-center justify-between border-b border-edge-soft py-1">
@@ -223,6 +336,22 @@ export default function Telemetry() {
           </div>
         )}
       </Panel>
+
+      {showPicker && (
+        <FsBrowserModal
+          initialPath={fullRoot}
+          onSelect={async (path) => {
+            try {
+              await setWorkspaceRoot(path);
+              await init();
+              setShowPicker(false);
+            } catch {
+              // error is shown in browser or console
+            }
+          }}
+          onCancel={() => setShowPicker(false)}
+        />
+      )}
     </aside>
   );
 }

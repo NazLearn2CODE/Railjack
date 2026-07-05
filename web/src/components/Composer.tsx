@@ -18,6 +18,60 @@ export default function Composer() {
   const [rolesOpen, setRolesOpen] = useState(false);
   const [roles, setRoles] = useState<RoleSpec[]>([]);
 
+  const [addProvOpen, setAddProvOpen] = useState(false);
+  const [provName, setProvName] = useState("");
+  const [provUrl, setProvUrl] = useState("");
+  const [provKey, setProvKey] = useState("");
+  const [provModels, setProvModels] = useState("");
+  const [provErr, setProvErr] = useState("");
+
+  const initStore = useStore((s) => s.init);
+
+  const handleSaveProvider = async () => {
+    if (!provName.trim()) {
+      setProvErr("Provider Name is required.");
+      return;
+    }
+    try {
+      const modelsList = provModels.split(",")
+        .map(m => m.trim())
+        .filter(Boolean);
+        
+      const res = await fetch("/api/providers", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: provName.trim(),
+          base_url: provUrl.trim() || null,
+          api_key: provKey.trim() || null,
+          models: modelsList.length ? modelsList : null,
+        }),
+      });
+      
+      if (!res.ok) {
+        const err = await res.json();
+        setProvErr(err.detail || "Failed to save provider.");
+        return;
+      }
+      
+      await initStore();
+      
+      setModel({
+        provider: provName.trim(),
+        model: modelsList[0] || "",
+      });
+      
+      setProvName("");
+      setProvUrl("");
+      setProvKey("");
+      setProvModels("");
+      setProvErr("");
+      setAddProvOpen(false);
+    } catch (e: any) {
+      setProvErr(e.message || "Network error.");
+    }
+  };
+
   const team = mode === "team";
   const busy =
     t?.status === "running" ||
@@ -28,37 +82,20 @@ export default function Composer() {
   // → server hires DEFAULT_ROLES (researcher + coder).
   const named = roles.filter((r) => r.name.trim());
 
-  // Model/provider cycle: null = DEFAULT (send nothing), then one entry per model
-  // (or a bare provider entry when it lists no models). Hide the switcher entirely
-  // when there's nothing meaningful to switch between (single default, no models).
-  const nontrivial = providers.some((p) => p.models.length > 0) || providers.length > 1;
-  const modelOptions: ({ provider: string; model: string | null } | null)[] = nontrivial
-    ? [
-        null,
-        ...providers.flatMap((p): { provider: string; model: string | null }[] =>
-          p.models.length
-            ? p.models.map((m) => ({ provider: p.name, model: m }))
-            : [{ provider: p.name, model: null }],
-        ),
-      ]
-    : [];
-  const cycleModel = () => {
-    const i = modelOptions.findIndex(
-      (o) =>
-        (o === null && !selectedModel) ||
-        (o !== null &&
-          selectedModel != null &&
-          o.provider === selectedModel.provider &&
-          (o.model ?? "") === selectedModel.model),
-    );
-    const next = modelOptions[(i + 1) % modelOptions.length];
-    setModel(next ? { provider: next.provider, model: next.model ?? "" } : null);
-  };
-  const modelLabel = !selectedModel
-    ? "DEFAULT"
-    : selectedModel.model
-      ? `${selectedModel.provider}/${selectedModel.model}`
-      : selectedModel.provider;
+  const flatModels: { provider: string; model: string | null; label: string }[] = [];
+  for (const p of providers) {
+    if (p.models.length === 0) {
+      flatModels.push({ provider: p.name, model: null, label: p.name });
+    } else {
+      for (const m of p.models) {
+        flatModels.push({ provider: p.name, model: m, label: `${p.name} / ${m}` });
+      }
+    }
+  }
+
+  const selectValue = selectedModel
+    ? `${selectedModel.provider}:${selectedModel.model || ""}`
+    : "";
 
   const send = () => {
     if (busy || !composing.trim()) return;
@@ -86,6 +123,52 @@ export default function Composer() {
           value={sys}
           onChange={(e) => setSys(e.target.value)}
         />
+      )}
+
+      {addProvOpen && (
+        <div className="mb-2 border border-edge bg-void/60 p-2 text-[10px]">
+          <div className="mb-1.5 flex items-center justify-between">
+            <span className="label text-[10px]">
+              <span className="text-signal">▸</span> ADD CUSTOM PROVIDER
+            </span>
+            <button className="text-faint hover:text-signal" onClick={() => setAddProvOpen(false)}>
+              ✕
+            </button>
+          </div>
+          <div className="grid grid-cols-2 gap-1.5 mb-1.5">
+            <input
+              className="input !py-1 !text-[10px]"
+              placeholder="provider name (e.g. openrouter)"
+              value={provName}
+              onChange={(e) => setProvName(e.target.value)}
+            />
+            <input
+              className="input !py-1 !text-[10px]"
+              placeholder="base url (optional)"
+              value={provUrl}
+              onChange={(e) => setProvUrl(e.target.value)}
+            />
+            <input
+              className="input !py-1 !text-[10px]"
+              type="password"
+              placeholder="api key (optional)"
+              value={provKey}
+              onChange={(e) => setProvKey(e.target.value)}
+            />
+            <input
+              className="input !py-1 !text-[10px]"
+              placeholder="models (comma-separated, optional)"
+              value={provModels}
+              onChange={(e) => setProvModels(e.target.value)}
+            />
+          </div>
+          {provErr && <div className="text-critical text-[9px] mb-1">{provErr}</div>}
+          <div className="flex justify-end">
+            <button className="btn !px-2 !py-0.5 !text-[10px]" onClick={handleSaveProvider}>
+              SAVE PROVIDER
+            </button>
+          </div>
+        </div>
       )}
 
       {team && rolesOpen && (
@@ -136,9 +219,9 @@ export default function Composer() {
       )}
 
       <div className="flex items-end gap-2">
-        <span className="display pb-2 text-[10px] text-hazard">▸</span>
+        <span className="display pb-2 text-[9px] text-hazard">▸</span>
         <textarea
-          className="input min-h-[44px] resize-none"
+          className="input min-h-[40px] resize-none !text-[9px] !py-1.5"
           rows={2}
           placeholder={team ? "DISPATCH A TASK — SUPERVISOR DELEGATES…" : "DISPATCH A PROMPT TO THE AGENT…"}
           value={composing}
@@ -147,7 +230,7 @@ export default function Composer() {
           disabled={busy}
         />
         <button
-          className={cn("btn btn--signal shrink-0")}
+          className={cn("btn btn--signal shrink-0 !text-[9px] !py-1.5 !px-3")}
           onClick={send}
           disabled={busy || !composing.trim()}
         >
@@ -163,15 +246,35 @@ export default function Composer() {
           >
             {team ? "● AGENTS" : "○ AGENTS"}
           </button>
-          {modelOptions.length > 1 && (
-            <button
-              className={cn("transition-colors hover:text-signal uppercase", selectedModel && "text-signal")}
-              onClick={cycleModel}
-              title="Cycle model/provider"
+          <div className="flex items-center gap-1.5">
+            <select
+              value={selectValue}
+              onChange={(e) => {
+                const val = e.target.value;
+                if (!val) {
+                  setModel(null);
+                } else {
+                  const [pName, mName] = val.split(":");
+                  setModel({ provider: pName, model: mName || "" });
+                }
+              }}
+              className="bg-void border border-edge text-phosphor-dim hover:text-signal transition-colors font-mono text-[9px] uppercase p-1 max-w-[120px] outline-none"
             >
-              MDL ▸ {modelLabel}
+              <option value="">DEFAULT MDL</option>
+              {flatModels.map((opt, i) => (
+                <option key={i} value={`${opt.provider}:${opt.model || ""}`}>
+                  {opt.label}
+                </option>
+              ))}
+            </select>
+            <button
+              className="transition-colors hover:text-signal text-[9px] uppercase"
+              onClick={() => setAddProvOpen((v) => !v)}
+              title="Add custom provider"
+            >
+              {addProvOpen ? "− PROV" : "+ PROV"}
             </button>
-          )}
+          </div>
           {team && (
             <button
               className={cn("transition-colors hover:text-signal", rolesOpen && "text-signal")}

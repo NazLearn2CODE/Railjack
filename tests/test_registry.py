@@ -49,7 +49,10 @@ def test_resolve_provider_and_model(monkeypatch):
     # token rather than leaving a stale one for the CLI to send.
     model, env = registry.resolve("custom", None)
     assert model is None
-    assert env == {"ANTHROPIC_AUTH_TOKEN": "secret-token"}
+    assert env == {
+        "ANTHROPIC_AUTH_TOKEN": "secret-token",
+        "ANTHROPIC_API_KEY": "secret-token",
+    }
 
     # 3. Unknown provider raises ValueError
     with pytest.raises(ValueError, match="Unknown provider"):

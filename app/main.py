@@ -139,6 +139,14 @@ class CreateSession(BaseModel):
     model: str | None = None
 
 
+class RegisterProvider(BaseModel):
+    name: str
+    base_url: str | None = None
+    auth_env: str | None = None
+    api_key: str | None = None
+    models: list[str] | None = None
+
+
 class ApproveTool(BaseModel):
     approval_id: str
     approve: bool
@@ -216,6 +224,45 @@ async def create_session(req: CreateSession):
 @app.get("/api/providers")
 async def list_providers():
     return registry.public_view()
+
+
+@app.post("/api/providers")
+async def register_provider(req: RegisterProvider):
+    registry.add_provider(
+        name=req.name,
+        base_url=req.base_url,
+        auth_env=req.auth_env,
+        api_key=req.api_key,
+        models=req.models,
+    )
+    return {"ok": True}
+
+
+@app.get("/api/fs/list")
+async def fs_list(path: str = "."):
+    try:
+        p = Path(path).resolve()
+        if not p.is_dir():
+            p = Path(".").resolve()
+        
+        subdirs = []
+        if p.parent != p:
+            subdirs.append({"name": "..", "path": str(p.parent.resolve())})
+            
+        for child in p.iterdir():
+            try:
+                if child.is_dir() and not child.name.startswith("."):
+                    subdirs.append({"name": child.name, "path": str(child.resolve())})
+            except PermissionError:
+                continue
+                
+        subdirs.sort(key=lambda x: (x["name"] != "..", x["name"].lower()))
+        return {"current": str(p.resolve()), "dirs": subdirs}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+
 
 
 @app.get("/api/sessions")
@@ -302,6 +349,8 @@ async def set_workspace_root(req: dict):
     WORKSPACE_ROOT = p
     # ponytail: re-scope security boundary to new root
     security.boundary = WorkspaceBoundary(roots=[WORKSPACE_ROOT])
+    from app.core.cephalon import probe
+    probe.cache_clear()
     return {"root": str(WORKSPACE_ROOT)}
 
 

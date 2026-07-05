@@ -41,6 +41,28 @@ def _load_providers() -> list[dict[str, Any]]:
 PROVIDERS = _load_providers()
 
 
+def add_provider(
+    name: str,
+    base_url: str | None = None,
+    auth_env: str | None = None,
+    api_key: str | None = None,
+    models: list[str] | None = None,
+):
+    """Add or update a provider in the registry dynamically."""
+    existing = next((p for p in PROVIDERS if p["name"] == name), None)
+    spec = {
+        "name": name,
+        "base_url": base_url,
+        "auth_env": auth_env,
+        "api_key": api_key,
+        "models": models or [],
+    }
+    if existing:
+        existing.update({k: v for k, v in spec.items() if v is not None})
+    else:
+        PROVIDERS.append(spec)
+
+
 def public_view() -> list[dict[str, Any]]:
     """Secrets-redacted view: name + models only (base_url/auth_env never leave)."""
     return [{"name": p["name"], "models": p["models"]} for p in PROVIDERS]
@@ -73,7 +95,13 @@ def resolve(name: str, model: str | None) -> tuple[str | None, dict[str, str] | 
             # one. Using a different var (e.g. ANTHROPIC_API_KEY) would leave the
             # inherited AUTH_TOKEN in place and the CLI would send the wrong one.
             env_overrides["ANTHROPIC_AUTH_TOKEN"] = token
+            env_overrides["ANTHROPIC_API_KEY"] = token
         else:
             logger.warning("Provider '%s' requires token from env '%s', but it is not set", name, auth_env)
+
+    api_key = provider.get("api_key")
+    if api_key:
+        env_overrides["ANTHROPIC_AUTH_TOKEN"] = str(api_key)
+        env_overrides["ANTHROPIC_API_KEY"] = str(api_key)
 
     return model, (env_overrides or None)
