@@ -9,7 +9,7 @@ import ServiceFrame from "./ServiceFrame";
 function Stat({ label, value }: { label: string; value: string }) {
   return (
     <span className="flex items-baseline gap-1.5">
-      <span className="label !text-[9px]">{label}</span>
+      <span className="label !text-[11px]">{label}</span>
       <span className="mono text-[11px] text-phosphor-dim tabular-nums">{value}</span>
     </span>
   );
@@ -51,7 +51,7 @@ export default function Console() {
               transform="rotate(60 23 23)"
             />
           </svg>
-          <div className="display text-[13px] font-semibold tracking-[0.24em] text-phosphor-dim">
+          <div className="display text-[10px] font-semibold tracking-[0.24em] text-phosphor-dim">
             NO ACTIVE SESSION
           </div>
           <p className="max-w-[320px] text-[11px] leading-relaxed text-faint">

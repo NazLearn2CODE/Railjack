@@ -29,7 +29,7 @@ export default function TopBar() {
           <circle cx="24" cy="9" r="1.4" fill="var(--color-hazard)" />
         </svg>
         <div className="leading-none">
-          <div className="display text-[15px] font-bold tracking-[0.34em] text-phosphor">ORBITER</div>
+          <div className="display text-[11px] font-bold tracking-[0.34em] text-phosphor">ORBITER</div>
           <div className="label mt-1">AGENTIC OS · CONSOLE · v0.1</div>
         </div>
       </div>
@@ -40,7 +40,7 @@ export default function TopBar() {
             {c.label}
           </span>
         </div>
-        <div className="mono text-[12px] tabular-nums text-muted">
+        <div className="mono text-[11px] tabular-nums text-muted">
           <span className="text-faint">T+</span> {clock(t)}
         </div>
       </div>

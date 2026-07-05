@@ -290,6 +290,21 @@ async def stream_session(ws: WebSocket, session_id: str):
 DASHBOARD_DIST = Path(__file__).resolve().parent.parent / "web" / "dist"
 
 
+@app.post("/api/workspace-root")
+async def set_workspace_root(req: dict):
+    path = req.get("root", "").strip()
+    if not path:
+        raise HTTPException(status_code=400, detail="root path required")
+    p = Path(path).resolve()
+    if not p.is_dir():
+        raise HTTPException(status_code=400, detail=f"not a directory: {path}")
+    global WORKSPACE_ROOT
+    WORKSPACE_ROOT = p
+    # ponytail: re-scope security boundary to new root
+    security.boundary = WorkspaceBoundary(roots=[WORKSPACE_ROOT])
+    return {"root": str(WORKSPACE_ROOT)}
+
+
 @app.get("/api/health")
 async def health():
     return {

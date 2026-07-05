@@ -40,9 +40,8 @@
     background: var(--color-vacuum);
     color: var(--color-phosphor);
     font-family: var(--font-mono);
-    font-size: 13px;
+    font-size: 16px;
     line-height: 1.55;
-    -webkit-font-smoothing: antialiased;
     overflow: hidden;
   }
   ::selection {
@@ -156,8 +155,18 @@
   text-transform: uppercase;
   letter-spacing: 0.18em;
   font-weight: 600;
-  font-size: 10px;
+  font-size: 12px;
   color: var(--color-muted);
+}
+.panel-title {
+  font-family: var(--font-display);
+  text-transform: uppercase;
+  letter-spacing: 0.22em;
+  font-weight: 700;
+  font-size: 12px;
+  color: var(--color-signal);
+  text-shadow: 0 0 8px color-mix(in srgb, var(--color-signal) 60%, transparent),
+               0 0 20px color-mix(in srgb, var(--color-signal) 30%, transparent);
 }
 .mono {
   font-family: var(--font-mono);
@@ -236,7 +245,7 @@
   text-transform: uppercase;
   letter-spacing: 0.14em;
   font-weight: 600;
-  font-size: 11px;
+  font-size: 14px;
   padding: 8px 14px;
   border: 1px solid var(--color-edge);
   background: var(--color-panel-2);
@@ -295,7 +304,7 @@
 /* ---------- Markdown (assistant output) ---------- */
 .prose-md {
   font-family: var(--font-mono);
-  font-size: 13px;
+  font-size: 16px;
   color: var(--color-phosphor);
 }
 .prose-md p { margin: 0 0 0.7em; }
@@ -306,9 +315,9 @@
   color: #fff;
   letter-spacing: 0.04em;
 }
-.prose-md h1 { font-size: 1.15rem; }
-.prose-md h2 { font-size: 1.05rem; }
-.prose-md h3 { font-size: 0.98rem; }
+.prose-md h1 { font-size: 1.38rem; }
+.prose-md h2 { font-size: 1.26rem; }
+.prose-md h3 { font-size: 1.18rem; }
 .prose-md ul, .prose-md ol { margin: 0 0 0.7em; padding-left: 1.2em; }
 .prose-md li { margin: 0.2em 0; }
 .prose-md a {
@@ -321,7 +330,7 @@
   background: var(--color-void);
   border: 1px solid var(--color-edge-soft);
   padding: 1px 5px;
-  font-size: 12px;
+  font-size: 14px;
   color: var(--color-signal);
 }
 .prose-md pre {
@@ -337,7 +346,7 @@
   border: none;
   padding: 0;
   color: var(--color-phosphor);
-  font-size: 12px;
+  font-size: 14px;
 }
 .prose-md blockquote {
   border-left: 2px solid var(--color-hazard);
@@ -348,7 +357,7 @@
 .prose-md table {
   border-collapse: collapse;
   margin: 0 0 0.7em;
-  font-size: 12px;
+  font-size: 14px;
 }
 .prose-md th, .prose-md td {
   border: 1px solid var(--color-edge);
@@ -359,7 +368,7 @@
   color: var(--color-signal);
   font-family: var(--font-display);
   text-transform: uppercase;
-  font-size: 10px;
+  font-size: 12px;
   letter-spacing: 0.1em;
 }
 .prose-md hr {

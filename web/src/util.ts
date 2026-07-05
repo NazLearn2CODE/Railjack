@@ -28,9 +28,9 @@ export function statusMeta(s: SessionStatus | undefined): StatusMeta {
 }
 
 export function connMeta(readyState: number) {
-  if (readyState === 1) return { label: "LINK ACTIVE", pip: "pip--signal" };
-  if (readyState === 0) return { label: "LINKING", pip: "pip--hazard" };
-  return { label: "LINK DOWN", pip: "pip--crit" };
+  if (readyState === 1) return { label: "WS ACTIVE", pip: "pip--signal" };
+  if (readyState === 0) return { label: "WS CONNECTING", pip: "pip--hazard" };
+  return { label: "WS DOWN", pip: "pip--crit" };
 }
 
 export function clock(d: Date): string {

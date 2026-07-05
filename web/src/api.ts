@@ -18,6 +18,16 @@ export async function getProviders(): Promise<ProviderInfo[]> {
   return r.json();
 }
 
+export async function setWorkspaceRoot(root: string): Promise<{ root: string }> {
+  const r = await fetch("/api/workspace-root", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ root }),
+  });
+  if (!r.ok) throw new Error(`setWorkspaceRoot ${r.status}`);
+  return r.json();
+}
+
 export async function createSession(
   prompt: string,
   systemPrompt?: string,

@@ -29,16 +29,19 @@ export default function Composer() {
   const named = roles.filter((r) => r.name.trim());
 
   // Model/provider cycle: null = DEFAULT (send nothing), then one entry per model
-  // (or a bare provider entry when it lists no models). Provider-only options carry
-  // model "" — same value the store holds — so match on (model ?? "").
-  const modelOptions: ({ provider: string; model: string | null } | null)[] = [
-    null,
-    ...providers.flatMap((p): { provider: string; model: string | null }[] =>
-      p.models.length
-        ? p.models.map((m) => ({ provider: p.name, model: m }))
-        : [{ provider: p.name, model: null }],
-    ),
-  ];
+  // (or a bare provider entry when it lists no models). Hide the switcher entirely
+  // when there's nothing meaningful to switch between (single default, no models).
+  const nontrivial = providers.some((p) => p.models.length > 0) || providers.length > 1;
+  const modelOptions: ({ provider: string; model: string | null } | null)[] = nontrivial
+    ? [
+        null,
+        ...providers.flatMap((p): { provider: string; model: string | null }[] =>
+          p.models.length
+            ? p.models.map((m) => ({ provider: p.name, model: m }))
+            : [{ provider: p.name, model: null }],
+        ),
+      ]
+    : [];
   const cycleModel = () => {
     const i = modelOptions.findIndex(
       (o) =>
@@ -78,7 +81,7 @@ export default function Composer() {
     <div className="shrink-0 border-t border-edge bg-panel/60 px-4 py-3">
       {sysOpen && (
         <input
-          className="input mb-2 !py-2 text-[12px]"
+          className="input mb-2 !py-2 text-[11px]"
           placeholder="system prompt override (optional)…"
           value={sys}
           onChange={(e) => setSys(e.target.value)}
@@ -91,7 +94,7 @@ export default function Composer() {
             <span className="label">
               <span className="text-signal">▸</span> TEAM ROLES
             </span>
-            <button className="btn !px-2 !py-1 !text-[9px]" onClick={addRole}>
+            <button className="btn !px-2 !py-1 !text-[11px]" onClick={addRole}>
               + ADD ROLE
             </button>
           </div>
@@ -119,7 +122,7 @@ export default function Composer() {
                     onChange={(e) => updateRole(i, { system_prompt: e.target.value })}
                   />
                   <button
-                    className="btn shrink-0 !px-2 !py-1 !text-[9px]"
+                    className="btn shrink-0 !px-2 !py-1 !text-[11px]"
                     onClick={() => removeRole(i)}
                     title="remove role"
                   >
@@ -133,7 +136,7 @@ export default function Composer() {
       )}
 
       <div className="flex items-end gap-2">
-        <span className="display pb-2 text-[13px] text-hazard">▸</span>
+        <span className="display pb-2 text-[10px] text-hazard">▸</span>
         <textarea
           className="input min-h-[44px] resize-none"
           rows={2}
@@ -151,14 +154,14 @@ export default function Composer() {
           {busy ? "·· BUSY" : team ? "DEPLOY" : "DISPATCH"}
         </button>
       </div>
-      <div className="mt-1.5 flex items-center justify-between text-[9px] text-faint">
+      <div className="mt-1.5 flex items-center justify-between text-[11px] text-faint">
         <span>ENTER ↵ {team ? "DEPLOY TEAM" : "DISPATCH"} · SHIFT+ENTER NEWLINE</span>
         <div className="flex items-center gap-3">
           <button
             className={cn("transition-colors hover:text-signal", team && "text-signal")}
             onClick={() => setMode(team ? "single" : "team")}
           >
-            {team ? "● TEAM" : "○ TEAM"}
+            {team ? "● AGENTS" : "○ AGENTS"}
           </button>
           {modelOptions.length > 1 && (
             <button

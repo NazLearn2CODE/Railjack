@@ -19,10 +19,10 @@ export default function SkillsList() {
             className="border-b border-edge-soft px-3 py-2.5 hover:bg-panel-2"
           >
             <div className="mb-1 flex items-center justify-between gap-2">
-              <span className="display text-[11px] font-semibold text-phosphor-dim tracking-[0.05em] truncate">
+              <span className="display text-[11px] font-semibold text-phosphor-dim tracking-[0.05em] truncate" title={sk.name}>
                 {sk.name}
               </span>
-              <span className="mono text-[8px] bg-edge px-1.5 py-0.5 text-faint uppercase shrink-0">
+              <span className="mono text-[10px] bg-edge px-1.5 py-0.5 text-faint uppercase shrink-0">
                 {sk.source}
               </span>
             </div>

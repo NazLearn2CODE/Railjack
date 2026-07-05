@@ -25,7 +25,7 @@ export default function Message({ row }: { row: Row }) {
             <div className="label mb-1 flex justify-end">
               <span className="text-hazard">OPERATOR</span>
             </div>
-            <div className="whitespace-pre-wrap text-[13px] text-phosphor">{row.text}</div>
+            <div className="whitespace-pre-wrap text-[10px] text-phosphor">{row.text}</div>
           </div>
         </div>
       );
@@ -46,7 +46,7 @@ export default function Message({ row }: { row: Row }) {
       return (
         <details className="row-in border border-edge-soft bg-void px-3 py-2">
           <summary className="label cursor-pointer select-none">▸ COGNITION TRACE</summary>
-          <div className="mt-2 whitespace-pre-wrap text-[12px] italic text-muted">{row.text}</div>
+          <div className="mt-2 whitespace-pre-wrap text-[11px] italic text-muted">{row.text}</div>
         </details>
       );
 
@@ -78,7 +78,7 @@ export default function Message({ row }: { row: Row }) {
           >
             {row.isError ? "RUN FAULT" : "RUN COMPLETE"}
           </span>
-          <span className="truncate text-[11px] text-muted">{row.text}</span>
+          <span className="truncate text-[11px] text-muted" title={row.text}>{row.text}</span>
         </div>
       );
 

@@ -27,22 +27,22 @@ export default function ServicesList() {
                   className="hud border border-edge bg-void/30 p-2 flex flex-col justify-between h-[80px]"
                 >
                   <div className="min-w-0">
-                    <div className="text-[11px] font-semibold text-phosphor-dim truncate">{srv.name}</div>
-                    <div className="mono text-[8px] text-faint truncate">{host}</div>
+                    <div className="text-[11px] font-semibold text-phosphor-dim truncate" title={srv.name}>{srv.name}</div>
+                    <div className="mono text-[10px] text-faint truncate" title={srv.url}>{host}</div>
                   </div>
                   <div className="flex gap-2 mt-2 shrink-0">
                     <a
                       href={srv.url}
                       target="_blank"
                       rel="noopener noreferrer"
-                      className="btn !px-1.5 !py-0.5 !text-[9px] text-center"
+                      className="btn !px-1.5 !py-0.5 !text-[11px] text-center"
                     >
                       ↗ TAB
                     </a>
                     {srv.embed && (
                       <button
                         onClick={() => setEmbed(srv)}
-                        className="btn !px-1.5 !py-0.5 !text-[9px]"
+                        className="btn !px-1.5 !py-0.5 !text-[11px]"
                       >
                         EMBED
                       </button>
@@ -66,7 +66,7 @@ export default function ServicesList() {
               className="mono flex items-center gap-2 border-b border-edge-soft py-1.5 text-[10px] last:border-0"
             >
               <span className="text-signal">▸</span>
-              <span className="truncate text-phosphor-dim">{s.name}</span>
+              <span className="truncate text-phosphor-dim" title={s.name}>{s.name}</span>
               <span className="ml-auto uppercase text-faint">{s.type}</span>
             </div>
           ))
