@@ -233,13 +233,19 @@ class Team:
         # delegated twice reuses its slice; revisit if real fan-outs overshoot.
         ceiling = self.scheduler.token_budget.default_ceiling * (1 + len(self.roles))
         self.scheduler.token_budget.set_ceiling(self.budget_key, ceiling)
+        worker_model = getattr(self.worker_provider, "_model", None)
+        worker_env = getattr(self.worker_provider, "_env", None)
         sup = AgentSession(
             session_id=str(uuid.uuid4()),  # must be a valid UUID (CLI rejects prefixed ids)
             prompt=prompt,
             scheduler=self.scheduler,
             system_prompt=system_prompt,
             security=self.security,
-            provider=ClaudeSdkProvider(delegate_many=self.delegate_many),
+            provider=ClaudeSdkProvider(
+                delegate_many=self.delegate_many,
+                model=worker_model,
+                env=worker_env,
+            ),
             allowed_tools=tools,
             kind="supervisor",
             budget_key=self.budget_key,  # bill against the team's shared pool

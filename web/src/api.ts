@@ -1,4 +1,4 @@
-import type { Health, RoleSpec, SessionMeta } from "./types";
+import type { Health, ProviderInfo, RoleSpec, SessionMeta, SkillInfo } from "./types";
 
 export async function getHealth(): Promise<Health> {
   const r = await fetch("/api/health");
@@ -6,11 +6,33 @@ export async function getHealth(): Promise<Health> {
   return r.json();
 }
 
-export async function createSession(prompt: string, systemPrompt?: string): Promise<SessionMeta> {
+export async function getSkills(): Promise<SkillInfo[]> {
+  const r = await fetch("/api/skills");
+  if (!r.ok) throw new Error(`getSkills ${r.status}`);
+  return r.json();
+}
+
+export async function getProviders(): Promise<ProviderInfo[]> {
+  const r = await fetch("/api/providers");
+  if (!r.ok) throw new Error(`getProviders ${r.status}`);
+  return r.json();
+}
+
+export async function createSession(
+  prompt: string,
+  systemPrompt?: string,
+  provider?: string | null,
+  model?: string | null,
+): Promise<SessionMeta> {
   const r = await fetch("/api/sessions", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ prompt, system_prompt: systemPrompt || null }),
+    body: JSON.stringify({
+      prompt,
+      system_prompt: systemPrompt || null,
+      provider: provider || null,
+      model: model || null,
+    }),
   });
   if (!r.ok) throw new Error(`createSession ${r.status}`);
   return r.json();
@@ -26,13 +48,21 @@ export async function createTeam(
   prompt: string,
   roles?: RoleSpec[],
   systemPrompt?: string,
+  provider?: string | null,
+  model?: string | null,
 ): Promise<SessionMeta> {
   // Omit `roles` → server hires the default team (researcher + coder). The
   // returned session_id is a supervisor AgentSession, streamed like any other.
   const r = await fetch("/api/teams", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ prompt, system_prompt: systemPrompt || null, roles: roles ?? null }),
+    body: JSON.stringify({
+      prompt,
+      system_prompt: systemPrompt || null,
+      roles: roles ?? null,
+      provider: provider || null,
+      model: model || null,
+    }),
   });
   if (!r.ok) throw new Error(`createTeam ${r.status}`);
   return r.json();

@@ -34,10 +34,32 @@ export interface McpServer {
   name: string;
   type: string;
 }
+export interface SkillInfo {
+  name: string;
+  description: string;
+  source: string;
+  path: string;
+}
+export interface ServiceInfo {
+  name: string;
+  url: string;
+  embed?: boolean;
+}
+export interface ProviderInfo {
+  name: string;
+  models: string[];
+}
+export interface Workspace {
+  root: string;
+  level: "full" | "partial" | "none";
+  checks: Record<string, boolean>;
+}
 export interface Health {
   status: string;
   sandbox: SandboxStatus;
   mcp_servers: McpServer[];
+  services: ServiceInfo[];
+  workspace: Workspace;
 }
 
 export interface Usage {

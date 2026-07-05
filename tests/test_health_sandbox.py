@@ -63,3 +63,33 @@ def test_non_dict_mcp_specs_are_dropped(monkeypatch):
 
     importlib.reload(main)
     assert {s["name"] for s in _mcp_servers(main)} == {"fs"}
+
+
+def _services(main):
+    return TestClient(main.app).get("/api/health").json()["services"]
+
+
+def test_health_reports_services(monkeypatch):
+    monkeypatch.setenv(
+        "ORBITER_SERVICES",
+        '[{"name": "Gemini", "url": "https://gemini.google.com", "embed": true}, '
+        '{"name": "Docs", "url": "https://docs.google.com"}]',
+    )
+    import app.main as main
+
+    importlib.reload(main)
+    srvs = _services(main)
+    assert len(srvs) == 2
+    assert srvs[0]["name"] == "Gemini"
+    assert srvs[0]["embed"] is True
+    assert srvs[1]["name"] == "Docs"
+    assert srvs[1]["embed"] is False
+
+
+def test_bad_services_env_does_not_break_boot(monkeypatch):
+    monkeypatch.setenv("ORBITER_SERVICES", "{not json")
+    import app.main as main
+
+    importlib.reload(main)
+    assert _services(main) == []
+

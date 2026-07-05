@@ -1,6 +1,6 @@
 import { create } from "zustand";
-import { approve as apiApprove, createSession, createTeam, getHealth, listSessions, openStream } from "./api";
-import type { ContentBlock, Health, RoleSpec, Row, SessionMeta, StreamEvent, Transcript, Usage } from "./types";
+import { approve as apiApprove, createSession, createTeam, getHealth, getProviders, getSkills, listSessions, openStream } from "./api";
+import type { ContentBlock, Health, ProviderInfo, RoleSpec, Row, ServiceInfo, SessionMeta, SkillInfo, StreamEvent, Transcript, Usage } from "./types";
 
 // Module-level ID for event-log entries — no need to thread a counter through store state.
 let _logSeq = 0;
@@ -30,9 +30,15 @@ interface State {
   health: Health | null; // OS-host posture from GET /api/health
   composing: string;
   mode: "single" | "team"; // team → dispatch a supervisor (POST /api/teams)
+  skills: SkillInfo[];
+  providers: ProviderInfo[];
+  model: { provider: string; model: string } | null;
+  embed: ServiceInfo | null;
   init: () => Promise<void>;
   setComposing: (v: string) => void;
   setMode: (m: "single" | "team") => void;
+  setModel: (m: { provider: string; model: string } | null) => void;
+  setEmbed: (e: ServiceInfo | null) => void;
   dispatch: (prompt: string, systemPrompt?: string, roles?: RoleSpec[]) => Promise<void>;
   select: (id: string) => Promise<void>;
   approve: (approvalId: string, approve: boolean) => Promise<void>;
@@ -180,17 +186,27 @@ export const useStore = create<State>((set, get) => ({
   health: null,
   composing: "",
   mode: "single",
+  skills: [],
+  providers: [],
+  model: null,
+  embed: null,
 
   init: async () => {
     // Fetch in parallel; a failure in either leaves the other's slice intact.
-    const [s, h] = await Promise.allSettled([listSessions(), getHealth()]);
+    const [s, h, sk, p] = await Promise.allSettled([listSessions(), getHealth(), getSkills(), getProviders()]);
     if (s.status === "fulfilled") set({ sessions: s.value });
     if (h.status === "fulfilled") set({ health: h.value });
+    if (sk.status === "fulfilled") set({ skills: sk.value });
+    if (p.status === "fulfilled") set({ providers: p.value });
   },
 
   setComposing: (v) => set({ composing: v }),
 
   setMode: (m) => set({ mode: m }),
+
+  setModel: (m) => set({ model: m }),
+
+  setEmbed: (e) => set({ embed: e }),
 
   dispatch: async (prompt, systemPrompt, roles) => {
     const trimmed = prompt.trim();
@@ -199,10 +215,13 @@ export const useStore = create<State>((set, get) => ({
     // Team mode spawns a supervisor (POST /api/teams); otherwise a plain session.
     // Both return a session_id that streams through the identical path below.
     // Empty roles → server hires DEFAULT_ROLES (researcher + coder).
+    const modelSel = get().model;
+    const provider = modelSel?.provider || null;
+    const model = modelSel?.model || null;
     const meta =
       get().mode === "team"
-        ? await createTeam(trimmed, roles && roles.length ? roles : undefined, systemPrompt)
-        : await createSession(trimmed, systemPrompt);
+        ? await createTeam(trimmed, roles && roles.length ? roles : undefined, systemPrompt, provider, model)
+        : await createSession(trimmed, systemPrompt, provider, model);
     const id = meta.session_id;
 
     // prepend the user's prompt locally

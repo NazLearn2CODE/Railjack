@@ -26,6 +26,7 @@ logger = logging.getLogger("orbiter")
 
 # Project root: app/main.py → parents[1] is the Orbiter root (workspace default + receipt log).
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+WORKSPACE_ROOT = Path(os.environ.get("ORBITER_WORKSPACE_ROOT", PROJECT_ROOT)).resolve(strict=False)
 
 # Singletons — created once at import; reused across requests/connections.
 scheduler = HiveMindScheduler()
@@ -35,7 +36,7 @@ scheduler = HiveMindScheduler()
 # scope the agent to the project root and log receipts under logs/receipts.jsonl.
 security = SecurityPolicy(
     boundary=WorkspaceBoundary(
-        roots=[Path(os.environ.get("ORBITER_WORKSPACE_ROOT", PROJECT_ROOT)).resolve(strict=False)]
+        roots=[WORKSPACE_ROOT]
     ),
     shell=ShellPolicy(),
     ledger=ToolReceiptLedger(
@@ -70,10 +71,41 @@ def _load_mcp_servers() -> dict[str, dict]:
     return valid
 
 
+def _load_services() -> list[dict]:
+    """Parse ORBITER_SERVICES (JSON: [{"name", "url", "embed"?}]).
+
+    Services are launcher tiles displayed in the sidebar. A malformed value logs
+    an error and yields [] so the gateway still boots.
+    """
+    raw = os.environ.get("ORBITER_SERVICES", "").strip()
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as e:
+        logger.error("ORBITER_SERVICES is not valid JSON (%s); no services loaded", e)
+        return []
+    if not isinstance(parsed, list):
+        logger.error("ORBITER_SERVICES must be a JSON list of services; got %s", type(parsed).__name__)
+        return []
+    valid = []
+    for item in parsed:
+        if isinstance(item, dict) and "name" in item and "url" in item:
+            valid.append({
+                "name": str(item["name"]),
+                "url": str(item["url"]),
+                "embed": bool(item.get("embed", False))
+            })
+        else:
+            logger.error("ORBITER_SERVICES: skipped invalid item %s", item)
+    return valid
+
+
 # External MCP servers applied to every session (single-agent + supervisor + workers).
 # ponytail: global, not per-session — local single-user OS, one config. Per-session
 # config when an operator needs different MCP sets per run.
 EXTERNAL_MCP = _load_mcp_servers()
+SERVICES = _load_services()
 provider = ClaudeSdkProvider(mcp_servers=EXTERNAL_MCP)
 manager = AgentSessionManager(scheduler, security=security, provider=provider)
 
@@ -101,6 +133,8 @@ app = FastAPI(title="Orbiter", version="0.1.0")
 class CreateSession(BaseModel):
     prompt: str
     system_prompt: str | None = None
+    provider: str | None = None
+    model: str | None = None
 
 
 class ApproveTool(BaseModel):
@@ -117,6 +151,8 @@ class CreateTeam(BaseModel):
     prompt: str
     system_prompt: str | None = None
     roles: list[RoleSpec] | None = None
+    provider: str | None = None
+    model: str | None = None
 
 
 @app.post("/api/teams")
@@ -127,30 +163,60 @@ async def create_team(req: CreateTeam):
     the existing /ws/sessions/{id} stream + /approve gate + GET detail drive it
     like any single-agent run — delegation surfaces as `delegate` tool calls.
     """
-    team = Team(
-        scheduler,
-        security=security,
-        worker_provider=ClaudeSdkProvider(mcp_servers=EXTERNAL_MCP),
-        register=manager.register,
-    )
-    if req.roles:
-        team.hire(*(WorkerRole(name=r.name, system_prompt=r.system_prompt) for r in req.roles))
-    else:
-        team.hire(*DEFAULT_ROLES)
-    roles = list(team.roles)
+    try:
+        worker_provider = ClaudeSdkProvider(mcp_servers=EXTERNAL_MCP)
+        if req.provider:
+            from app.core.registry import REGISTRY
+            resolved_model, env_overrides = REGISTRY.resolve(req.provider, req.model)
+            worker_provider = ClaudeSdkProvider(
+                mcp_servers=EXTERNAL_MCP,
+                model=resolved_model,
+                env=env_overrides,
+            )
+        team = Team(
+            scheduler,
+            security=security,
+            worker_provider=worker_provider,
+            register=manager.register,
+        )
+        if req.roles:
+            team.hire(*(WorkerRole(name=r.name, system_prompt=r.system_prompt) for r in req.roles))
+        else:
+            team.hire(*DEFAULT_ROLES)
+        roles = list(team.roles)
 
-    sup = team.supervisor(
-        req.prompt,
-        system_prompt=req.system_prompt or default_supervisor_prompt(list(team.roles.values())),
-    )
-    manager.register(sup)
-    return {"session_id": sup.session_id, "status": sup.status, "prompt": sup.prompt, "kind": sup.kind, "roles": roles}
+        sup = team.supervisor(
+            req.prompt,
+            system_prompt=req.system_prompt or default_supervisor_prompt(list(team.roles.values())),
+        )
+        manager.register(sup)
+        return {"session_id": sup.session_id, "status": sup.status, "prompt": sup.prompt, "kind": sup.kind, "roles": roles}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @app.post("/api/sessions")
 async def create_session(req: CreateSession):
-    s = manager.create_session(req.prompt, req.system_prompt)
-    return {"session_id": s.session_id, "status": s.status, "prompt": s.prompt}
+    try:
+        custom_provider = None
+        if req.provider:
+            from app.core.registry import REGISTRY
+            resolved_model, env_overrides = REGISTRY.resolve(req.provider, req.model)
+            custom_provider = ClaudeSdkProvider(
+                mcp_servers=EXTERNAL_MCP,
+                model=resolved_model,
+                env=env_overrides,
+            )
+        s = manager.create_session(req.prompt, req.system_prompt, provider=custom_provider)
+        return {"session_id": s.session_id, "status": s.status, "prompt": s.prompt}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.get("/api/providers")
+async def list_providers():
+    from app.core.registry import REGISTRY
+    return REGISTRY.public_view()
 
 
 @app.get("/api/sessions")
@@ -182,6 +248,13 @@ async def approve_tool(session_id: str, req: ApproveTool):
         raise HTTPException(status_code=404, detail="session not found")
     await s.approve_tool(req.approval_id, req.approve)
     return {"ok": True}
+
+
+@app.get("/api/skills")
+async def list_skills():
+    from app.core.skills import scan_skills
+    return scan_skills(WORKSPACE_ROOT)
+
 
 
 @app.websocket("/ws/sessions/{session_id}")
@@ -222,6 +295,7 @@ DASHBOARD_DIST = Path(__file__).resolve().parent.parent / "web" / "dist"
 
 @app.get("/api/health")
 async def health():
+    from app.core.cephalon import probe
     return {
         "status": "OK",
         "sandbox": {
@@ -236,6 +310,8 @@ async def health():
             {"name": name, "type": spec.get("type") or "stdio"}
             for name, spec in EXTERNAL_MCP.items()
         ],
+        "services": SERVICES,
+        "workspace": probe(WORKSPACE_ROOT),
     }
 
 

@@ -308,10 +308,15 @@ class AgentSessionManager:
         self.provider = provider
         self.sessions: Dict[str, AgentSession] = {}
 
-    def create_session(self, prompt: str, system_prompt: Optional[str] = None) -> AgentSession:
+    def create_session(
+        self,
+        prompt: str,
+        system_prompt: Optional[str] = None,
+        provider: Optional[Provider] = None,
+    ) -> AgentSession:
         session_id = str(uuid.uuid4())
         session = AgentSession(session_id, prompt, self.scheduler, system_prompt,
-                               security=self.security, provider=self.provider)
+                               security=self.security, provider=provider or self.provider)
         self.sessions[session_id] = session
         return session
 

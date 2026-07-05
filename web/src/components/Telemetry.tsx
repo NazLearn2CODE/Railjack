@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import { useStore } from "../store";
-import { cn, connMeta } from "../util";
+import { cn, connMeta, activeSkill } from "../util";
 import type { LogEntry } from "../store";
 
 function Panel({ idx, title, children }: { idx: string; title: string; children: ReactNode }) {
@@ -60,6 +60,7 @@ export default function Telemetry() {
       <Panel idx="02" title="SESSION">
         <Readout label="ID" value={activeId ? activeId.slice(0, 13) + "…" : "—"} />
         <Readout label="STATUS" value={(t?.status ?? "—").toUpperCase()} />
+        <Readout label="SKILL" value={activeSkill(t?.rows)} />
         <Readout label="TOKENS" value={String(t?.tokens ?? 0)} />
         <Readout label="ROWS" value={String(t?.rows.length ?? 0)} />
         <Readout label="LINK" value={c.label} />
@@ -104,6 +105,57 @@ export default function Telemetry() {
             <span className="ml-auto uppercase text-faint">{s.type}</span>
           </div>
         ))}
+      </Panel>
+
+      <Panel idx="05" title="PROJECT">
+        <Readout
+          label="ROOT"
+          value={health?.workspace?.root ? health.workspace.root.split("/").slice(-3).join("/") : "—"}
+        />
+        <div className="flex items-center justify-between border-b border-edge-soft py-1">
+          <span className="label !text-[9px]">CEPHALON</span>
+          <span className="flex items-center gap-2 mono text-[10px]">
+            <span
+              className={cn(
+                "pip",
+                health?.workspace?.level === "full"
+                  ? "pip--go"
+                  : health?.workspace?.level === "partial"
+                  ? "pip--hazard"
+                  : "pip--crit"
+              )}
+            />
+            <span className="uppercase text-phosphor-dim">{health?.workspace?.level ?? "NONE"}</span>
+          </span>
+        </div>
+        {health?.workspace?.checks && (
+          <div className="mt-1 space-y-1.5">
+            <div className="mono flex items-center justify-between text-[10px]">
+              <span className="text-faint">CLAUDE.md</span>
+              <span className={health.workspace.checks.claude_md ? "text-go" : "text-critical"}>
+                {health.workspace.checks.claude_md ? "✓" : "✗"}
+              </span>
+            </div>
+            <div className="mono flex items-center justify-between text-[10px]">
+              <span className="text-faint">CodeCompass.md</span>
+              <span className={health.workspace.checks.code_compass ? "text-go" : "text-critical"}>
+                {health.workspace.checks.code_compass ? "✓" : "✗"}
+              </span>
+            </div>
+            <div className="mono flex items-center justify-between text-[10px]">
+              <span className="text-faint">A-project/index.md</span>
+              <span className={health.workspace.checks.project_index ? "text-go" : "text-critical"}>
+                {health.workspace.checks.project_index ? "✓" : "✗"}
+              </span>
+            </div>
+            <div className="mono flex items-center justify-between text-[10px]">
+              <span className="text-faint">Obsidian MCP</span>
+              <span className={health.workspace.checks.obsidian_mcp ? "text-go" : "text-critical"}>
+                {health.workspace.checks.obsidian_mcp ? "✓" : "✗"}
+              </span>
+            </div>
+          </div>
+        )}
       </Panel>
     </aside>
   );

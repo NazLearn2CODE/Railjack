@@ -4,6 +4,7 @@ import { cn, shortId, statusMeta } from "../util";
 import ApprovalCard from "./ApprovalCard";
 import Composer from "./Composer";
 import Message from "./Message";
+import ServiceFrame from "./ServiceFrame";
 
 function Stat({ label, value }: { label: string; value: string }) {
   return (
@@ -18,11 +19,20 @@ export default function Console() {
   const activeId = useStore((s) => s.activeId);
   const t = useStore((s) => (s.activeId ? s.transcripts[s.activeId] : undefined));
   const approve = useStore((s) => s.approve);
+  const embed = useStore((s) => s.embed);
   const endRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [t?.rows.length, activeId]);
+
+  if (embed) {
+    return (
+      <section className="reveal reveal-3 hud hud--bracket m-2 mx-1 flex min-h-0 flex-col">
+        <ServiceFrame />
+      </section>
+    );
+  }
 
   if (!activeId || !t) {
     return (

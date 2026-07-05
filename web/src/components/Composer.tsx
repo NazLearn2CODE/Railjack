@@ -128,6 +128,57 @@ export default function Composer() {
           >
             {team ? "● TEAM" : "○ TEAM"}
           </button>
+          {(() => {
+            const providers = useStore((s) => s.providers);
+            const selectedModel = useStore((s) => s.model);
+            const setModel = useStore((s) => s.setModel);
+
+            const modelOptions: ({ provider: string; model: string | null } | null)[] = [null];
+            for (const p of providers) {
+              if (p.models.length === 0) {
+                modelOptions.push({ provider: p.name, model: null });
+              } else {
+                for (const m of p.models) {
+                  modelOptions.push({ provider: p.name, model: m });
+                }
+              }
+            }
+
+            if (modelOptions.length <= 1) return null;
+
+            const cycleModel = () => {
+              const currentIndex = modelOptions.findIndex(
+                (opt) =>
+                  (opt === null && selectedModel === null) ||
+                  (opt !== null &&
+                    selectedModel !== null &&
+                    opt.provider === selectedModel.provider &&
+                    opt.model === selectedModel.model)
+              );
+              const nextIndex = (currentIndex + 1) % modelOptions.length;
+              const nextOpt = modelOptions[nextIndex];
+              if (nextOpt === null) {
+                setModel(null);
+              } else {
+                setModel({ provider: nextOpt.provider, model: nextOpt.model || "" });
+              }
+            };
+
+            const getModelLabel = () => {
+              if (!selectedModel) return "DEFAULT";
+              return selectedModel.model ? `${selectedModel.provider}/${selectedModel.model}` : selectedModel.provider;
+            };
+
+            return (
+              <button
+                className={cn("transition-colors hover:text-signal uppercase", selectedModel && "text-signal")}
+                onClick={cycleModel}
+                title="Cycle model/provider"
+              >
+                MDL ▸ {getModelLabel()}
+              </button>
+            );
+          })()}
           {team && (
             <button
               className={cn("transition-colors hover:text-signal", rolesOpen && "text-signal")}

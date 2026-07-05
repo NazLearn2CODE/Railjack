@@ -79,6 +79,8 @@ class ClaudeSdkProvider:
         self,
         delegate_many: Optional[Callable[[list[dict[str, Any]]], Awaitable[str]]] = None,
         mcp_servers: Optional[dict[str, dict[str, Any]]] = None,
+        model: Optional[str] = None,
+        env: Optional[dict[str, str]] = None,
     ):
         # When set, the supervisor gains a `delegate_many` tool (in-process MCP
         # server) that fans out workers via the orchestrator. None for
@@ -89,6 +91,8 @@ class ClaudeSdkProvider:
         # concrete-impl concern — the Provider Protocol stays SDK-free; FakeProvider
         # ignores it. Merged with the in-process `orbiter` server in stream().
         self._external_mcp = mcp_servers
+        self._model = model
+        self._env = env
 
     @staticmethod
     def _verdict_to_hook_output(verdict: ToolDecision) -> dict:
@@ -157,6 +161,10 @@ class ClaudeSdkProvider:
             setting_sources=[],
             session_id=session_id,
         )
+        if self._model:
+            options_kwargs["model"] = self._model
+        if self._env:
+            options_kwargs["env"] = self._env
 
         # MCP servers (blueprint §3.2 host/client): external operator-configured
         # servers, plus — for a supervisor — the in-process `orbiter` delegate_many

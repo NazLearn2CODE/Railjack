@@ -1,4 +1,4 @@
-import type { SessionStatus } from "./types";
+import type { Row, SessionStatus } from "./types";
 
 export function cn(...xs: (string | false | null | undefined)[]): string {
   return xs.filter(Boolean).join(" ");
@@ -41,3 +41,18 @@ export function clock(d: Date): string {
 export function shortId(id: string): string {
   return id.slice(0, 8);
 }
+
+export function activeSkill(rows: Row[] | undefined): string {
+  if (!rows) return "—";
+  for (let i = rows.length - 1; i >= 0; i--) {
+    const row = rows[i];
+    if (row.kind === "tool_use" && row.name === "Skill") {
+      const input = row.input as { skill?: string } | null;
+      if (input && input.skill) {
+        return input.skill;
+      }
+    }
+  }
+  return "—";
+}
+
