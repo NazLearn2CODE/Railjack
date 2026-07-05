@@ -14,12 +14,15 @@ from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
+from app.core import registry
 from app.core.agent import AgentSessionManager
+from app.core.cephalon import probe
 from app.core.orchestrator import DEFAULT_ROLES, Team, WorkerRole, default_supervisor_prompt
 from app.core.provider import ClaudeSdkProvider
 from app.core.scheduler import HiveMindScheduler
 from app.core.sandbox import LandlockSandbox, NoopSandbox
 from app.core.security import SecurityPolicy, WorkspaceBoundary, ShellPolicy, ToolReceiptLedger
+from app.core.skills import scan_skills
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s | %(message)s")
 logger = logging.getLogger("orbiter")
@@ -45,6 +48,26 @@ security = SecurityPolicy(
     ),
 )
 
+def _load_json_env(name: str, expected: type, empty):
+    """Parse env var `name` as JSON of `expected` container type.
+
+    Returns `empty` on unset / malformed / wrong-type (logged) so the gateway
+    still boots. Callers do their own per-item validation.
+    """
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return empty
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as e:
+        logger.error("%s is not valid JSON (%s); ignoring", name, e)
+        return empty
+    if not isinstance(parsed, expected):
+        logger.error("%s must be a JSON %s; got %s", name, expected.__name__, type(parsed).__name__)
+        return empty
+    return parsed
+
+
 def _load_mcp_servers() -> dict[str, dict]:
     """Parse ORBITER_MCP_SERVERS (JSON: {name: McpServerConfig}).
 
@@ -52,17 +75,7 @@ def _load_mcp_servers() -> dict[str, dict]:
     malformed value logs an error and yields {} so the gateway still boots — verify
     what loaded via GET /api/health (which reports names + types, never secrets).
     """
-    raw = os.environ.get("ORBITER_MCP_SERVERS", "").strip()
-    if not raw:
-        return {}
-    try:
-        parsed = json.loads(raw)
-    except json.JSONDecodeError as e:
-        logger.error("ORBITER_MCP_SERVERS is not valid JSON (%s); no external MCP servers loaded", e)
-        return {}
-    if not isinstance(parsed, dict):
-        logger.error("ORBITER_MCP_SERVERS must be a JSON object of {name: spec}; got %s", type(parsed).__name__)
-        return {}
+    parsed = _load_json_env("ORBITER_MCP_SERVERS", dict, {})
     # Each value must be a server-spec dict; the SDK validates the full shape at run
     # time, but a non-dict here would crash /api/health's spec.get("type"). Drop + log.
     valid = {k: v for k, v in parsed.items() if isinstance(v, dict)}
@@ -77,19 +90,8 @@ def _load_services() -> list[dict]:
     Services are launcher tiles displayed in the sidebar. A malformed value logs
     an error and yields [] so the gateway still boots.
     """
-    raw = os.environ.get("ORBITER_SERVICES", "").strip()
-    if not raw:
-        return []
-    try:
-        parsed = json.loads(raw)
-    except json.JSONDecodeError as e:
-        logger.error("ORBITER_SERVICES is not valid JSON (%s); no services loaded", e)
-        return []
-    if not isinstance(parsed, list):
-        logger.error("ORBITER_SERVICES must be a JSON list of services; got %s", type(parsed).__name__)
-        return []
     valid = []
-    for item in parsed:
+    for item in _load_json_env("ORBITER_SERVICES", list, []):
         if isinstance(item, dict) and "name" in item and "url" in item:
             valid.append({
                 "name": str(item["name"]),
@@ -166,8 +168,7 @@ async def create_team(req: CreateTeam):
     try:
         worker_provider = ClaudeSdkProvider(mcp_servers=EXTERNAL_MCP)
         if req.provider:
-            from app.core.registry import REGISTRY
-            resolved_model, env_overrides = REGISTRY.resolve(req.provider, req.model)
+            resolved_model, env_overrides = registry.resolve(req.provider, req.model)
             worker_provider = ClaudeSdkProvider(
                 mcp_servers=EXTERNAL_MCP,
                 model=resolved_model,
@@ -200,8 +201,7 @@ async def create_session(req: CreateSession):
     try:
         custom_provider = None
         if req.provider:
-            from app.core.registry import REGISTRY
-            resolved_model, env_overrides = REGISTRY.resolve(req.provider, req.model)
+            resolved_model, env_overrides = registry.resolve(req.provider, req.model)
             custom_provider = ClaudeSdkProvider(
                 mcp_servers=EXTERNAL_MCP,
                 model=resolved_model,
@@ -215,8 +215,7 @@ async def create_session(req: CreateSession):
 
 @app.get("/api/providers")
 async def list_providers():
-    from app.core.registry import REGISTRY
-    return REGISTRY.public_view()
+    return registry.public_view()
 
 
 @app.get("/api/sessions")
@@ -252,9 +251,7 @@ async def approve_tool(session_id: str, req: ApproveTool):
 
 @app.get("/api/skills")
 async def list_skills():
-    from app.core.skills import scan_skills
     return scan_skills(WORKSPACE_ROOT)
-
 
 
 @app.websocket("/ws/sessions/{session_id}")
@@ -295,7 +292,6 @@ DASHBOARD_DIST = Path(__file__).resolve().parent.parent / "web" / "dist"
 
 @app.get("/api/health")
 async def health():
-    from app.core.cephalon import probe
     return {
         "status": "OK",
         "sandbox": {

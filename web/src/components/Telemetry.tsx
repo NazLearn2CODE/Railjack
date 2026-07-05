@@ -3,6 +3,13 @@ import { useStore } from "../store";
 import { cn, connMeta, activeSkill } from "../util";
 import type { LogEntry } from "../store";
 
+const CEPHALON_CHECKS = [
+  ["CLAUDE.md", "claude_md"],
+  ["CodeCompass.md", "code_compass"],
+  ["A-project/index.md", "project_index"],
+  ["Obsidian MCP", "obsidian_mcp"],
+] as const;
+
 function Panel({ idx, title, children }: { idx: string; title: string; children: ReactNode }) {
   return (
     <div className="border border-edge bg-void/60">
@@ -130,30 +137,15 @@ export default function Telemetry() {
         </div>
         {health?.workspace?.checks && (
           <div className="mt-1 space-y-1.5">
-            <div className="mono flex items-center justify-between text-[10px]">
-              <span className="text-faint">CLAUDE.md</span>
-              <span className={health.workspace.checks.claude_md ? "text-go" : "text-critical"}>
-                {health.workspace.checks.claude_md ? "✓" : "✗"}
-              </span>
-            </div>
-            <div className="mono flex items-center justify-between text-[10px]">
-              <span className="text-faint">CodeCompass.md</span>
-              <span className={health.workspace.checks.code_compass ? "text-go" : "text-critical"}>
-                {health.workspace.checks.code_compass ? "✓" : "✗"}
-              </span>
-            </div>
-            <div className="mono flex items-center justify-between text-[10px]">
-              <span className="text-faint">A-project/index.md</span>
-              <span className={health.workspace.checks.project_index ? "text-go" : "text-critical"}>
-                {health.workspace.checks.project_index ? "✓" : "✗"}
-              </span>
-            </div>
-            <div className="mono flex items-center justify-between text-[10px]">
-              <span className="text-faint">Obsidian MCP</span>
-              <span className={health.workspace.checks.obsidian_mcp ? "text-go" : "text-critical"}>
-                {health.workspace.checks.obsidian_mcp ? "✓" : "✗"}
-              </span>
-            </div>
+            {CEPHALON_CHECKS.map(([label, key]) => {
+              const ok = health.workspace!.checks[key];
+              return (
+                <div key={key} className="mono flex items-center justify-between text-[10px]">
+                  <span className="text-faint">{label}</span>
+                  <span className={ok ? "text-go" : "text-critical"}>{ok ? "✓" : "✗"}</span>
+                </div>
+              );
+            })}
           </div>
         )}
       </Panel>

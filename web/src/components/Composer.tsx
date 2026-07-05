@@ -9,6 +9,9 @@ export default function Composer() {
   const dispatch = useStore((s) => s.dispatch);
   const mode = useStore((s) => s.mode);
   const setMode = useStore((s) => s.setMode);
+  const providers = useStore((s) => s.providers);
+  const selectedModel = useStore((s) => s.model);
+  const setModel = useStore((s) => s.setModel);
   const t = useStore((s) => (s.activeId ? s.transcripts[s.activeId] : undefined));
   const [sysOpen, setSysOpen] = useState(false);
   const [sys, setSys] = useState("");
@@ -24,6 +27,35 @@ export default function Composer() {
   // A role with an empty name is never hired — drop it on dispatch. Empty roster
   // → server hires DEFAULT_ROLES (researcher + coder).
   const named = roles.filter((r) => r.name.trim());
+
+  // Model/provider cycle: null = DEFAULT (send nothing), then one entry per model
+  // (or a bare provider entry when it lists no models). Provider-only options carry
+  // model "" — same value the store holds — so match on (model ?? "").
+  const modelOptions: ({ provider: string; model: string | null } | null)[] = [
+    null,
+    ...providers.flatMap((p): { provider: string; model: string | null }[] =>
+      p.models.length
+        ? p.models.map((m) => ({ provider: p.name, model: m }))
+        : [{ provider: p.name, model: null }],
+    ),
+  ];
+  const cycleModel = () => {
+    const i = modelOptions.findIndex(
+      (o) =>
+        (o === null && !selectedModel) ||
+        (o !== null &&
+          selectedModel != null &&
+          o.provider === selectedModel.provider &&
+          (o.model ?? "") === selectedModel.model),
+    );
+    const next = modelOptions[(i + 1) % modelOptions.length];
+    setModel(next ? { provider: next.provider, model: next.model ?? "" } : null);
+  };
+  const modelLabel = !selectedModel
+    ? "DEFAULT"
+    : selectedModel.model
+      ? `${selectedModel.provider}/${selectedModel.model}`
+      : selectedModel.provider;
 
   const send = () => {
     if (busy || !composing.trim()) return;
@@ -128,57 +160,15 @@ export default function Composer() {
           >
             {team ? "● TEAM" : "○ TEAM"}
           </button>
-          {(() => {
-            const providers = useStore((s) => s.providers);
-            const selectedModel = useStore((s) => s.model);
-            const setModel = useStore((s) => s.setModel);
-
-            const modelOptions: ({ provider: string; model: string | null } | null)[] = [null];
-            for (const p of providers) {
-              if (p.models.length === 0) {
-                modelOptions.push({ provider: p.name, model: null });
-              } else {
-                for (const m of p.models) {
-                  modelOptions.push({ provider: p.name, model: m });
-                }
-              }
-            }
-
-            if (modelOptions.length <= 1) return null;
-
-            const cycleModel = () => {
-              const currentIndex = modelOptions.findIndex(
-                (opt) =>
-                  (opt === null && selectedModel === null) ||
-                  (opt !== null &&
-                    selectedModel !== null &&
-                    opt.provider === selectedModel.provider &&
-                    opt.model === selectedModel.model)
-              );
-              const nextIndex = (currentIndex + 1) % modelOptions.length;
-              const nextOpt = modelOptions[nextIndex];
-              if (nextOpt === null) {
-                setModel(null);
-              } else {
-                setModel({ provider: nextOpt.provider, model: nextOpt.model || "" });
-              }
-            };
-
-            const getModelLabel = () => {
-              if (!selectedModel) return "DEFAULT";
-              return selectedModel.model ? `${selectedModel.provider}/${selectedModel.model}` : selectedModel.provider;
-            };
-
-            return (
-              <button
-                className={cn("transition-colors hover:text-signal uppercase", selectedModel && "text-signal")}
-                onClick={cycleModel}
-                title="Cycle model/provider"
-              >
-                MDL ▸ {getModelLabel()}
-              </button>
-            );
-          })()}
+          {modelOptions.length > 1 && (
+            <button
+              className={cn("transition-colors hover:text-signal uppercase", selectedModel && "text-signal")}
+              onClick={cycleModel}
+              title="Cycle model/provider"
+            >
+              MDL ▸ {modelLabel}
+            </button>
+          )}
           {team && (
             <button
               className={cn("transition-colors hover:text-signal", rolesOpen && "text-signal")}
