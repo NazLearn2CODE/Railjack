@@ -147,6 +147,10 @@ class RegisterProvider(BaseModel):
     models: list[str] | None = None
 
 
+class ResolveCheck(BaseModel):
+    check: str
+
+
 class ApproveTool(BaseModel):
     approval_id: str
     approve: bool
@@ -244,22 +248,73 @@ async def fs_list(path: str = "."):
         p = Path(path).resolve()
         if not p.is_dir():
             p = Path(".").resolve()
+    except Exception:
+        p = Path(".").resolve()
         
-        subdirs = []
+    subdirs = []
+    try:
         if p.parent != p:
             subdirs.append({"name": "..", "path": str(p.parent.resolve())})
-            
+    except Exception:
+        pass
+        
+    try:
         for child in p.iterdir():
             try:
                 if child.is_dir() and not child.name.startswith("."):
                     subdirs.append({"name": child.name, "path": str(child.resolve())})
-            except PermissionError:
+            except Exception:
                 continue
-                
-        subdirs.sort(key=lambda x: (x["name"] != "..", x["name"].lower()))
-        return {"current": str(p.resolve()), "dirs": subdirs}
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+    except Exception:
+        pass
+        
+    subdirs.sort(key=lambda x: (x["name"] != "..", x["name"].lower()))
+    return {"current": str(p.resolve()), "dirs": subdirs}
+
+
+@app.post("/api/health/resolve")
+async def resolve_check(req: ResolveCheck):
+    from app.core.cephalon import probe
+    
+    if req.check == "claude_md":
+        claude_path = WORKSPACE_ROOT / "CLAUDE.md"
+        if not claude_path.is_file():
+            claude_path.write_text("# CLAUDE.md\n\nBuild/test instructions for the project.", encoding="utf-8")
+            
+    elif req.check == "code_compass":
+        compass_path = WORKSPACE_ROOT / "CodeCompass.md"
+        if not compass_path.is_file():
+            compass_path.write_text("# CodeCompass.md\n\nNavigation map for the project.", encoding="utf-8")
+            
+    elif req.check == "project_index":
+        index_dir = WORKSPACE_ROOT / "A-project"
+        index_dir.mkdir(parents=True, exist_ok=True)
+        index_path = index_dir / "index.md"
+        if not index_path.is_file():
+            index_path.write_text("# Project Index\n\nMilestones and project roadmap.", encoding="utf-8")
+            
+    elif req.check == "obsidian_mcp":
+        mcp_path = WORKSPACE_ROOT / ".mcp.json"
+        data = {}
+        if mcp_path.is_file():
+            try:
+                data = json.loads(mcp_path.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+        
+        servers = data.setdefault("mcpServers", {})
+        if "obsidian" not in servers:
+            servers["obsidian"] = {
+                "command": "node",
+                "args": ["@modelcontextprotocol/server-obsidian"],
+                "env": {
+                    "OBSIDIAN_VAULT": str(WORKSPACE_ROOT)
+                }
+            }
+        mcp_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        
+    probe.cache_clear()
+    return {"ok": True}
 
 
 
@@ -284,6 +339,15 @@ async def get_session(session_id: str):
         "error": s.error_message,
         "messages": s.messages,
     }
+
+
+@app.delete("/api/sessions/{session_id}")
+async def delete_session(session_id: str):
+    s = manager.get_session(session_id)
+    if s is None:
+        raise HTTPException(status_code=404, detail="session not found")
+    manager.delete_session(session_id)
+    return {"ok": True}
 
 
 @app.post("/api/sessions/{session_id}/approve")

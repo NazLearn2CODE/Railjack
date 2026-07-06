@@ -4,15 +4,15 @@ import { cn, shortId, statusMeta } from "../util";
 import SkillsList from "./SkillsList";
 import ServicesList from "./ServicesList";
 
-// Common model names for the dropdown suggestions when providers list none.
-const KNOWN_MODELS = [
-  "claude-sonnet-5",
-  "claude-opus-4-8",
-  "claude-haiku-4-5-20251001",
-  "claude-fable-5",
-];
 
-export default function Sidebar({ onDismiss }: { onDismiss: () => void }) {
+
+export default function Sidebar({
+  collapsed,
+  onToggleCollapse,
+}: {
+  collapsed: boolean;
+  onToggleCollapse: () => void;
+}) {
   const sessions = useStore((s) => s.sessions);
   const activeId = useStore((s) => s.activeId);
   const transcripts = useStore((s) => s.transcripts);
@@ -23,79 +23,101 @@ export default function Sidebar({ onDismiss }: { onDismiss: () => void }) {
   const setModel = useStore((s) => s.setModel);
   const [tab, setTab] = useState<"sessions" | "skills" | "services">("sessions");
 
-  // Build flat list of all model suggestions for the datalist.
-  const suggestions = providers.flatMap((p) =>
-    p.models.length ? p.models.map((m) => `${p.name}/${m}`) : [],
-  );
-  const allOptions = suggestions.length > 0 ? suggestions : KNOWN_MODELS;
+  if (collapsed) {
+    return (
+      <aside className="reveal reveal-2 hud hud--bracket m-2 mr-1 flex w-[48px] min-h-0 flex-col items-center py-3 bg-panel/30 border border-edge shrink-0 select-none">
+        <button
+          className="btn !px-1.5 !py-0.5 !text-[12px] hover:text-signal transition-colors mb-6 shrink-0"
+          onClick={onToggleCollapse}
+          title="Expand sidebar"
+        >
+          ▶
+        </button>
+        <div
+          className="flex-1 flex flex-col items-center justify-center gap-10 text-faint font-mono text-[9px] tracking-[0.2em] uppercase"
+          style={{ writingMode: "vertical-rl", textOrientation: "mixed" }}
+        >
+          <span>SESSIONS</span>
+          <span>SKILLS</span>
+          <span>SERVICES</span>
+        </div>
+      </aside>
+    );
+  }
 
-  const currentDisplay = selectedModel
-    ? selectedModel.model
-      ? `${selectedModel.provider}/${selectedModel.model}`
-      : selectedModel.provider
-    : "DEFAULT";
-
-  const [dropdownOpen, setDropdownOpen] = useState(false);
-  const [customInput, setCustomInput] = useState("");
-
-  const selectOption = (val: string) => {
-    if (!val.trim()) { setModel(null); }
-    else if (val.includes("/")) {
-      const [provider, model] = val.split("/", 2);
-      setModel({ provider, model });
+  const flatModels: { provider: string; model: string | null; label: string }[] = [];
+  for (const p of providers) {
+    if (p.models.length === 0) {
+      flatModels.push({ provider: p.name, model: null, label: p.name });
     } else {
-      setModel({ provider: providers[0]?.name ?? "default", model: val });
+      for (const m of p.models) {
+        flatModels.push({ provider: p.name, model: m, label: `${p.name} / ${m}` });
+      }
     }
-    setDropdownOpen(false);
-    setCustomInput("");
+  }
+
+  const selectValue = selectedModel
+    ? `${selectedModel.provider}:${selectedModel.model || ""}`
+    : "";
+
+  const handleDeleteSession = async (sessionId: string) => {
+    try {
+      const res = await fetch(`/api/sessions/${sessionId}`, {
+        method: "DELETE"
+      });
+      if (res.ok) {
+        if (activeId === sessionId) {
+          useStore.setState({ activeId: null });
+        }
+        await init();
+      }
+    } catch (e) {
+      console.error(e);
+    }
   };
 
   return (
     <aside className="reveal reveal-2 hud hud--bracket m-2 mr-1 flex min-h-0 flex-col">
       {/* Model selector — always visible at top */}
-      <div className="flex items-center justify-between border-b border-edge px-3 py-2 gap-2">
+      <div className="flex items-center justify-between border-b border-edge px-3 py-2 gap-2 shrink-0">
         <div className="flex items-center gap-2 min-w-0 flex-1 relative">
           <span className="pip pip--signal shrink-0" />
-          {dropdownOpen ? (
-            <div className="flex items-center gap-1 min-w-0 flex-1">
-              <input
-                autoFocus
-                list="model-options"
-                className="input !py-0.5 !text-[12px] !px-1.5 min-w-0 flex-1"
-                placeholder="type or select model…"
-                value={customInput}
-                onChange={(e) => setCustomInput(e.target.value)}
-                onKeyDown={(e) => { if (e.key === "Enter") { selectOption(customInput); } if (e.key === "Escape") setDropdownOpen(false); }}
-              />
-              <datalist id="model-options">
-                <option value="DEFAULT" />
-                {allOptions.map((m) => <option key={m} value={m} />)}
-              </datalist>
-              <button className="btn !px-1.5 !py-0.5 !text-[12px] shrink-0" onClick={() => selectOption(customInput)}>SET</button>
-            </div>
-          ) : (
-            <button
-              className="flex items-center gap-1.5 hover:text-signal transition-colors min-w-0"
-              onClick={() => { setDropdownOpen(true); setCustomInput(""); }}
-              title="Click to change model"
-            >
-              <span className="display text-[12px] font-bold tracking-[0.14em] text-phosphor-dim truncate">{currentDisplay}</span>
-              <span className="label text-[10px] text-faint shrink-0">▾</span>
-            </button>
-          )}
+          <select
+            value={selectValue}
+            onChange={(e) => {
+              const val = e.target.value;
+              if (!val) {
+                setModel(null);
+              } else {
+                const [pName, mName] = val.split(":");
+                setModel({ provider: pName, model: mName || "" });
+              }
+            }}
+            className={cn(
+              "bg-void border border-edge text-phosphor-dim hover:text-signal transition-colors font-mono text-[9px] uppercase p-1 max-w-[150px] outline-none",
+              !selectedModel && "text-glow"
+            )}
+          >
+            <option value="">CLAUDE 3.5 SONNET</option>
+            {flatModels.map((opt, i) => (
+              <option key={i} value={`${opt.provider}:${opt.model || ""}`}>
+                {opt.label}
+              </option>
+            ))}
+          </select>
         </div>
         <div className="flex items-center gap-1 shrink-0">
           <button className="btn !px-1.5 !py-0.5 !text-[12px]" onClick={() => void init()} title="refresh">
             ↻
           </button>
-          <button className="btn !px-1.5 !py-0.5 !text-[12px] hover:text-critical" onClick={onDismiss} title="dismiss">
-            ✕
+          <button className="btn !px-1.5 !py-0.5 !text-[12px]" onClick={onToggleCollapse} title="Collapse sidebar">
+            ◀
           </button>
         </div>
       </div>
 
       {/* Tab bar */}
-      <div className="flex items-center gap-2 border-b border-edge-soft px-3 py-1.5">
+      <div className="flex items-center gap-2 border-b border-edge-soft px-3 py-1.5 shrink-0">
         <button
           onClick={() => setTab("sessions")}
           className={cn("hover:text-signal transition-colors uppercase font-bold px-1 py-0.5 text-[13px]", tab === "sessions" && "text-signal border-b border-signal")}
@@ -133,34 +155,48 @@ export default function Sidebar({ onDismiss }: { onDismiss: () => void }) {
               );
               const active = s.session_id === activeId;
               return (
-                <button
+                <div
                   key={s.session_id}
-                  onClick={() => void select(s.session_id)}
                   className={cn(
-                    "block w-full border-b border-edge-soft px-3 py-2.5 text-left transition-colors",
+                    "flex items-center justify-between border-b border-edge-soft transition-colors",
                     active ? "bg-signal/10" : "hover:bg-panel-2",
                   )}
                 >
-                  <div className="mb-1 flex items-center justify-between gap-2">
-                    <span className="flex items-center gap-2">
-                      <span className={cn("pip", meta.pip)} />
-                      <span
-                        className="display text-[12px] font-semibold tracking-[0.14em]"
-                        style={{ color: meta.color }}
-                      >
-                        {meta.label}
+                  <button
+                    onClick={() => void select(s.session_id)}
+                    className="flex-1 min-w-0 px-3 py-2.5 text-left transition-colors"
+                  >
+                    <div className="mb-1 flex items-center justify-between gap-2">
+                      <span className="flex items-center gap-2">
+                        <span className={cn("pip", meta.pip)} />
+                        <span
+                          className="display text-[12px] font-semibold tracking-[0.14em]"
+                          style={{ color: meta.color }}
+                        >
+                          {meta.label}
+                        </span>
                       </span>
-                    </span>
-                    <span className="mono text-[13px] text-faint" title={s.session_id}>{shortId(s.session_id)}</span>
-                  </div>
-                  <div className="truncate text-[13px] text-phosphor-dim" title={s.prompt}>{s.prompt}</div>
-                  <div className="mt-1 flex items-center gap-3 text-[13px] text-faint">
-                    <span>
-                      <span className="text-muted">TK</span> {transcripts[s.session_id]?.tokens ?? s.tokens_consumed}
-                    </span>
-                    {s.error && <span className="text-critical">ERR</span>}
-                  </div>
-                </button>
+                      <span className="mono text-[13px] text-faint" title={s.session_id}>{shortId(s.session_id)}</span>
+                    </div>
+                    <div className="truncate text-[13px] text-phosphor-dim" title={s.prompt}>{s.prompt}</div>
+                    <div className="mt-1 flex items-center gap-3 text-[13px] text-faint">
+                      <span>
+                        <span className="text-muted">TK</span> {transcripts[s.session_id]?.tokens ?? s.tokens_consumed}
+                      </span>
+                      {s.error && <span className="text-critical">ERR</span>}
+                    </div>
+                  </button>
+                  <button
+                    className="text-faint hover:text-critical p-2.5 text-[12px] shrink-0 font-bold transition-colors"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      void handleDeleteSession(s.session_id);
+                    }}
+                    title="Delete session"
+                  >
+                    ✕
+                  </button>
+                </div>
               );
             })
           )}

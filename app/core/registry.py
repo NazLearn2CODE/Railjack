@@ -5,7 +5,39 @@ from typing import Any
 
 logger = logging.getLogger("orbiter")
 
-DEFAULT_PROVIDERS = [{"name": "default", "models": []}]
+DEFAULT_PROVIDERS = [
+    {
+        "name": "default",
+        "models": [
+            "claude-3-5-sonnet-20241022",
+            "claude-3-5-haiku-20241022",
+            "claude-3-opus-20240229",
+        ]
+    },
+    {
+        "name": "anthropic",
+        "models": [
+            "claude-3-5-sonnet-20241022",
+            "claude-3-5-haiku-20241022",
+            "claude-3-opus-20240229",
+        ]
+    },
+    {
+        "name": "openai",
+        "models": [
+            "gpt-4o",
+            "gpt-4o-mini",
+            "o1-mini",
+        ]
+    },
+    {
+        "name": "google",
+        "models": [
+            "gemini-2.5-pro",
+            "gemini-2.5-flash",
+        ]
+    }
+]
 
 
 def _load_providers() -> list[dict[str, Any]]:

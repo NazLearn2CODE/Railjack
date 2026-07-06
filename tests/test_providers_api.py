@@ -140,3 +140,36 @@ def test_api_fs_list_and_update_workspace(tmp_path):
     assert r.json()["root"] == str(sub.resolve())
     assert main.WORKSPACE_ROOT == sub.resolve()
 
+
+def test_delete_session():
+    import app.main as main
+    client = TestClient(main.app)
+    
+    # 1. Create a session
+    r = client.post("/api/sessions", json={"prompt": "test delete"})
+    assert r.status_code == 200
+    session_id = r.json()["session_id"]
+    assert main.manager.get_session(session_id) is not None
+    
+    # 2. Delete the session
+    r = client.delete(f"/api/sessions/{session_id}")
+    assert r.status_code == 200
+    assert main.manager.get_session(session_id) is None
+
+
+def test_resolve_check(tmp_path, monkeypatch):
+    import app.main as main
+    client = TestClient(main.app)
+    monkeypatch.setattr(main, "WORKSPACE_ROOT", tmp_path)
+    
+    # Resolve claude_md
+    r = client.post("/api/health/resolve", json={"check": "claude_md"})
+    assert r.status_code == 200
+    assert (tmp_path / "CLAUDE.md").is_file()
+    
+    # Resolve obsidian_mcp
+    r = client.post("/api/health/resolve", json={"check": "obsidian_mcp"})
+    assert r.status_code == 200
+    assert (tmp_path / ".mcp.json").is_file()
+
+

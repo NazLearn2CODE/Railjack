@@ -9,7 +9,7 @@ const MIN_COL = 180;
 
 export default function App() {
   const init = useStore((s) => s.init);
-  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [cols, setCols] = useState({ left: 312, right: 308 });
   const drag = useRef<"left" | "right" | null>(null);
   const startX = useRef(0);
@@ -24,7 +24,7 @@ export default function App() {
     drag.current = side;
     startX.current = e.clientX;
     startW.current = side === "left" ? cols.left : cols.right;
-  }, [cols]);
+  }, [cols.left, cols.right]);
 
   useEffect(() => {
     const onMove = (e: MouseEvent) => {
@@ -36,7 +36,9 @@ export default function App() {
         setCols((c) => ({ ...c, right: Math.max(MIN_COL, startW.current - dx) }));
       }
     };
-    const onUp = () => { drag.current = null; };
+    const onUp = () => {
+      drag.current = null;
+    };
     window.addEventListener("mousemove", onMove);
     window.addEventListener("mouseup", onUp);
     return () => {
@@ -51,25 +53,17 @@ export default function App() {
       <div className="grain" />
       <div className="relative z-10 flex h-full flex-col">
         <TopBar />
-        <main className="grid min-h-0 flex-1" style={{ gridTemplateColumns: `${sidebarOpen ? `${cols.left}px` : "0px"} 4px 1fr 4px ${cols.right}px` }}>
-          {sidebarOpen && <Sidebar onDismiss={() => setSidebarOpen(false)} />}
+        <main className="grid min-h-0 flex-1" style={{ gridTemplateColumns: `${sidebarCollapsed ? 48 : cols.left}px 4px 1fr 4px ${cols.right}px` }}>
+          <Sidebar collapsed={sidebarCollapsed} onToggleCollapse={() => setSidebarCollapsed(!sidebarCollapsed)} />
           {/* left drag handle */}
-          {sidebarOpen && (
+          {!sidebarCollapsed && (
             <div
               className="cursor-col-resize bg-edge/40 hover:bg-signal/30 transition-colors"
               onMouseDown={(e) => onMouseDown("left", e)}
             />
           )}
-          <div className="flex flex-col min-w-0">
+          <div className="flex flex-col min-w-0 min-h-0 h-full">
             <Console />
-            {!sidebarOpen && (
-              <button
-                onClick={() => setSidebarOpen(true)}
-                className="btn !text-[15px] !px-3 !py-1.5 shrink-0 border-t border-edge"
-              >
-                ◂ PANELS
-              </button>
-            )}
           </div>
           {/* right drag handle */}
           <div

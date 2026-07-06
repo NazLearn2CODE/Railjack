@@ -4,7 +4,7 @@ from app.core import registry
 
 def test_load_providers_default_when_unset(monkeypatch):
     monkeypatch.delenv("ORBITER_PROVIDERS", raising=False)
-    assert registry._load_providers() == [{"name": "default", "models": []}]
+    assert registry._load_providers() == registry.DEFAULT_PROVIDERS
 
 
 def test_load_providers_valid(monkeypatch):

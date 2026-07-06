@@ -329,6 +329,10 @@ class AgentSessionManager:
     def get_session(self, session_id: str) -> Optional[AgentSession]:
         return self.sessions.get(session_id)
 
+    def delete_session(self, session_id: str):
+        if session_id in self.sessions:
+            del self.sessions[session_id]
+
     def list_sessions(self) -> list:
         return [
             {

@@ -221,7 +221,7 @@ export default function Composer() {
       <div className="flex items-end gap-2">
         <span className="display pb-2 text-[9px] text-hazard">▸</span>
         <textarea
-          className="input min-h-[40px] resize-none !text-[9px] !py-1.5"
+          className="input min-h-[46px] resize-none !text-[16px] !py-2.5"
           rows={2}
           placeholder={team ? "DISPATCH A TASK — SUPERVISOR DELEGATES…" : "DISPATCH A PROMPT TO THE AGENT…"}
           value={composing}
@@ -258,9 +258,12 @@ export default function Composer() {
                   setModel({ provider: pName, model: mName || "" });
                 }
               }}
-              className="bg-void border border-edge text-phosphor-dim hover:text-signal transition-colors font-mono text-[9px] uppercase p-1 max-w-[120px] outline-none"
+              className={cn(
+                "bg-void border border-edge text-phosphor-dim hover:text-signal transition-colors font-mono text-[9px] uppercase p-1 max-w-[120px] outline-none",
+                !selectedModel && "text-glow"
+              )}
             >
-              <option value="">DEFAULT MDL</option>
+              <option value="">CLAUDE 3.5 SONNET</option>
               {flatModels.map((opt, i) => (
                 <option key={i} value={`${opt.provider}:${opt.model || ""}`}>
                   {opt.label}

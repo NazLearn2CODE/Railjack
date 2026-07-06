@@ -83,17 +83,38 @@ function FsBrowserModal({ initialPath, onSelect, onCancel }: FsBrowserModalProps
     void loadDirs(initialPath || ".");
   }, [initialPath]);
 
+  const crumbs = manualPath.split("/").filter(Boolean);
+  const buildCrumbPath = (index: number) => {
+    return "/" + crumbs.slice(0, index + 1).join("/");
+  };
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-void/80 backdrop-blur-sm p-4">
-      <div className="reveal hud hud--bracket bg-panel border border-edge w-full max-w-[440px] flex flex-col min-h-0 max-h-[380px]">
+      <div className="reveal hud hud--bracket bg-panel border border-edge w-full max-w-[440px] flex flex-col min-h-0 max-h-[420px]">
         {/* Header */}
         <div className="flex shrink-0 items-center justify-between border-b border-edge px-3 py-1.5 bg-void/40">
           <span className="display text-[10px] font-semibold tracking-wider text-signal uppercase">
             SELECT WORKSPACE ROOT
           </span>
-          <button className="text-faint hover:text-signal transition-colors text-[10px]" onClick={onCancel}>
+          <button className="text-faint hover:text-signal transition-colors text-[10px] cursor-pointer" onClick={onCancel}>
             ✕
           </button>
+        </div>
+
+        {/* GUI Breadcrumbs */}
+        <div className="px-3 py-1.5 border-b border-edge bg-void/30 flex flex-wrap gap-1 items-center text-[10px] font-mono select-none">
+          <button className="text-signal hover:underline cursor-pointer" onClick={() => void loadDirs("/")}>ROOT</button>
+          {crumbs.map((c, i) => (
+            <span key={i} className="flex gap-1 items-center">
+              <span className="text-faint">/</span>
+              <button
+                className="text-phosphor-dim hover:text-signal hover:underline cursor-pointer"
+                onClick={() => void loadDirs(buildCrumbPath(i))}
+              >
+                {c}
+              </button>
+            </span>
+          ))}
         </div>
 
         {/* Manual path input & navigate */}
@@ -116,7 +137,7 @@ function FsBrowserModal({ initialPath, onSelect, onCancel }: FsBrowserModalProps
         </div>
 
         {/* Directory browser list */}
-        <div className="flex-1 overflow-y-auto p-2.5 min-h-[140px] max-h-[200px]">
+        <div className="flex-1 overflow-y-auto p-2.5 min-h-[160px] max-h-[220px]">
           {error ? (
             <div className="text-critical text-[10px]">{error}</div>
           ) : (
@@ -124,11 +145,9 @@ function FsBrowserModal({ initialPath, onSelect, onCancel }: FsBrowserModalProps
               {dirs.map((d, i) => (
                 <div
                   key={i}
-                  onDoubleClick={() => void loadDirs(d.path)}
-                  onClick={() => setManualPath(d.path)}
+                  onClick={() => void loadDirs(d.path)}
                   className={cn(
-                    "mono flex items-center gap-2 cursor-pointer p-1 text-[10px] border border-transparent hover:border-edge-soft hover:bg-void/40 transition-all select-none",
-                    manualPath === d.path && "border-signal bg-void/60 text-signal"
+                    "mono flex items-center gap-2 cursor-pointer p-1 text-[10px] border border-transparent hover:border-edge-soft hover:bg-void/40 transition-all select-none"
                   )}
                 >
                   <span className="text-hazard">{d.name === ".." ? "⬏" : "📁"}</span>
@@ -171,6 +190,7 @@ export default function Telemetry() {
   const [editingRoot, setEditingRoot] = useState(false);
   const [rootInput, setRootInput] = useState("");
   const [showPicker, setShowPicker] = useState(false);
+  const [rootError, setRootError] = useState("");
   const rootDisplay = health?.workspace?.root
     ? health.workspace.root.split("/").slice(-3).join("/")
     : "—";
@@ -178,13 +198,30 @@ export default function Telemetry() {
 
   const applyRoot = async () => {
     const trimmed = rootInput.trim();
-    if (!trimmed) { setEditingRoot(false); return; }
+    if (!trimmed) { setEditingRoot(false); setRootError(""); return; }
     try {
       await setWorkspaceRoot(trimmed);
       await init();
       setEditingRoot(false);
-    } catch {
-      // keep open for correction
+      setRootError("");
+    } catch (e: any) {
+      setRootError("Invalid folder path");
+      setTimeout(() => setRootError(""), 3000);
+    }
+  };
+
+  const handleResolve = async (key: string) => {
+    try {
+      const res = await fetch("/api/health/resolve", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ check: key }),
+      });
+      if (res.ok) {
+        await init();
+      }
+    } catch (e) {
+      console.error(e);
     }
   };
 
@@ -260,22 +297,25 @@ export default function Telemetry() {
           label="ROOT"
           value={rootDisplay}
           interactive={
-            <div className="flex items-center gap-1.5 min-w-0" style={{ maxWidth: "70%" }}>
+            <div className="flex flex-col gap-0.5 items-stretch min-w-0" style={{ maxWidth: "70%" }}>
               {editingRoot ? (
-                <input
-                  autoFocus
-                  className="input !py-0.5 !text-[9px] !px-1 min-w-0 flex-1"
-                  placeholder="/path/to/workspace"
-                  value={rootInput}
-                  onChange={(e) => setRootInput(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") void applyRoot();
-                    if (e.key === "Escape") setEditingRoot(false);
-                  }}
-                  onBlur={() => void applyRoot()}
-                />
-              ) : (
                 <>
+                  <input
+                    autoFocus
+                    className="input !py-0.5 !text-[9px] !px-1 min-w-0"
+                    placeholder="/path/to/workspace"
+                    value={rootInput}
+                    onChange={(e) => setRootInput(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") void applyRoot();
+                      if (e.key === "Escape") { setEditingRoot(false); setRootError(""); }
+                    }}
+                    onBlur={() => void applyRoot()}
+                  />
+                  {rootError && <span className="text-critical text-[8px] truncate">{rootError}</span>}
+                </>
+              ) : (
+                <div className="flex items-center gap-1.5 min-w-0 w-full justify-end">
                   <span
                     className="mono truncate text-[9px] text-phosphor-dim hover:text-signal transition-colors cursor-pointer text-right min-w-0 flex-1"
                     title={`Click to edit manually\n${fullRoot}`}
@@ -293,13 +333,15 @@ export default function Telemetry() {
                   >
                     [BROWSE]
                   </button>
-                </>
+                </div>
               )}
             </div>
           }
         />
         <div className="flex items-center justify-between border-b border-edge-soft py-1">
-          <span className="label !text-[10px]">CEPHALON PROTOCOL</span>
+          <span className="label !text-[10px]">
+            CEPHALON PROTOCOL{health?.workspace?.root ? `: ${health.workspace.root.split("/").filter(Boolean).pop()?.toUpperCase()}` : ""}
+          </span>
           <span className="flex items-center gap-2 mono text-[9px]">
             <span
               className={cn(
@@ -325,8 +367,8 @@ export default function Telemetry() {
                     className={cn(ok ? "text-go" : "text-critical hover:text-signal transition-colors cursor-pointer")}
                     title={ok
                       ? `${label} — found`
-                      : `${label} — missing from workspace. Click to re-scan.`}
-                    onClick={() => void init()}
+                      : `${label} — missing from workspace. Click to auto-resolve.`}
+                    onClick={() => ok ? void init() : handleResolve(key)}
                   >
                     {ok ? "✓" : "✗"}
                   </button>

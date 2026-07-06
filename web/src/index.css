@@ -304,7 +304,7 @@
 /* ---------- Markdown (assistant output) ---------- */
 .prose-md {
   font-family: var(--font-mono);
-  font-size: 16px;
+  font-size: 15px;
   color: var(--color-phosphor);
 }
 .prose-md p { margin: 0 0 0.7em; }
@@ -384,4 +384,9 @@
 @keyframes tick-in {
   from { opacity: 0; transform: translateX(-4px); }
   to { opacity: 1; transform: none; }
+}
+
+.text-glow {
+  text-shadow: 0 0 6px var(--color-signal);
+  color: var(--color-signal) !important;
 }
