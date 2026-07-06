@@ -120,6 +120,62 @@ def test_api_register_provider_dynamically():
     }
 
 
+def test_resolve_to_sdk_options_env_handoff(monkeypatch):
+    """Closes the verification gap between registry.resolve() and the SDK.
+
+    Existing tests assert env overrides land on `provider._env`, but never that
+    stream() actually threads them into ClaudeAgentOptions — the handoff point
+    where a future refactor could silently drop them. This pins that link, so
+    the model-switcher routing is verified at every hop short of a real 2nd key.
+    """
+    import app.core.provider as provider_mod
+
+    monkeypatch.setenv(
+        "ORBITER_PROVIDERS",
+        '[{"name": "ollama", "base_url": "http://localhost:11434", "auth_env": "OLLAMA_KEY", "models": ["llama3"]}]'
+    )
+    monkeypatch.setenv("OLLAMA_KEY", "tok-xyz")
+
+    # Reload registry so PROVIDERS reflects the env, then resolve through it —
+    # the same path main.create_session() takes.
+    import importlib
+    import app.core.registry as registry
+    importlib.reload(registry)
+    model, env_overrides = registry.resolve("ollama", "llama3")
+    assert env_overrides == {
+        "ANTHROPIC_BASE_URL": "http://localhost:11434",
+        "ANTHROPIC_AUTH_TOKEN": "tok-xyz",
+        "ANTHROPIC_API_KEY": "tok-xyz",
+    }
+
+    # Capture the options the provider would hand the SDK, without spawning the CLI.
+    captured: dict = {}
+
+    async def _fake_query(*, prompt, options):
+        captured["model"] = options.model
+        captured["env"] = options.env
+        return
+        yield  # unreachable; keeps _fake_query an async generator
+
+    monkeypatch.setattr(provider_mod, "query", _fake_query)
+
+    p = provider_mod.ClaudeSdkProvider(model=model, env=env_overrides)
+
+    async def _run():
+        async for _ in p.stream(
+            "hi", system_prompt=None, allowed_tools=[],
+            session_id="s", on_tool_use=lambda *_: None,
+        ):
+            pass  # exhaust the generator; the capture happened in _fake_query
+
+    import asyncio
+    asyncio.run(_run())
+
+    # The exact env from resolve() must reach ClaudeAgentOptions unchanged.
+    assert captured["model"] == "llama3"
+    assert captured["env"] == env_overrides
+
+
 def test_api_fs_list_and_update_workspace(tmp_path):
     import app.main as main
     client = TestClient(main.app)
