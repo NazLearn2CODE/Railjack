@@ -1,0 +1,73 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <!-- App-icon rounded-square background: deep vacuum with panel edge -->
+    <radialGradient id="vacuum" cx="38%" cy="32%" r="80%">
+      <stop offset="0%"  stop-color="#0f1620"/>
+      <stop offset="55%" stop-color="#070a0f"/>
+      <stop offset="100%" stop-color="#05070b"/>
+    </radialGradient>
+
+    <!-- Planet body shading -->
+    <radialGradient id="planet" cx="36%" cy="30%" r="78%">
+      <stop offset="0%"  stop-color="#1a2734"/>
+      <stop offset="60%" stop-color="#0b1017"/>
+      <stop offset="100%" stop-color="#05070b"/>
+    </radialGradient>
+
+    <!-- Cyan signal glow -->
+    <filter id="signalGlow" x="-60%" y="-60%" width="220%" height="220%">
+      <feGaussianBlur stdDeviation="6" result="b"/>
+      <feMerge>
+        <feMergeNode in="b"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+
+    <!-- Soft outer field grid (clipped to the tile) -->
+    <pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse">
+      <path d="M32 0 H0 V32" fill="none" stroke="#38e0ff" stroke-opacity="0.06" stroke-width="1"/>
+    </pattern>
+
+    <clipPath id="tile">
+      <rect x="0" y="0" width="512" height="512" rx="108" ry="108"/>
+    </clipPath>
+  </defs>
+
+  <!-- ===== Tile ===== -->
+  <g clip-path="url(#tile)">
+    <rect width="512" height="512" fill="url(#vacuum)"/>
+    <rect width="512" height="512" fill="url(#grid)"/>
+
+    <!-- Horizon glow behind the planet -->
+    <circle cx="256" cy="268" r="170" fill="#38e0ff" opacity="0.07" filter="url(#signalGlow)"/>
+
+    <!-- ===== Planet (the OS core) ===== -->
+    <circle cx="256" cy="268" r="118" fill="url(#planet)"
+            stroke="#1a2734" stroke-width="2"/>
+
+    <!-- Equatorial telemetry band, faint -->
+    <ellipse cx="256" cy="268" rx="118" ry="20"
+             fill="none" stroke="#38e0ff" stroke-opacity="0.16" stroke-width="2"/>
+
+    <!-- ===== Orbital ring (tilted ellipse) ===== -->
+    <g filter="url(#signalGlow)">
+      <ellipse cx="256" cy="268" rx="206" ry="78"
+               transform="rotate(-26 256 268)"
+               fill="none" stroke="#38e0ff" stroke-width="9" stroke-linecap="round"/>
+    </g>
+
+    <!-- Signal node riding the orbit (the agent / telemetry ping) -->
+    <circle cx="392" cy="178" r="22" fill="#cfe3ef"
+            stroke="#38e0ff" stroke-width="5"/>
+    <circle cx="392" cy="178" r="8" fill="#38e0ff"/>
+
+    <!-- Hazard pip — the observable-fail sandbox heartbeat -->
+    <circle cx="124" cy="332" r="7" fill="#ffb648"/>
+    <circle cx="124" cy="332" r="13" fill="none" stroke="#ffb648"
+            stroke-opacity="0.5" stroke-width="2"/>
+  </g>
+
+  <!-- Tile edge -->
+  <rect x="1.5" y="1.5" width="509" height="509" rx="106.5" ry="106.5"
+        fill="none" stroke="#1a2734" stroke-width="3"/>
+</svg>

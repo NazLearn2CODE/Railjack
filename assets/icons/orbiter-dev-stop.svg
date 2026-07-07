@@ -1,0 +1,56 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <radialGradient id="vacuumStop" cx="38%" cy="32%" r="80%">
+      <stop offset="0%"  stop-color="#1a1014"/>
+      <stop offset="55%" stop-color="#0b0709"/>
+      <stop offset="100%" stop-color="#050304"/>
+    </radialGradient>
+    <radialGradient id="planetStop" cx="36%" cy="30%" r="78%">
+      <stop offset="0%"  stop-color="#2a1620"/>
+      <stop offset="60%" stop-color="#170b10"/>
+      <stop offset="100%" stop-color="#050304"/>
+    </radialGradient>
+    <filter id="criticalGlow" x="-60%" y="-60%" width="220%" height="220%">
+      <feGaussianBlur stdDeviation="7" result="b"/>
+      <feMerge>
+        <feMergeNode in="b"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+    <pattern id="gridStop" width="32" height="32" patternUnits="userSpaceOnUse">
+      <path d="M32 0 H0 V32" fill="none" stroke="#ff4d6d" stroke-opacity="0.06" stroke-width="1"/>
+    </pattern>
+    <clipPath id="tileStop">
+      <rect x="0" y="0" width="512" height="512" rx="108" ry="108"/>
+    </clipPath>
+  </defs>
+
+  <g clip-path="url(#tileStop)">
+    <rect width="512" height="512" fill="url(#vacuumStop)"/>
+    <rect width="512" height="512" fill="url(#gridStop)"/>
+
+    <!-- dimmed horizon glow -->
+    <circle cx="256" cy="268" r="170" fill="#ff4d6d" opacity="0.06" filter="url(#criticalGlow)"/>
+
+    <!-- planet (the OS core) -->
+    <circle cx="256" cy="268" r="118" fill="url(#planetStop)" stroke="#2a1620" stroke-width="2"/>
+
+    <!-- critical-red orbital ring, dimmed -->
+    <g filter="url(#criticalGlow)" opacity="0.55">
+      <ellipse cx="256" cy="268" rx="206" ry="78"
+               transform="rotate(-26 256 268)"
+               fill="none" stroke="#ff4d6d" stroke-width="9" stroke-linecap="round"/>
+    </g>
+
+    <!-- centered square STOP mark — universal halt glyph -->
+    <g filter="url(#criticalGlow)">
+      <rect x="206" y="218" width="100" height="100" rx="18" ry="18"
+            fill="#ff4d6d" opacity="0.96"/>
+      <rect x="206" y="218" width="100" height="100" rx="18" ry="18"
+            fill="none" stroke="#cfe3ef" stroke-width="3" stroke-opacity="0.5"/>
+    </g>
+  </g>
+
+  <rect x="1.5" y="1.5" width="509" height="509" rx="106.5" ry="106.5"
+        fill="none" stroke="#2a1620" stroke-width="3"/>
+</svg>
