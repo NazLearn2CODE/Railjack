@@ -57,6 +57,33 @@ You are **strictly prohibited** from modifying the Cephalon vault (`~/Cephalon/`
 
 **Rationale:** Vault integrity requires centralized stewardship. Only the user and Vault Claude (launched from `~/Cephalon`) may modify the vault.
 
+## Vault Read-Triggers (read at the moment of need, not upfront)
+
+The vault is READ-ONLY for you, but reading it is the point — it holds prior
+projects' scar tissue. When a trigger fires, read the note BEFORE debugging
+from scratch:
+
+| When you are... | Read first |
+|---|---|
+| Writing/fixing tests (esp. Vitest, SDK mocks) | `~/Cephalon/10-knowledge/testing-gotchas.md` |
+| Fighting TypeScript errors | `~/Cephalon/10-knowledge/typescript-gotchas.md` |
+| Touching Capacitor / Android / release builds | `~/Cephalon/10-knowledge/mobile-deployment-gotchas.md` + f5-ship-android skill |
+| Using claude-agent-sdk | `~/Cephalon/10-knowledge/claude-agent-sdk-gotchas.md` |
+| Adding any external API/LLM/WebSocket integration | f5-connector-scaffold skill |
+| Hitting "works at home, not at the office" | f5-drift-doctor skill |
+| Unsure where knowledge lives | `~/Cephalon/index.md` (routing map) |
+
+Every time a vault note answers a question or prevents rework, add one line to
+today's session log: `vault-assist: [[note-name]] — what it saved`. The
+inverse too: `vault-gap: <what you needed that the vault didn't have>`. These
+flow into the harvest report's Vault Assists section — it's how the vault
+learns which notes are load-bearing and what to write next.
+
+## Safety Protocol (vibe-check + stop-digging)
+
+- Before ANY non-trivial change and after completing it: invoke the vibe-check skill. No exceptions.
+- After a 3rd failed attempt at the same bug, or when starting a HIGH-tier task: invoke the stop-digging skill.
+
 ## Memory Writes
 
 **Your memory lives in the project, not the vault:**
