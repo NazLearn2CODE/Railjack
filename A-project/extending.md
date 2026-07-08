@@ -6,9 +6,19 @@ This guide explains how to add new LLM providers, services, tools, and roles to 
 
 You can add a custom LLM provider in two ways: configuration (for API-compatible endpoints) or code (for new interface implementations).
 
+### Built-in providers
+
+Orbiter ships with three providers in `DEFAULT_PROVIDERS` (`app/core/registry.py`), all routed through one `ClaudeSdkProvider`:
+
+- **z.ai** — ambient default (uses inherited `ANTHROPIC_BASE_URL` + token). No key config beyond the ambient env.
+- **anthropic** — native Anthropic, pay-per-token. Put your key in `.env` as `ANTHROPIC_1P_API_KEY=sk-ant-...`.
+- **openrouter** — free-tier only (`pricing.prompt == "0"`). Put your key in `.env` as `OPENROUTER_API_KEY=sk-or-v1-...`. Model list fetched from `https://openrouter.ai/api/v1/models`.
+
+Their model lists are fetched live on page load (`POST /api/models/refresh` → `sync_all_models()`), so the dropdown always reflects what each gateway actually offers. Setting `ORBITER_PROVIDERS` (below) **replaces** these defaults entirely.
+
 ### 1. Via Environment Configuration (Ambient API)
 
-If your provider is compatible with the Anthropic API (e.g. Ollama, OpenRouter, LocalAI, vLLM), you can register it using the `ORBITER_PROVIDERS` environment variable.
+To add a provider not in the built-in set (e.g. Ollama, LocalAI, vLLM), register it using the `ORBITER_PROVIDERS` environment variable. **Note:** setting this replaces the built-in z.ai/anthropic/openrouter entries — to keep them, include them in your list.
 
 Format:
 ```bash
@@ -17,12 +27,6 @@ export ORBITER_PROVIDERS='[
     "name": "ollama",
     "base_url": "http://localhost:11434/v1",
     "models": ["llama3", "mistral"]
-  },
-  {
-    "name": "openrouter",
-    "base_url": "https://openrouter.ai/api/v1",
-    "auth_env": "OPENROUTER_API_KEY",
-    "models": ["anthropic/claude-3.5-sonnet"]
   }
 ]'
 ```

@@ -9,7 +9,6 @@ export default function Composer() {
   const dispatch = useStore((s) => s.dispatch);
   const mode = useStore((s) => s.mode);
   const setMode = useStore((s) => s.setMode);
-  const providers = useStore((s) => s.providers);
   const selectedModel = useStore((s) => s.model);
   const setModel = useStore((s) => s.setModel);
   const t = useStore((s) => (s.activeId ? s.transcripts[s.activeId] : undefined));
@@ -81,21 +80,6 @@ export default function Composer() {
   // A role with an empty name is never hired — drop it on dispatch. Empty roster
   // → server hires DEFAULT_ROLES (researcher + coder).
   const named = roles.filter((r) => r.name.trim());
-
-  const flatModels: { provider: string; model: string | null; label: string }[] = [];
-  for (const p of providers) {
-    if (p.models.length === 0) {
-      flatModels.push({ provider: p.name, model: null, label: p.name });
-    } else {
-      for (const m of p.models) {
-        flatModels.push({ provider: p.name, model: m, label: `${p.name} / ${m}` });
-      }
-    }
-  }
-
-  const selectValue = selectedModel
-    ? `${selectedModel.provider}:${selectedModel.model || ""}`
-    : "";
 
   const send = () => {
     if (busy || !composing.trim()) return;
@@ -247,29 +231,16 @@ export default function Composer() {
             {team ? "● AGENTS" : "○ AGENTS"}
           </button>
           <div className="flex items-center gap-1.5">
-            <select
-              value={selectValue}
-              onChange={(e) => {
-                const val = e.target.value;
-                if (!val) {
-                  setModel(null);
-                } else {
-                  const [pName, mName] = val.split(":");
-                  setModel({ provider: pName, model: mName || "" });
-                }
-              }}
-              className={cn(
-                "bg-void border border-edge text-phosphor-dim hover:text-signal transition-colors font-mono text-[9px] uppercase p-1 max-w-[120px] outline-none",
-                !selectedModel && "text-glow"
-              )}
+            {/* Read-only applied-model chip — single source of truth lives in the
+                Sidebar (draft + APPLY). Shown here so the operator always sees what
+                the next dispatch will run without leaving the composer. */}
+            <span
+              className="mono text-[11.25px] uppercase text-phosphor-dim"
+              title="Change model in the sidebar (select + APPLY)"
             >
-              <option value="">CLAUDE 3.5 SONNET</option>
-              {flatModels.map((opt, i) => (
-                <option key={i} value={`${opt.provider}:${opt.model || ""}`}>
-                  {opt.label}
-                </option>
-              ))}
-            </select>
+              <span className="text-faint">MODEL ▸ </span>
+              {selectedModel ? `${selectedModel.model}` : "—"}
+            </span>
             <button
               className="transition-colors hover:text-signal text-[9px] uppercase"
               onClick={() => setAddProvOpen((v) => !v)}

@@ -1,3 +1,4 @@
+import asyncio
 import os
 import json
 import logging
@@ -5,39 +6,52 @@ from typing import Any
 
 logger = logging.getLogger("orbiter")
 
+# Three Anthropic-compatible backends, all routed through the same ClaudeSdkProvider
+# seam (resolve() swaps ANTHROPIC_BASE_URL + token per selection; the explicit
+# --model flag beats any ambient ANTHROPIC_DEFAULT_*_MODEL alias — verified against
+# the bundled CLI's precedence chain). Model lists start empty and are filled live
+# by sync_all_models(), so the dropdown never advertises a stale or non-functional
+# model. resolve() skips model validation while a list is empty → routing still
+# works pre-sync.
+#
+#   z.ai        — ambient (no base_url; uses inherited ANTHROPIC_BASE_URL + token).
+#   anthropic   — native 1P, pay-per-token (ANTHROPIC_1P_API_KEY in .env).
+#   openrouter  — free-tier only (pricing.prompt == "0"); OpenRouter's model-list
+#                 endpoint lives on the OpenAI surface (/api/v1/models), not the
+#                 Anthropic skin — see _fetch_openrouter().
 DEFAULT_PROVIDERS = [
-    {
-        "name": "default",
-        "models": [
-            "claude-3-5-sonnet-20241022",
-            "claude-3-5-haiku-20241022",
-            "claude-3-opus-20240229",
-        ]
-    },
+    {"name": "z.ai", "models": []},
     {
         "name": "anthropic",
-        "models": [
-            "claude-3-5-sonnet-20241022",
-            "claude-3-5-haiku-20241022",
-            "claude-3-opus-20240229",
-        ]
+        "base_url": "https://api.anthropic.com",
+        "auth_env": "ANTHROPIC_1P_API_KEY",
+        "models": [],
     },
     {
-        "name": "openai",
-        "models": [
-            "gpt-4o",
-            "gpt-4o-mini",
-            "o1-mini",
-        ]
+        "name": "openrouter",
+        "base_url": "https://openrouter.ai/api",
+        "auth_env": "OPENROUTER_API_KEY",
+        "models": [],
     },
-    {
-        "name": "google",
-        "models": [
-            "gemini-2.5-pro",
-            "gemini-2.5-flash",
-        ]
-    }
 ]
+
+# The concrete model the "ambient" (no-explicit-selection) dispatch resolves to.
+# z.ai's gateway serves 8 GLM models and silently routes an unspecified --model to
+# glm-4.7. Pinning it here means the dashboard's displayed model === the model that
+# actually runs — no silent mismatch between the picker and the wire. Only the
+# ambient z.ai provider has a known default; a configured provider with no model
+# picked stays None (the CLI rejects a bare provider+null rather than guess).
+DEFAULT_MODEL = "glm-4.7"
+
+
+def default_model(name: str) -> str | None:
+    """The model an 'ambient'/no-selection dispatch on `name` should run.
+
+    Returns DEFAULT_MODEL for the ambient z.ai provider; None otherwise (a
+    configured 2nd provider with no model chosen is left to the caller/CLI to
+    reject, never silently guessed).
+    """
+    return DEFAULT_MODEL if name == "z.ai" else None
 
 
 def _load_providers() -> list[dict[str, Any]]:
@@ -98,6 +112,93 @@ def add_provider(
 def public_view() -> list[dict[str, Any]]:
     """Secrets-redacted view: name + models only (base_url/auth_env never leave)."""
     return [{"name": p["name"], "models": p["models"]} for p in PROVIDERS]
+
+
+async def _fetch_anthropic_shape(base: str, token: str) -> list[str]:
+    """Fetch a model list from an Anthropic-compatible /v1/models endpoint
+    (z.ai gateway, native Anthropic). Response shape: {"data": [{"id": ...}]}.
+    """
+    import httpx  # declared transitively via claude-agent-sdk; no new dep
+
+    url = base.rstrip("/") + "/v1/models"
+    async with httpx.AsyncClient(timeout=8.0) as client:
+        r = await client.get(url, headers={"Authorization": f"Bearer {token}"})
+        r.raise_for_status()
+        data = r.json()
+    return sorted({m["id"] for m in data.get("data", []) if m.get("id")})
+
+
+async def _fetch_openrouter(token: str) -> list[str]:
+    """Fetch OpenRouter's FREE-tier models only. OpenRouter's list endpoint lives
+    on the OpenAI surface (https://openrouter.ai/api/v1/models), NOT the Anthropic
+    skin — using the skin's base would 404. Free = pricing.prompt == "0".
+    """
+    import httpx
+
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        r = await client.get(
+            "https://openrouter.ai/api/v1/models",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        r.raise_for_status()
+        data = r.json()
+    free = [
+        m["id"]
+        for m in data.get("data", [])
+        if m.get("id") and m.get("pricing", {}).get("prompt") == "0"
+    ]
+    return sorted(set(free))
+
+
+async def sync_all_models() -> dict[str, list[str]]:
+    """Pull live model lists for every provider in parallel and update each in
+    place. Best-effort per provider: a failure (no key, gateway down) logs a
+    warning and leaves that provider's list as-is, never blocking the others.
+    Returns {provider_name: [models]} for the providers that updated.
+    """
+    async def _one(provider: dict[str, Any]) -> tuple[str, list[str]] | None:
+        name = provider["name"]
+        try:
+            if name == "z.ai":
+                base = os.environ.get("ANTHROPIC_BASE_URL")
+                token = os.environ.get("ANTHROPIC_AUTH_TOKEN") or os.environ.get("ANTHROPIC_API_KEY")
+                if not base or not token:
+                    logger.warning("sync: z.ai ANTHROPIC_BASE_URL/token not set; skipping")
+                    return None
+                models = await _fetch_anthropic_shape(base, token)
+            elif name == "openrouter":
+                token = os.environ.get("OPENROUTER_API_KEY")
+                if not token:
+                    logger.warning("sync: OPENROUTER_API_KEY not set; skipping openrouter")
+                    return None
+                models = await _fetch_openrouter(token)
+            else:
+                base = provider.get("base_url")
+                auth_env = provider.get("auth_env")
+                token = os.environ.get(auth_env) if auth_env else None
+                if not base or not token:
+                    logger.warning("sync: %s missing base_url or %s; skipping", name, auth_env or "token")
+                    return None
+                models = await _fetch_anthropic_shape(base, token)
+        except Exception as e:
+            logger.warning("sync: %s fetch failed (%s); leaving its list as-is", name, e)
+            return None
+
+        provider["models"] = models
+        logger.info("sync: %d models from %s", len(models), name)
+        return name, models
+
+    results = await asyncio.gather(*(_one(p) for p in PROVIDERS), return_exceptions=True)
+    return {r[0]: r[1] for r in results if isinstance(r, tuple)}
+
+
+async def sync_models() -> list[str]:
+    """Backward-compat shim: refresh all providers, return the z.ai model list.
+    New callers should use sync_all_models() for the full per-provider picture.
+    """
+    await sync_all_models()
+    provider = next((p for p in PROVIDERS if p["name"] == "z.ai"), None)
+    return provider["models"] if provider else []
 
 
 def resolve(name: str, model: str | None) -> tuple[str | None, dict[str, str] | None]:

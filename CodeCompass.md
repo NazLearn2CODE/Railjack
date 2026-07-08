@@ -19,7 +19,23 @@ Orbiter — a locally-hosted **Agentic OS**: an orchestration layer treating AI 
 
 ## Hard Constraints
 
-- LLM backend is **z.ai/GLM only** — native Anthropic is *off the roadmap*, not deferred-pending-a-key. The `Provider` seam makes it a pure env key-swap if that ever reverses.
+- LLM backend is **multi-provider via the `Provider` seam** (2026-07-07): z.ai/GLM
+  remains the ambient default, with **native Anthropic** (pay-per-token,
+  `ANTHROPIC_1P_API_KEY`) and **OpenRouter free-tier** (`OPENROUTER_API_KEY`,
+  `pricing.prompt == "0"` only) wired as selectable providers. All three route
+  through one `ClaudeSdkProvider` — `registry.resolve()` swaps
+  `ANTHROPIC_BASE_URL` + token per selection. The **ambient (no-selection)
+  state is pinned to `registry.DEFAULT_MODEL = "glm-4.7"`** (2026-07-09): a
+  dispatch with `provider=z.ai, model=null` is filled with `glm-4.7` before
+  `resolve()`, so the displayed model === the model on the wire (no silent
+  gateway guess). Model lists are fetched live from each gateway's `/v1/models`
+  on page load (never hardcoded). Prior state: z.ai/GLM only.
+- **Agents load project memory** (`CLAUDE.md`/`AGENTS.md`) — `ClaudeSdkProvider`
+  passes `cwd=WORKSPACE_ROOT` and `setting_sources=["project"]` to the SDK
+  (2026-07-09). The subprocess runs in the project root and follows the
+  project's own rules; the operator's `~/.claude` is still excluded (isolation
+  preserved, the casualty from the old `setting_sources=[]` fixed). See ADR
+  `A-project/decisions/2026-07-09-project-memory-and-model-honesty.md`.
 - Sandbox is **FAIL-OPEN + observable** on this box (no Landlock LSM) — a local single-user OS must not refuse to run. Surfaced honestly on `/api/health`, never greenwashed.
 - uvicorn runs **without `--reload`** → restart after any route change (a stale server 404s new endpoints).
 - No secrets in tracked files (`.env`, `.mcp.json`, `.claude/settings.json` token are machine-local).
@@ -59,6 +75,6 @@ git checkout <prev> &&  # restart uvicorn — no --reload
 
 ---
 
-**Updated:** 2026-07-07
+**Updated:** 2026-07-09
 **Maintainer:** Naz
 **Source:** Cephalon vault (`~/Cephalon/CodeCompass.md`) — copy to project root and customize

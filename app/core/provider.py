@@ -81,6 +81,7 @@ class ClaudeSdkProvider:
         mcp_servers: Optional[dict[str, dict[str, Any]]] = None,
         model: Optional[str] = None,
         env: Optional[dict[str, str]] = None,
+        cwd: Optional[str] = None,
     ):
         # When set, the supervisor gains a `delegate_many` tool (in-process MCP
         # server) that fans out workers via the orchestrator. None for
@@ -93,6 +94,11 @@ class ClaudeSdkProvider:
         self._external_mcp = mcp_servers
         self._model = model
         self._env = env
+        # Working dir the SDK subprocess runs in — MUST be the project/workspace
+        # root so the CLI discovers project memory (CLAUDE.md / AGENTS.md). Without
+        # it the subprocess inherits uvicorn's launch dir and project memory is
+        # invisible to the agent. See ADR 2026-07-09-project-memory-and-model-honesty.
+        self._cwd = cwd
 
     @staticmethod
     def _verdict_to_hook_output(verdict: ToolDecision) -> dict:
@@ -158,8 +164,16 @@ class ClaudeSdkProvider:
                     )
                 ]
             },
-            setting_sources=[],
+            # Load PROJECT memory (CLAUDE.md / AGENTS.md) so the agent follows the
+            # project's rules. "user" (~/.claude) is intentionally excluded to keep
+            # the isolation the original [] choice wanted — deterministic behavior,
+            # no operator ~/.claude bleed — while fixing the casualty that exclusion
+            # caused: the agent ignoring the project's own instructions. cwd (below)
+            # scopes which project's memory loads. See ADR
+            # 2026-07-09-project-memory-and-model-honesty.
+            setting_sources=["project"],
             session_id=session_id,
+            cwd=self._cwd,
         )
         if self._model:
             options_kwargs["model"] = self._model

@@ -18,6 +18,15 @@ export async function getProviders(): Promise<ProviderInfo[]> {
   return r.json();
 }
 
+export async function refreshModels(): Promise<ProviderInfo[]> {
+  // Pull the live model list from the z.ai gateway and return the updated
+  // providers in one round-trip (POST /api/models/refresh). Falls back to a
+  // plain getProviders() on any failure so the dropdown still renders.
+  const r = await fetch("/api/models/refresh", { method: "POST" });
+  if (!r.ok) throw new Error(`refreshModels ${r.status}`);
+  return r.json();
+}
+
 export async function setWorkspaceRoot(root: string): Promise<{ root: string }> {
   const r = await fetch("/api/workspace-root", {
     method: "POST",

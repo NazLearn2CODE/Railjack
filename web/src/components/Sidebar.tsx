@@ -23,6 +23,13 @@ export default function Sidebar({
   const setModel = useStore((s) => s.setModel);
   const [tab, setTab] = useState<"sessions" | "skills" | "services">("sessions");
 
+  // Draft (pending APPLY) model selection — decoupled from the store's applied
+  // model so the operator can stage a switch and confirm it deliberately. The
+  // applied model is the single source of truth for what the next dispatch runs.
+  const [draft, setDraft] = useState<{ provider: string; model: string } | null>(selectedModel);
+  const dirty = !!draft && !!selectedModel &&
+    (draft.provider !== selectedModel.provider || draft.model !== selectedModel.model);
+
   if (collapsed) {
     return (
       <aside className="reveal reveal-2 hud hud--bracket m-2 mr-1 flex w-[48px] min-h-0 flex-col items-center py-3 bg-panel/30 border border-edge shrink-0 select-none">
@@ -56,10 +63,6 @@ export default function Sidebar({
     }
   }
 
-  const selectValue = selectedModel
-    ? `${selectedModel.provider}:${selectedModel.model || ""}`
-    : "";
-
   const handleDeleteSession = async (sessionId: string) => {
     try {
       const res = await fetch(`/api/sessions/${sessionId}`, {
@@ -78,41 +81,65 @@ export default function Sidebar({
 
   return (
     <aside className="reveal reveal-2 hud hud--bracket m-2 mr-1 flex min-h-0 flex-col">
-      {/* Model selector — always visible at top */}
-      <div className="flex items-center justify-between border-b border-edge px-3 py-2 gap-2 shrink-0">
-        <div className="flex items-center gap-2 min-w-0 flex-1 relative">
-          <span className="pip pip--signal shrink-0" />
-          <select
-            value={selectValue}
-            onChange={(e) => {
-              const val = e.target.value;
-              if (!val) {
-                setModel(null);
-              } else {
-                const [pName, mName] = val.split(":");
-                setModel({ provider: pName, model: mName || "" });
-              }
-            }}
-            className={cn(
-              "bg-void border border-edge text-phosphor-dim hover:text-signal transition-colors font-mono text-[9px] uppercase p-1 max-w-[150px] outline-none",
-              !selectedModel && "text-glow"
-            )}
-          >
-            <option value="">CLAUDE 3.5 SONNET</option>
-            {flatModels.map((opt, i) => (
-              <option key={i} value={`${opt.provider}:${opt.model || ""}`}>
-                {opt.label}
-              </option>
-            ))}
-          </select>
+      {/* Model selector — always visible at top. Draft + APPLY: picking a model
+          stages it; APPLY commits it to the store (the source of truth for the
+          next dispatch). The active readout below shows what's actually applied. */}
+      <div className="border-b border-edge px-3 py-2 shrink-0">
+        <div className="flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2 min-w-0 flex-1">
+            <span className="pip pip--signal shrink-0" />
+            <select
+              value={draft ? `${draft.provider}:${draft.model}` : ""}
+              onChange={(e) => {
+                const val = e.target.value;
+                if (!val) {
+                  setDraft(null);
+                } else {
+                  const [pName, mName] = val.split(":");
+                  setDraft({ provider: pName, model: mName || "" });
+                }
+              }}
+              className={cn(
+                "bg-void border border-edge text-phosphor-dim hover:text-signal transition-colors font-mono text-[11.25px] uppercase p-1 min-w-0 flex-1 outline-none",
+                !draft && "text-glow"
+              )}
+            >
+              {!flatModels.some((o) => o.provider === "z.ai" && o.model === "glm-4.7") && (
+                <option value="z.ai:glm-4.7">Z.AI DEFAULT (glm-4.7)</option>
+              )}
+              {flatModels.map((opt, i) => (
+                <option key={i} value={`${opt.provider}:${opt.model || ""}`}>
+                  {opt.label}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="flex items-center gap-1 shrink-0">
+            <button
+              className={cn("btn !px-2 !py-0.5 !text-[10px]", dirty && "btn--signal")}
+              onClick={() => setModel(draft)}
+              disabled={!dirty}
+              title={dirty ? "Apply selected model" : "No change to apply"}
+            >
+              APPLY
+            </button>
+            <button className="btn !px-1.5 !py-0.5 !text-[12px]" onClick={() => void init()} title="refresh">
+              ↻
+            </button>
+            <button className="btn !px-1.5 !py-0.5 !text-[12px]" onClick={onToggleCollapse} title="Collapse sidebar">
+              ◀
+            </button>
+          </div>
         </div>
-        <div className="flex items-center gap-1 shrink-0">
-          <button className="btn !px-1.5 !py-0.5 !text-[12px]" onClick={() => void init()} title="refresh">
-            ↻
-          </button>
-          <button className="btn !px-1.5 !py-0.5 !text-[12px]" onClick={onToggleCollapse} title="Collapse sidebar">
-            ◀
-          </button>
+        {/* Active-model readout — the source of truth for what the next dispatch runs. */}
+        <div className="mt-1 flex items-center gap-1.5 text-[10px] text-faint">
+          <span className="label !text-[10px]">MODEL ▸</span>
+          <span className={cn("mono", dirty ? "text-muted line-through" : "text-signal")}>
+            {selectedModel ? `${selectedModel.provider}/${selectedModel.model}` : "—"}
+          </span>
+          {dirty && (
+            <span className="mono text-hazard">→ {draft!.provider}/{draft!.model}</span>
+          )}
         </div>
       </div>
 

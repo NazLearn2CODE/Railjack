@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { approve as apiApprove, createSession, createTeam, getHealth, getProviders, getSkills, listSessions, openStream } from "./api";
+import { approve as apiApprove, createSession, createTeam, getHealth, getProviders, getSkills, listSessions, openStream, refreshModels } from "./api";
 import type { ContentBlock, Health, ProviderInfo, RoleSpec, Row, ServiceInfo, SessionMeta, SkillInfo, StreamEvent, Transcript, Usage } from "./types";
 
 // Module-level ID for event-log entries — no need to thread a counter through store state.
@@ -13,6 +13,16 @@ const emptyTranscript = (): Transcript => ({
   error: null,
   pendingTools: {},
 });
+
+// The concrete model an "ambient" (no explicit selection) dispatch should run.
+// Mirrors app/core/registry.DEFAULT_MODEL — pinning it client-side means the
+// picker shows the real model that will run, never a silent CLI/z.ai guess.
+// z.ai is the only provider with a known ambient; if its model list is empty
+// (gateway down), there's no honest default to show, so return null.
+function ambientDefault(providers: ProviderInfo[]): { provider: string; model: string } | null {
+  const zai = providers.find((p) => p.name === "z.ai" && p.models.length > 0);
+  return zai ? { provider: "z.ai", model: zai.models.includes("glm-4.7") ? "glm-4.7" : zai.models[0] } : null;
+}
 
 export interface LogEntry {
   id: number;
@@ -193,11 +203,24 @@ export const useStore = create<State>((set, get) => ({
 
   init: async () => {
     // Fetch in parallel; a failure in either leaves the other's slice intact.
-    const [s, h, sk, p] = await Promise.allSettled([listSessions(), getHealth(), getSkills(), getProviders()]);
+    // Models: refresh live from z.ai first; fall back to the cached provider
+    // list if the gateway is unreachable so the dropdown still renders.
+    const [s, h, sk, m] = await Promise.allSettled([listSessions(), getHealth(), getSkills(), refreshModels()]);
     if (s.status === "fulfilled") set({ sessions: s.value });
     if (h.status === "fulfilled") set({ health: h.value });
     if (sk.status === "fulfilled") set({ skills: sk.value });
-    if (p.status === "fulfilled") set({ providers: p.value });
+    if (m.status === "fulfilled") {
+      set({ providers: m.value });
+      // Auto-select the ambient default so there's always a concrete applied model
+      // (display === reality). Only when the operator hasn't picked one yet.
+      if (!get().model) {
+        const def = ambientDefault(m.value);
+        if (def) set({ model: def });
+      }
+    } else {
+      const fallback = await getProviders().catch(() => []);
+      set({ providers: fallback });
+    }
   },
 
   setComposing: (v) => set({ composing: v }),

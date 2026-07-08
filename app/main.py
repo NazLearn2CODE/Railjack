@@ -108,7 +108,7 @@ def _load_services() -> list[dict]:
 # config when an operator needs different MCP sets per run.
 EXTERNAL_MCP = _load_mcp_servers()
 SERVICES = _load_services()
-provider = ClaudeSdkProvider(mcp_servers=EXTERNAL_MCP)
+provider = ClaudeSdkProvider(mcp_servers=EXTERNAL_MCP, cwd=str(WORKSPACE_ROOT))
 manager = AgentSessionManager(scheduler, security=security, provider=provider)
 
 # L3 OS sandbox (blueprint §2.2): self-Landlock write-confinement at startup.
@@ -178,13 +178,18 @@ async def create_team(req: CreateTeam):
     like any single-agent run — delegation surfaces as `delegate` tool calls.
     """
     try:
-        worker_provider = ClaudeSdkProvider(mcp_servers=EXTERNAL_MCP)
+        worker_provider = ClaudeSdkProvider(mcp_servers=EXTERNAL_MCP, cwd=str(WORKSPACE_ROOT))
         if req.provider:
-            resolved_model, env_overrides = registry.resolve(req.provider, req.model)
+            # Fill the ambient default so AMBIENT (model=None) → a concrete model on
+            # the wire, never a silent CLI/z.ai guess. resolve() stays pure.
+            resolved_model, env_overrides = registry.resolve(
+                req.provider, req.model or registry.default_model(req.provider)
+            )
             worker_provider = ClaudeSdkProvider(
                 mcp_servers=EXTERNAL_MCP,
                 model=resolved_model,
                 env=env_overrides,
+                cwd=str(WORKSPACE_ROOT),
             )
         team = Team(
             scheduler,
@@ -213,11 +218,14 @@ async def create_session(req: CreateSession):
     try:
         custom_provider = None
         if req.provider:
-            resolved_model, env_overrides = registry.resolve(req.provider, req.model)
+            resolved_model, env_overrides = registry.resolve(
+                req.provider, req.model or registry.default_model(req.provider)
+            )
             custom_provider = ClaudeSdkProvider(
                 mcp_servers=EXTERNAL_MCP,
                 model=resolved_model,
                 env=env_overrides,
+                cwd=str(WORKSPACE_ROOT),
             )
         s = manager.create_session(req.prompt, req.system_prompt, provider=custom_provider)
         return {"session_id": s.session_id, "status": s.status, "prompt": s.prompt}
@@ -240,6 +248,15 @@ async def register_provider(req: RegisterProvider):
         models=req.models,
     )
     return {"ok": True}
+
+
+@app.post("/api/models/refresh")
+async def refresh_models():
+    """Pull live model lists from all configured gateways (z.ai, anthropic,
+    openrouter) in parallel and return the updated providers (secrets-redacted).
+    One round-trip refreshes + serves."""
+    await registry.sync_all_models()
+    return registry.public_view()
 
 
 @app.get("/api/fs/list")

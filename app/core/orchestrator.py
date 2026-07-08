@@ -235,6 +235,7 @@ class Team:
         self.scheduler.token_budget.set_ceiling(self.budget_key, ceiling)
         worker_model = getattr(self.worker_provider, "_model", None)
         worker_env = getattr(self.worker_provider, "_env", None)
+        worker_cwd = getattr(self.worker_provider, "_cwd", None)
         sup = AgentSession(
             session_id=str(uuid.uuid4()),  # must be a valid UUID (CLI rejects prefixed ids)
             prompt=prompt,
@@ -245,6 +246,7 @@ class Team:
                 delegate_many=self.delegate_many,
                 model=worker_model,
                 env=worker_env,
+                cwd=worker_cwd,
             ),
             allowed_tools=tools,
             kind="supervisor",

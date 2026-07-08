@@ -229,3 +229,65 @@ def test_resolve_check(tmp_path, monkeypatch):
     assert (tmp_path / ".mcp.json").is_file()
 
 
+def test_api_create_session_fills_ambient_default_model(monkeypatch):
+    """An AMBIENT dispatch (provider set, model null) must resolve to the concrete
+    z.ai ambient model on the wire — never a silent CLI guess. Pins the
+    registry.default_model() fill-in at the create_session call site so display
+    === reality (the dropdown's shown model is the one that runs).
+    """
+    monkeypatch.setenv(
+        "ORBITER_PROVIDERS",
+        '[{"name": "z.ai", "models": []}]'
+    )
+    import importlib
+    import app.core.registry as registry
+    importlib.reload(registry)
+    import app.main as main
+    importlib.reload(main)
+
+    from app.core.provider import ClaudeSdkProvider
+    from fastapi.testclient import TestClient
+    client = TestClient(main.app)
+
+    # provider=z.ai, model omitted (None) -> ambient -> must become glm-4.7
+    r = client.post("/api/sessions", json={"prompt": "hi", "provider": "z.ai"})
+    assert r.status_code == 200
+    s = main.manager.get_session(r.json()["session_id"])
+    assert isinstance(s.provider, ClaudeSdkProvider)
+    assert s.provider._model == "glm-4.7"
+
+
+def test_provider_threads_cwd_and_setting_sources(monkeypatch):
+    """The project-memory fix: ClaudeSdkProvider.stream must hand the SDK BOTH the
+    project cwd AND setting_sources=["project"] (project CLAUDE.md/AGENTS.md load,
+    user ~/.claude excluded). Pins both so a future refactor can't silently drop
+    the agent's project memory or revert to the old isolation-by-default ([]).
+    """
+    import asyncio
+    import app.core.provider as provider_mod
+
+    captured: dict = {}
+
+    async def _fake_query(*, prompt, options):
+        captured["cwd"] = options.cwd
+        captured["setting_sources"] = list(options.setting_sources or [])
+        captured["model"] = options.model
+        return
+        yield  # unreachable; keeps _fake_query an async generator
+
+    monkeypatch.setattr(provider_mod, "query", _fake_query)
+
+    p = provider_mod.ClaudeSdkProvider(model="glm-4.7", cwd="/tmp/orbiter-project")
+
+    async def _run():
+        async for _ in p.stream(
+            "hi", system_prompt=None, allowed_tools=[],
+            session_id="s", on_tool_use=lambda *_: None,
+        ):
+            pass
+
+    asyncio.run(_run())
+
+    assert captured["cwd"] == "/tmp/orbiter-project"
+    assert captured["setting_sources"] == ["project"]
+    assert captured["model"] == "glm-4.7"

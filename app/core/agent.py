@@ -39,7 +39,7 @@ class AgentSession:
         self.scheduler = scheduler
         self.system_prompt = system_prompt
         self.security = security
-        self.provider = provider or ClaudeSdkProvider()
+        self.provider = provider or ClaudeSdkProvider(cwd=str(PROJECT_ROOT))
         # Per-session tool set. Workers (orchestrator.Team) pass a role-scoped
         # subset excluding "delegate" (leaves); the supervisor passes native + "delegate".
         self.allowed_tools = allowed_tools if allowed_tools is not None else ALLOWED_TOOLS
