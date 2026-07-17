@@ -55,7 +55,7 @@ tag `legacy-agentic-os-final`.
 | M2 | Health fan-out + manage (start/stop/logs) | ✅ 2026-07-18 (GLM child via agent-x; host-verified: API — health `{tmux:ok,comfyui:down}`, restart ok, logs ok, 400/404/400 edge paths; browser — green/red/grey pips correct, ManageBar renders, 0 console errors) |
 | M3 | ComfyUI module live | ✅ 2026-07-18 (host-built directly — ~40 lines; live verify: START→`pending`→amber `pip--hazard` "STARTING…"→green `pip--go` in headless browser, iframe-safe (no x-frame headers), STOP frees VRAM, 0 console errors) |
 | M4 | ffmpeg Video Lab panel | ✅ 2026-07-18 (GLM child via agent-x; host fixed a TS syntax error, aligned §M/§8 flags to recipes.md — child couldn't read it — and injected the missing `-progress pipe:1 -nostats`; host-verified live: xfade→done@100% (9.5095 s output, dissolve confirmed), LUT warmth confirmed numerically (R 159→173, B 126→118), path-escape→400, concurrent→409, mid-run progress 22→53%, SIGTERM cancel→cancelled, headless UI pass with 0 console errors) |
-| M5 | Hardening + docs | ⚪ pending |
+| M5 | Hardening + docs | ✅ 2026-07-18 (GLM child via agent-x — child's sandbox couldn't exec pytest, so host ran the whole gate; host fixed child's `railjack.service` ExecStart word-split bug (space in repo path → quoted the executable; `WorkingDirectory` stays unquoted); child finding locked by test: `_safe_lut` confines but doesn't validate `.cube` extension (UX gap, not a hole). Host-verified: 26 pytest green (config/paths/xfade/jobs), ruff clean, tsc+`npm run build` clean, `systemd-analyze verify` ok, full M1–M4 headless click-through PASS — pips, ManageBar, real transcode job →done@100%, iframe no-remount, 0 console errors) |
 
 ## Working conventions
 

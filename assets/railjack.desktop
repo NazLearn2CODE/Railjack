@@ -1,0 +1,19 @@
+# Railjack — desktop launcher (opens the mission-control dashboard in a browser).
+#
+# Install:
+#   mkdir -p ~/.local/share/applications
+#   cp assets/railjack.desktop ~/.local/share/applications/
+#   # Reuse the existing orbiter-dev icon — install it into the user theme
+#   # (full instructions in assets/icons/README.md):
+#   install -d ~/.local/share/icons/hicolor/scalable/apps
+#   install -m644 assets/icons/orbiter-dev.svg \
+#       ~/.local/share/icons/hicolor/scalable/apps/orbiter-dev.svg
+#   update-desktop-database ~/.local/share/applications 2>/dev/null || true
+[Desktop Entry]
+Type=Application
+Name=Railjack
+Comment=Mission-control hub for local services
+Exec=xdg-open http://localhost:8700
+Icon=orbiter-dev
+Terminal=false
+Categories=Utility;AudioVideo;

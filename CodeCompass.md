@@ -1,6 +1,6 @@
 # Code Compass
 
-> Copy this file to your project root. Reference it from `CLAUDE.md`: `For context, read CodeCompass.md first, then CLAUDE.md`
+> Reference from `CLAUDE.md`: "For context, read CodeCompass.md first, then CLAUDE.md"
 
 **Agents: read the code for structure — this file holds only what the code cannot tell you.**
 Do not add structure maps, entry-point lists, dependency tables, or folder-convention essays here — they drift the moment code changes and a model reads the actual code faster than it reads a stale map of it. Keep this ≤60 lines.
@@ -9,72 +9,41 @@ Do not add structure maps, entry-point lists, dependency tables, or folder-conve
 
 ## What This Project Does
 
-Orbiter — a locally-hosted **Agentic OS**: an orchestration layer treating AI agents as OS processes (scheduling, sandboxing, observability) on a Python/asyncio core, served through a React dashboard on `localhost:8000`. Built solo by Naz (owner) from the `agentic-os-guide` blueprint.
+Railjack — a modular, per-machine **hub of local services**: one FastAPI backend
+(`localhost:8700`) serving a React mission-control dashboard that embeds each
+selected service's web UI (iframe) or a custom panel, and manages it — live
+health, start/stop, ffmpeg jobs. Which modules ship is declared per machine in
+`config/<machine>.yaml`; adding an iframe module is one YAML block, zero core
+code. Formerly Orbiter (Agentic OS, retired 2026-07-18 — branch `legacy/agentic-os`).
 
 ## Current State
 
-**Shipped:** first live end-to-end run + human visual verification (2026-07-02, commit on `main`); mission-control surface + two verification gaps closed (2026-07-06, commit `9bf41b1`). 79 pytest green · ruff clean · `tsc --noEmit` + `npm run build` clean.
-**In progress:** demand-driven increments (the program runs; no increment is *needed* to run it).
-**Blocked:** L3 Landlock runtime-confirmation — needs a Landlock-capable host (this dev box has no active LSM).
+**Shipped (2026-07-18):** M0–M5 — rename + archive, hub shell + config loader +
+tmux iframe, health fan-out + manage, ComfyUI live module, ffmpeg Video Lab
+panel, hardening (pytest suite green) + docs. Full plan:
+`A-project/plans/2026-07-18-railjack-hub-build.md`; overview `A-project/index.md`.
+**Verify before commit:** `.venv/bin/pytest -q` · `cd web && npx tsc --noEmit &&
+npm run build` · `.venv/bin/ruff check`.
 
 ## Hard Constraints
 
-- LLM backend is **multi-provider via the `Provider` seam** (2026-07-07): z.ai/GLM
-  remains the ambient default, with **native Anthropic** (pay-per-token,
-  `ANTHROPIC_1P_API_KEY`) and **OpenRouter free-tier** (`OPENROUTER_API_KEY`,
-  `pricing.prompt == "0"` only) wired as selectable providers. All three route
-  through one `ClaudeSdkProvider` — `registry.resolve()` swaps
-  `ANTHROPIC_BASE_URL` + token per selection. The **ambient (no-selection)
-  state is pinned to `registry.DEFAULT_MODEL = "glm-4.7"`** (2026-07-09): a
-  dispatch with `provider=z.ai, model=null` is filled with `glm-4.7` before
-  `resolve()`, so the displayed model === the model on the wire (no silent
-  gateway guess). Model lists are fetched live from each gateway's `/v1/models`
-  on page load (never hardcoded). Prior state: z.ai/GLM only.
-- **Agents load project memory** (`CLAUDE.md`/`AGENTS.md`) — `ClaudeSdkProvider`
-  passes `cwd=WORKSPACE_ROOT` and `setting_sources=["project"]` to the SDK
-  (2026-07-09). The subprocess runs in the project root and follows the
-  project's own rules; the operator's `~/.claude` is still excluded (isolation
-  preserved, the casualty from the old `setting_sources=[]` fixed). See ADR
-  `A-project/decisions/2026-07-09-project-memory-and-model-honesty.md`.
-- Sandbox is **FAIL-OPEN + observable** on this box (no Landlock LSM) — a local single-user OS must not refuse to run. Surfaced honestly on `/api/health`, never greenwashed.
-- uvicorn runs **without `--reload`** → restart after any route change (a stale server 404s new endpoints).
-- No secrets in tracked files (`.env`, `.mcp.json`, `.claude/settings.json` token are machine-local).
-
-## Env & Secrets
-
-- `.env` (gitignored) — provider API keys.
-- `ORBITER_RECEIPT_SECRET` — HMAC key for `logs/receipts.jsonl` (the gated-tool audit trail).
-- `ORBITER_WORKSPACE_ROOT` / `ORBITER_SANDBOX_EXTRA_ROOTS` / `ORBITER_RECEIPT_LOG` — sandbox + receipt paths.
-- No `sk-ant-` key anywhere (intentional — see constraint above).
-
-## Deploy & Rollback
-
-```bash
-# Run (dev only — localhost:8000)
-uvicorn app.main:app --port 8000
-
-# Rollback to a prior commit
-git checkout <prev> &&  # restart uvicorn — no --reload
-```
+- **`comfy.sh` is the canonical ComfyUI manager** (`~/.claude/skills/f5-comfyui-media/scripts/comfy.sh`) — call it (start/stop/log); never reimplement the ComfyUI lifecycle in `app/`.
+- **Never `shell=True`, never sudo.** ffmpeg op builders return argv **lists** run via `asyncio.create_subprocess_exec`.
+- **Iframes hide, never unmount** — toggling visibility must not tear down the embeddable service (a tmux session served over ttyd dies if its iframe is unmounted; hide it instead).
+- **One ffmpeg job at a time** — `app/ffmpeg_jobs.py` serializes via `asyncio.Lock` + a 409 if any job is non-terminal.
+- **Every client-supplied path is confined** to a configured root (`media_dirs`/`lut_dir`/`output_dir`) via `os.path.commonpath` (`_safe_input`/`_safe_lut`).
+- **`web/src/index.css` is the design system** — reuse verbatim, do not touch (vault recipe: `mission-control-ui-system`).
+- **Port 8700, not 8000** (8000 was the retired Orbiter port).
+- **Repo path contains a space** (`Coding Projects/Railjack`) — quote it in shells; in systemd units leave `WorkingDirectory` unquoted (values are literal).
 
 ## Known Gotchas
 
-- `~/Cephalon/10-knowledge/testing-gotchas.md` — **SDK-free tests ship green-but-broken** (the test-seam-above-the-client gap; `FakeProvider` never hits the real CLI).
-- `~/Cephalon/10-knowledge/claude-agent-sdk-gotchas.md` — `--session-id` is **UUID-only**; `mcp__<server>__<tool>` namespacing required in `allowed_tools`.
-- `~/Cephalon/10-knowledge/typescript-gotchas.md` — type-only import syntax.
-- `B-sessions/` runtime logs **auto-stage into the git index** → `git restore --staged B-sessions/` before every commit.
-
-## Technical Debt / Known Ceilings
-
-| Shortcut | Why | Upgrade path |
-|----------|-----|--------------|
-| L3 Landlock fail-open | No active LSM on dev box | `ORBITER_SANDBOX_LIVE=1` self-check on a Landlock host |
-| `Channel` trait deferred | Single impl (WS gateway) today | Add a 2nd messaging impl when needed |
-| Real-LLM WS drive = the integration test | SDK-free tests can't reach CLI paths | Keep one live z.ai drive per topology change |
-| Per-role `allowed_tools` deferred | YAGNI | Expose when role-editor lands |
+- uvicorn runs **without `--reload`** → restart after any route change (a stale server 404s new endpoints).
+- Config is resolved at **import time** (`config.CONFIG = select_config()`); a missing/ambiguous config fails the uvicorn boot loudly, not at first request.
+- n8n refuses framing until `frame-ancestors`/CSP is set on its side (see pivot ADR).
 
 ---
 
-**Updated:** 2026-07-09
+**Updated:** 2026-07-18
 **Maintainer:** Naz
 **Source:** Cephalon vault (`~/Cephalon/CodeCompass.md`) — copy to project root and customize
