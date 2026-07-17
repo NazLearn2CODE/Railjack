@@ -14,12 +14,14 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
 from .config import CONFIG, Module
+from .ffmpeg_jobs import router as ffmpeg_router
 from .health import router as health_router
 from .manage import router as manage_router
 
 app = FastAPI(title="Railjack")
 app.include_router(health_router)
 app.include_router(manage_router)
+app.include_router(ffmpeg_router)
 
 DASHBOARD_DIST = Path(__file__).resolve().parent.parent / "web" / "dist"
 

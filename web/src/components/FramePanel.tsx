@@ -1,11 +1,13 @@
-import { useStore } from "../store";
+import type { FC } from "react";
+import { useStore, type ModuleConfig } from "../store";
 import ManageBar from "./ManageBar";
 
-export default function FramePanel() {
+export default function FramePanel({ panels }: { panels: Record<string, FC<{ module: ModuleConfig }>> }) {
   const modules = useStore((s) => s.config?.modules) ?? [];
   const activeId = useStore((s) => s.activeModuleId);
   const active = modules.find((m) => m.id === activeId) ?? null;
   const iframeMods = modules.filter((m) => m.kind === "iframe");
+  const Panel = active?.panel ? panels[active.panel] : undefined;
 
   return (
     <section className="hud hud--bracket reveal reveal-3 m-2 flex min-h-0 flex-1 flex-col overflow-hidden">
@@ -36,15 +38,20 @@ export default function FramePanel() {
           />
         ))}
 
-        {/* Panel modules render a placeholder until their panel lands (M4). */}
-        {active?.kind === "panel" && (
-          <div className="absolute inset-0 flex items-center justify-center">
-            <div className="text-center">
-              <div className="panel-title mb-2">{active.title}</div>
-              <div className="label">COMING SOON</div>
+        {/* Panel modules: render their registered component, else a placeholder. */}
+        {active?.kind === "panel" &&
+          (Panel ? (
+            <div className="absolute inset-0 overflow-hidden">
+              <Panel module={active} />
             </div>
-          </div>
-        )}
+          ) : (
+            <div className="absolute inset-0 flex items-center justify-center">
+              <div className="text-center">
+                <div className="panel-title mb-2">{active.title}</div>
+                <div className="label">COMING SOON</div>
+              </div>
+            </div>
+          ))}
       </div>
     </section>
   );

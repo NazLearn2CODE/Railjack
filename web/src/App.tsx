@@ -1,9 +1,14 @@
 import { useEffect } from "react";
+import type { FC } from "react";
 import { fetchJSON, usePolling } from "./api";
-import { useStore, type AppConfig } from "./store";
+import { useStore, type AppConfig, type ModuleConfig } from "./store";
 import TopBar from "./components/TopBar";
 import ModuleRail from "./components/ModuleRail";
 import FramePanel from "./components/FramePanel";
+import FfmpegPanel from "./components/FfmpegPanel";
+
+// kind:"panel" modules render their panel component from this map.
+const PANELS: Record<string, FC<{ module: ModuleConfig }>> = { ffmpeg: FfmpegPanel };
 
 export default function App() {
   const setConfig = useStore((s) => s.setConfig);
@@ -62,7 +67,7 @@ export default function App() {
         <TopBar />
         <div className="flex min-h-0 flex-1">
           <ModuleRail />
-          <FramePanel />
+          <FramePanel panels={PANELS} />
         </div>
       </div>
     </div>

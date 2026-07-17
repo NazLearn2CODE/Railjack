@@ -54,7 +54,7 @@ tag `legacy-agentic-os-final`.
 | M1 | Shell + config loader + tmux iframe | ✅ 2026-07-18 (GLM child via agent-x; host-verified: browser smoke PASS — TAWHAN bar, 3 rail entries, live tmux frame, no-remount proof, 0 console errors) |
 | M2 | Health fan-out + manage (start/stop/logs) | ✅ 2026-07-18 (GLM child via agent-x; host-verified: API — health `{tmux:ok,comfyui:down}`, restart ok, logs ok, 400/404/400 edge paths; browser — green/red/grey pips correct, ManageBar renders, 0 console errors) |
 | M3 | ComfyUI module live | ✅ 2026-07-18 (host-built directly — ~40 lines; live verify: START→`pending`→amber `pip--hazard` "STARTING…"→green `pip--go` in headless browser, iframe-safe (no x-frame headers), STOP frees VRAM, 0 console errors) |
-| M4 | ffmpeg Video Lab panel | ⚪ pending |
+| M4 | ffmpeg Video Lab panel | ✅ 2026-07-18 (GLM child via agent-x; host fixed a TS syntax error, aligned §M/§8 flags to recipes.md — child couldn't read it — and injected the missing `-progress pipe:1 -nostats`; host-verified live: xfade→done@100% (9.5095 s output, dissolve confirmed), LUT warmth confirmed numerically (R 159→173, B 126→118), path-escape→400, concurrent→409, mid-run progress 22→53%, SIGTERM cancel→cancelled, headless UI pass with 0 console errors) |
 | M5 | Hardening + docs | ⚪ pending |
 
 ## Working conventions
