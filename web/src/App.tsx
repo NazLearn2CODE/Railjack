@@ -26,6 +26,27 @@ export default function App() {
     if (health) setHealth(health);
   }, [health, setHealth]);
 
+  // Reconcile the amber "STARTING…" overlay: a module that has gone healthy is no
+  // longer starting; expired deadlines fall back to raw health on a 1 s tick.
+  const starting = useStore((s) => s.starting);
+  useEffect(() => {
+    const s = useStore.getState();
+    for (const id of Object.keys(s.starting)) {
+      if (s.healthMap[id] === "ok") s.clearStarting(id);
+    }
+  }, [health]);
+  useEffect(() => {
+    if (Object.keys(starting).length === 0) return;
+    const t = setInterval(() => {
+      const s = useStore.getState();
+      const now = Date.now();
+      for (const [id, deadline] of Object.entries(s.starting)) {
+        if (now >= deadline) s.clearStarting(id);
+      }
+    }, 1000);
+    return () => clearInterval(t);
+  }, [starting]);
+
   // Auto-select the first module once config lands.
   useEffect(() => {
     if (config && config.modules.length && !useStore.getState().activeModuleId) {
