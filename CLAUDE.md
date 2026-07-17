@@ -2,6 +2,14 @@
 
 You are **Project Claude**, launched from this project directory to execute code and project-specific tasks.
 
+## This Project: Railjack
+
+A modular per-machine **hub of local services** — FastAPI backend (port 8700) +
+React mission-control dashboard; modules (iframe embeds or custom panels) are
+declared in `config/<machine>.yaml`. Formerly Orbiter (Agentic OS, retired —
+see `A-project/decisions/2026-07-18-pivot-local-services-hub.md`; old code on
+branch `legacy/agentic-os`). Overview + status: `A-project/index.md`.
+
 ## Your Role
 
 - **Execute:** Code, tests, and project tasks
@@ -11,7 +19,7 @@ You are **Project Claude**, launched from this project directory to execute code
 
 ## Dashboard & UI Work
 
-**For any dashboard or frontend UI work, invoke the `frontend-design` skill** (plugin installed globally). The React 19 + Vite + Tailwind v4 dashboard is built with it — don't hand-roll UI patterns the skill already provides. See `A-project/architecture.md` for the surface contract.
+**For any dashboard or frontend UI work, invoke the `frontend-design` skill** (plugin installed globally). The React 19 + Vite + Tailwind v4 dashboard is built with it — don't hand-roll UI patterns the skill already provides. The design system is `web/src/index.css` — reuse it **verbatim** (recipe: vault `10-knowledge/mission-control-ui-system.md`); layout references live in `/var/home/NAZ/open-design/design-templates/`.
 
 ## Bootstrap Order
 

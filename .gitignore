@@ -7,8 +7,9 @@ venv/
 .pytest_cache/
 .ruff_cache/
 
-# Runtime — security receipt log (HMAC audit trail; generated per-run)
+# Runtime — machine-local logs (session logs + any generated run logs)
 logs/
+B-sessions/
 
 # Node / frontend
 node_modules/

@@ -1,14 +1,15 @@
 ---
-title: Agent — Orbiter project
+title: Agent — Railjack project
 date: 2026-07-07
-tags: [bootstrap, agents, orbiter]
+updated: 2026-07-18
+tags: [bootstrap, agents, railjack]
 ---
 
-# Agent — Orbiter project
+# Agent — Railjack project
 
 This file is read by any non-Claude agent runtime that follows the `AGENTS.md`
 convention (ZCode, Codex, Gemini, local models, future agents) when launched
-**inside the Orbiter project**. It is a **thin pointer** — the actual project
+**inside the Railjack project**. It is a **thin pointer** — the actual project
 rules live in `CLAUDE.md`, once. Read that; this file only tells you the order
 and the non-negotiables.
 
@@ -68,27 +69,31 @@ Every time a vault note answers a question or prevents rework, log it:
 ## Non-negotiables
 
 - **Two-memory boundary.** Your memory lives in *this* project, not the vault:
-  session logs → `B-sessions/`, decisions → `A-project/decisions/`, architecture
-  → `A-project/`, harvest → `Z-harvest/`. Per-agent local memory (if any) holds
-  only behavior notes + pointers into the vault.
+  session logs → `B-sessions/` (gitignored, machine-local), decisions →
+  `A-project/decisions/`, architecture/plans → `A-project/`. Per-agent local
+  memory (if any) holds only behavior notes + pointers into the vault.
 - **Safety protocol.** Before any non-trivial change and after completing it,
   invoke f5-vibe-check. After a 3rd failed attempt at the same bug, or when
   starting a HIGH-tier task, invoke f5-stop-digging.
 - **Verify before commit.** `.venv/bin/pytest -q` · `cd web && npx tsc --noEmit
-  && npm run build` · `.venv/bin/ruff check`. Always `git restore --staged
-  B-sessions/` before committing (runtime logs auto-stage).
+  && npm run build` · `.venv/bin/ruff check`.
 - **Commit convention.** Commit directly to `main`, one coherent increment per
   commit, conventional-commit message ending with
   `Co-Authored-By: Claude <noreply@anthropic.com>`. Stage only the increment's
-  files via **explicit paths** — `B-sessions/` runtime logs auto-stage into the
-  index without an explicit `git add`; always `git restore --staged B-sessions/`
-  and confirm `git status` shows only the increment before committing.
+  files via **explicit paths**; confirm `git status` shows only the increment
+  before committing. (`B-sessions/` is gitignored since the 2026-07-18 pivot —
+  the old restore-before-commit rule is obsolete.)
+- **Milestone marks.** After completing a milestone, update the table in
+  `A-project/index.md` in the SAME commit — a fresh session resumes from
+  `A-project/plans/2026-07-18-railjack-hub-build.md` + that table.
 
 ## Cross-machine
 
-This is the **home instance** (`~/Coding Projects/Orbiter/`). A separate
-**office instance** exists at `/home/ThePRODUCER/Orbiter/` with different scope
-— each machine works its own. See `~/Cephalon/20-projects/orbiter.md` (vault,
+This is the **home instance** (`~/Coding Projects/Railjack/`, machine "Tawhan",
+hostname `bazzite`). A separate **office instance** exists at
+`/home/ThePRODUCER/Orbiter/` on Orokin (its own rename is pending, name TBD by
+Naz) — each machine works its own. Per-machine modules come from
+`config/<machine>.yaml`. See `~/Cephalon/20-projects/railjack.md` (vault,
 read-only).
 
 ## End of Session

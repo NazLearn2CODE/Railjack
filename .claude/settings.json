@@ -2,7 +2,7 @@
   "mcpServers": {
     "obsidian": {
       "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-obsidian", "/var/home/NAZ/Coding Projects/Orbiter"],
+      "args": ["-y", "@modelcontextprotocol/server-obsidian", "/var/home/NAZ/Coding Projects/Railjack"],
       "env": {
         "OBSIDIAN_REST_API_URL": "https://127.0.0.1:27124",
         "OBSIDIAN_REST_API_TOKEN": "ffefe775a805c168edc82b130eda6b06013ae05f405cd92d16a8f826224b400d"
@@ -16,7 +16,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "echo '🗂️ Vault active: Orbiter — Agentic OS dashboard + orchestration core'"
+            "command": "echo '🗂️ Vault active: Railjack — local-services hub (mission-control dashboard)'"
           }
         ]
       }
