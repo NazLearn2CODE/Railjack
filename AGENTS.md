@@ -25,23 +25,64 @@ memory vault.
 3. Read `CLAUDE.md` — the project's full rules (bootstrap, web-research chain, memory writes, end-of-session).
 4. Check `B-sessions/` for recent session logs.
 
+## Vault Access Control
+
+**⚠️ CRITICAL: READ-ONLY ACCESS TO CEPHALON VAULT ⚠️**
+
+The vault (`~/Cephalon/`) is READ-ONLY for project agents.
+
+**Allowed:**
+- ✅ READ vault files for context
+- ✅ Reference vault knowledge when relevant
+- ✅ Suggest vault updates to the user
+
+**NEVER:**
+- ❌ WRITE, EDIT, or DELETE any vault file
+- ❌ Create new vault files
+- ❌ Run git commands on the vault
+- ❌ Attempt to "fix" or "improve" vault structure
+
+**Rationale:** Vault integrity requires centralized stewardship. Only the user and
+Vault Claude (launched from `~/Cephalon`) may modify it. See `~/Cephalon/Cephalon.md`
+§ Access control.
+
+## Vault Read-Triggers (read at the moment of need, not upfront)
+
+The vault is READ-ONLY for you, but reading it is the point — it holds prior
+projects' scar tissue. When a trigger fires, read the note BEFORE debugging
+from scratch:
+
+| When you are... | Read first |
+|---|---|
+| Writing/fixing tests (esp. pytest, SDK mocks) | `~/Cephalon/10-knowledge/testing-gotchas.md` |
+| Fighting TypeScript errors | `~/Cephalon/10-knowledge/typescript-gotchas.md` |
+| Using claude-agent-sdk | `~/Cephalon/10-knowledge/claude-agent-sdk-gotchas.md` |
+| Adding any external API/LLM/WebSocket integration | f5-connector-scaffold skill |
+| Hitting "works at home, not at the office" | f5-drift-doctor skill |
+| Unsure where knowledge lives | `~/Cephalon/index.md` (routing map) |
+
+Every time a vault note answers a question or prevents rework, log it:
+`vault-assist: [[note-name]] — what it saved`. The inverse too:
+`vault-gap: <what you needed that the vault didn't have>`.
+
 ## Non-negotiables
 
-- **Vault is READ-ONLY.** `~/Cephalon/` is the shared long-term memory for all
-  agents. You may READ it for context; you may NEVER write, edit, delete, or
-  move any vault file, create vault files, or run git on the vault. Only the
-  user and Vault Claude (launched from `~/Cephalon`) may modify it. See
-  `~/Cephalon/Cephalon.md` § Access control.
 - **Two-memory boundary.** Your memory lives in *this* project, not the vault:
   session logs → `B-sessions/`, decisions → `A-project/decisions/`, architecture
   → `A-project/`, harvest → `Z-harvest/`. Per-agent local memory (if any) holds
   only behavior notes + pointers into the vault.
 - **Safety protocol.** Before any non-trivial change and after completing it,
-  invoke vibe-check. After a 3rd failed attempt at the same bug, or when
-  starting a HIGH-tier task, invoke stop-digging.
+  invoke f5-vibe-check. After a 3rd failed attempt at the same bug, or when
+  starting a HIGH-tier task, invoke f5-stop-digging.
 - **Verify before commit.** `.venv/bin/pytest -q` · `cd web && npx tsc --noEmit
   && npm run build` · `.venv/bin/ruff check`. Always `git restore --staged
   B-sessions/` before committing (runtime logs auto-stage).
+- **Commit convention.** Commit directly to `main`, one coherent increment per
+  commit, conventional-commit message ending with
+  `Co-Authored-By: Claude <noreply@anthropic.com>`. Stage only the increment's
+  files via **explicit paths** — `B-sessions/` runtime logs auto-stage into the
+  index without an explicit `git add`; always `git restore --staged B-sessions/`
+  and confirm `git status` shows only the increment before committing.
 
 ## Cross-machine
 
@@ -49,3 +90,15 @@ This is the **home instance** (`~/Coding Projects/Orbiter/`). A separate
 **office instance** exists at `/home/ThePRODUCER/Orbiter/` with different scope
 — each machine works its own. See `~/Cephalon/20-projects/orbiter.md` (vault,
 read-only).
+
+## End of Session
+
+When the session ends:
+1. Clean up `B-sessions/` if needed.
+2. Ensure project state is committed (git).
+3. DO NOT touch the Cephalon vault.
+
+The user (or Vault Claude) will handle vault sync separately.
+
+# currentDate
+Today's date is 2026-07-08.

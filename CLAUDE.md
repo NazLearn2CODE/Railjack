@@ -79,10 +79,10 @@ inverse too: `vault-gap: <what you needed that the vault didn't have>`. These
 flow into the harvest report's Vault Assists section — it's how the vault
 learns which notes are load-bearing and what to write next.
 
-## Safety Protocol (vibe-check + stop-digging)
+## Safety Protocol (f5-vibe-check + f5-stop-digging)
 
-- Before ANY non-trivial change and after completing it: invoke the vibe-check skill. No exceptions.
-- After a 3rd failed attempt at the same bug, or when starting a HIGH-tier task: invoke the stop-digging skill.
+- Before ANY non-trivial change and after completing it: invoke the f5-vibe-check skill. No exceptions.
+- After a 3rd failed attempt at the same bug, or when starting a HIGH-tier task: invoke the f5-stop-digging skill.
 
 ## Memory Writes
 
