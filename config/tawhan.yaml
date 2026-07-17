@@ -1,0 +1,28 @@
+machine: tawhan
+hostnames: [bazzite]          # `hostname -s` on the Tawhan (home) machine
+modules:
+  - id: tmux
+    title: TERMINAL
+    kind: iframe
+    url: http://localhost:7681
+    health: { type: http, url: "http://localhost:7681/" }
+    manage: { type: systemd-user, unit: ttyd.service, extra_units: [ttyd-upload.service] }
+  - id: comfyui
+    title: COMFYUI
+    kind: iframe
+    url: http://127.0.0.1:8188
+    health: { type: http, url: "http://127.0.0.1:8188/system_stats" }
+    manage:
+      type: command
+      start: ["bash", "/home/NAZ/.claude/skills/f5-comfyui-media/scripts/comfy.sh", "start"]
+      stop:  ["bash", "/home/NAZ/.claude/skills/f5-comfyui-media/scripts/comfy.sh", "stop"]
+      log:   ["bash", "/home/NAZ/.claude/skills/f5-comfyui-media/scripts/comfy.sh", "log"]
+      start_timeout_s: 150
+  - id: ffmpeg
+    title: VIDEO LAB
+    kind: panel
+    panel: ffmpeg
+    options:
+      media_dirs: ["~/Downloads/B-Rolls", "~/Videos", "~/ttyd-drops"]
+      lut_dir: "~/Videos/LUTs"
+      output_dir: "~/Videos/railjack-renders"

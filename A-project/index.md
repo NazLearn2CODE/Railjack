@@ -51,7 +51,7 @@ tag `legacy-agentic-os-final`.
 | # | Scope | Status |
 |---|-------|--------|
 | M0 | Rename Orbiter→Railjack, archive legacy, fresh main | ✅ 2026-07-18 (`028458e`) |
-| M1 | Shell + config loader + tmux iframe | ⚪ pending |
+| M1 | Shell + config loader + tmux iframe | ✅ 2026-07-18 (GLM child via agent-x; host-verified: browser smoke PASS — TAWHAN bar, 3 rail entries, live tmux frame, no-remount proof, 0 console errors) |
 | M2 | Health fan-out + manage (start/stop/logs) | ⚪ pending |
 | M3 | ComfyUI module live | ⚪ pending |
 | M4 | ffmpeg Video Lab panel | ⚪ pending |

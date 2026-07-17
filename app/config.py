@@ -1,0 +1,88 @@
+"""Per-machine module configuration: YAML load + pydantic models + selection.
+
+Selection order: ``RAILJACK_CONFIG`` env override (matches a config file stem),
+else the lowercased ``hostname -s`` is matched against each config's
+``hostnames:`` list. A miss raises at import time so uvicorn fails fast with a
+message listing the available configs.
+"""
+
+from __future__ import annotations
+
+import os
+import socket
+from pathlib import Path
+
+import yaml
+from pydantic import BaseModel
+
+CONFIG_DIR = Path(__file__).resolve().parent.parent / "config"
+
+
+class HealthSpec(BaseModel):
+    type: str
+    url: str | None = None
+
+
+class ManageSpec(BaseModel):
+    type: str  # "systemd-user" | "command"
+    unit: str | None = None
+    extra_units: list[str] = []
+    start: list[str] | None = None
+    stop: list[str] | None = None
+    log: list[str] | None = None
+    start_timeout_s: int = 150
+
+
+class Module(BaseModel):
+    id: str
+    title: str
+    kind: str  # "iframe" | "panel"
+    url: str | None = None
+    panel: str | None = None
+    health: HealthSpec | None = None
+    manage: ManageSpec | None = None
+    options: dict = {}
+
+
+class MachineConfig(BaseModel):
+    machine: str
+    hostnames: list[str]
+    modules: list[Module]
+
+
+def _available() -> list[Path]:
+    return sorted(CONFIG_DIR.glob("*.yaml"))
+
+
+def _load(path: Path) -> MachineConfig:
+    return MachineConfig(**(yaml.safe_load(path.read_text()) or {}))
+
+
+def select_config() -> MachineConfig:
+    """Pick this machine's config (env override > hostname match)."""
+    candidates = _available()
+    names = ", ".join(p.stem for p in candidates) or "(none)"
+    if not candidates:
+        raise RuntimeError(f"No machine configs in {CONFIG_DIR}; add config/<machine>.yaml.")
+
+    override = os.environ.get("RAILJACK_CONFIG")
+    if override:
+        for p in candidates:
+            if p.stem == override:
+                return _load(p)
+        raise RuntimeError(f"RAILJACK_CONFIG={override!r} matches no config. Available: {names}")
+
+    host = socket.gethostname().split(".")[0].lower()
+    for p in candidates:
+        cfg = _load(p)
+        if host in cfg.hostnames:
+            return cfg
+    raise RuntimeError(
+        f"No config matches hostname {host!r}. Set RAILJACK_CONFIG or add it to a "
+        f"config's hostnames. Available: {names}"
+    )
+
+
+# ponytail: resolve at import so a missing/ambiguous config fails the uvicorn
+# boot loudly (the "clear startup error" requirement) rather than at first request.
+CONFIG = select_config()
