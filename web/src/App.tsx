@@ -1,5 +1,5 @@
 import { useEffect } from "react";
-import { fetchJSON } from "./api";
+import { fetchJSON, usePolling } from "./api";
 import { useStore, type AppConfig } from "./store";
 import TopBar from "./components/TopBar";
 import ModuleRail from "./components/ModuleRail";
@@ -7,6 +7,7 @@ import FramePanel from "./components/FramePanel";
 
 export default function App() {
   const setConfig = useStore((s) => s.setConfig);
+  const setHealth = useStore((s) => s.setHealth);
   const config = useStore((s) => s.config);
 
   useEffect(() => {
@@ -18,6 +19,12 @@ export default function App() {
       alive = false;
     };
   }, [setConfig]);
+
+  // Health pips: poll every 5 s. ManageBar also pushes a fresh fetch after an action.
+  const { data: health } = usePolling<Record<string, string>>("/api/health", 5000);
+  useEffect(() => {
+    if (health) setHealth(health);
+  }, [health, setHealth]);
 
   // Auto-select the first module once config lands.
   useEffect(() => {

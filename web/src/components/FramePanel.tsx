@@ -1,4 +1,5 @@
 import { useStore } from "../store";
+import ManageBar from "./ManageBar";
 
 export default function FramePanel() {
   const modules = useStore((s) => s.config?.modules) ?? [];
@@ -14,6 +15,10 @@ export default function FramePanel() {
         </span>
         <span className="label">{active?.kind.toUpperCase()}</span>
       </div>
+
+      {/* ManageBar is chrome above the frame area (never inside the iframe map),
+          so toggling it can't remount the tmux terminal session. */}
+      {active?.manage && <ManageBar moduleId={active.id} />}
 
       <div className="relative min-h-0 flex-1 bg-void">
         {/*

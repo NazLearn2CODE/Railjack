@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 
-export async function fetchJSON<T>(url: string): Promise<T> {
-  const res = await fetch(url);
+export async function fetchJSON<T>(url: string, init?: RequestInit): Promise<T> {
+  const res = await fetch(url, init);
   if (!res.ok) throw new Error(`${url} → ${res.status}`);
   return (await res.json()) as T;
 }

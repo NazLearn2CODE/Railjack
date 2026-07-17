@@ -1,7 +1,8 @@
 """Railjack hub — FastAPI app.
 
-M1 surface: ``GET /api/config`` (machine name + sanitized module list) and a
-static mount of ``web/dist`` (last, so /api wins). Health/manage come in M2+.
+``GET /api/config`` (machine name + sanitized module list), ``/api/health`` and
+``/api/modules/...`` (manage), then a static mount of ``web/dist`` last so /api
+wins.
 """
 
 from __future__ import annotations
@@ -13,20 +14,26 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
 from .config import CONFIG, Module
+from .health import router as health_router
+from .manage import router as manage_router
 
 app = FastAPI(title="Railjack")
+app.include_router(health_router)
+app.include_router(manage_router)
 
 DASHBOARD_DIST = Path(__file__).resolve().parent.parent / "web" / "dist"
 
 
 def _sanitize(m: Module) -> dict:
-    """Frontend-safe projection: keep the embed surface, drop manage/health
-    internals (argv, unit names, internal probe URLs)."""
+    """Frontend-safe projection: keep the embed surface and bare health/manage
+    presence flags, but drop internals (argv, unit names, probe URLs)."""
     out: dict = {"id": m.id, "title": m.title, "kind": m.kind}
     if m.url:
         out["url"] = m.url
     if m.panel:
         out["panel"] = m.panel
+    out["health"] = m.health is not None
+    out["manage"] = m.manage is not None
     return out
 
 
