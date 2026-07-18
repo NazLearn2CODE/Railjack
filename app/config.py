@@ -44,10 +44,38 @@ class Module(BaseModel):
     options: dict = {}
 
 
+# M6 cockpit config — all optional with safe defaults so the grimoldi stub
+# (tmux-only) and any minimal config stay valid without these keys.
+
+class Provider(BaseModel):
+    name: str
+    model_match: str  # regex tested against a session's model string
+    window_hours: float = 5
+    context_limit: int = 200_000
+
+
+class Button(BaseModel):
+    label: str
+    insert: str  # text typed into the terminal (Naz-edited in YAML)
+
+
+class CatalogGroup(BaseModel):
+    name: str
+    match: str  # regex; first matching group wins
+
+
+class CatalogSpec(BaseModel):
+    mcp_insert_template: str = "use the {name} MCP to "
+    groups: list[CatalogGroup] = []
+
+
 class MachineConfig(BaseModel):
     machine: str
     hostnames: list[str]
     modules: list[Module]
+    providers: list[Provider] = []
+    buttons: list[Button] = []
+    catalog: CatalogSpec = CatalogSpec()
 
 
 def _available() -> list[Path]:

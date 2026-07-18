@@ -142,3 +142,69 @@ Layout references (read during implementation): `/var/home/NAZ/open-design/desig
 | Vite proxy config | `web/vite.config.ts` (8000→8700) | same path |
 | Fonts/HTML shell | `web/index.html` | same path |
 | ADR template | `A-project/decisions/template.md` | new ADR |
+
+---
+
+## M6 — Cockpit controls + session telemetry (approved by Naz, 2026-07-18)
+
+Three refinements, all zero-context-cost by design: dropdowns/buttons only *type*
+short strings into the terminal (type-only, NO Enter — Naz reviews and presses
+Enter); telemetry is read from disk by the backend, never through the Claude session.
+
+**Ground truth (verified during planning — don't re-derive):**
+- ttyd runs `tmux new -A -s main`, writable (`-W`) → inject via
+  `tmux send-keys -t main -l -- <text>` (`-l` literal, `--` guards leading `-`/`/`).
+- Skills = dirs under `~/.claude/skills/` (21 today, `f5-*` family prefix).
+- MCP servers = `mcpServers` keys in `~/.claude.json` (global) + per-project
+  `projects.<path>.mcpServers` + optional `<project>/.mcp.json`.
+- Session transcripts = `~/.claude/projects/<slug>/<uuid>.jsonl`. Last assistant
+  entry's `message.usage` → context = `input_tokens + cache_read_input_tokens +
+  cache_creation_input_tokens` (live sample: ~90k). `message.model` identifies
+  provider (`claude-*` → anthropic, `glm-*` → zai).
+- 5h block math (ccusage convention): current block start = first message after
+  a ≥5h gap, floored to the hour; `reset_at = start + 5h`.
+
+### Backend
+- `app/terminal_input.py` — `POST /api/terminal/insert {text}`: strip/refuse
+  `\n`/`\r` (400) so nothing can auto-execute; max 500 chars; argv exec of
+  `tmux send-keys -t <session> -l -- <text>`; tmux session name from the tmux
+  module's `options.tmux_session` (default `main`). Surface stderr on failure.
+- `app/catalog.py` — `GET /api/catalog`: skills (scan skills dir) + MCPs (parse
+  the JSON sources above), each `{name, insert, group}`. Insert text: skills →
+  `/name `, MCPs → template `use the {name} MCP to ` (template configurable).
+  Grouping: ordered regex rules from config, first match wins, fallback `OTHER`.
+  In-process cache 60 s.
+- `app/session_stats.py` — `GET /api/session`: newest `*.jsonl` by mtime (idle
+  if >10 min stale) → last usage + model → match against `providers:` config
+  list (name, model_match regex, window_hours, context_limit) → scan
+  matching-provider timestamps in files with mtime < window+1 h for block start
+  → `{provider, model, context_tokens, context_limit, context_pct, reset_at,
+  idle}`. 30 s in-process cache. Unknown model → provider `"?"`, still show ctx.
+- `app/config.py` — optional machine-level keys: `providers`, `buttons`,
+  `catalog` (groups/assign/mcp_insert_template). Defaults keep grimoldi stub valid.
+- `config/tawhan.yaml` — add `tmux_session: main` under tmux module options;
+  `providers:` anthropic + zai (both `window_hours: 5`, `context_limit: 200000`);
+  `buttons:` BOOTSTRAP (canned prompt: read hot.md/index.md/Cephalon.md/CLAUDE.md
+  + .claude agents, run vault-check.py, `git pull --ff-only` CephalonVoid sync,
+  one-line status) and COMMIT & PUSH (canned prompt: session-end per Cephalon.md
+  — hot.md + memory-log, vault-check, commit, push). Naz edits prompts in YAML,
+  no code change.
+
+### Frontend
+- `TopBar` right side: SKILLS + MCP dropdowns (grouped, HUD-styled), the two
+  buttons, telemetry strip `PROVIDER · CTX nn% (mini-bar) · RESET h:mm` —
+  countdown ticks locally between 15 s polls; ctx bar amber >70 %, crit >90 %;
+  `IDLE` state when no fresh session.
+- `ManageBar`: remove the HEALTH label/text row (rail pips keep service health).
+- Selecting a dropdown item or button → `POST /api/terminal/insert` → auto-switch
+  active module to TERMINAL so Naz sees the typed text.
+
+### Tests (extend suite)
+Block math (gap >5h starts new block, floor-to-hour, reset_at), provider
+regex match + unknown-model fallback, insert endpoint rejects newline/oversize,
+catalog grouping first-match-wins. Mock filesystem/tmux — no real tmux in tests.
+
+**Verify:** pytest green; live: dropdown pick → text appears in tmux pane
+(`tmux capture-pane -p -t main | tail`), NOT executed; BOOTSTRAP types its
+prompt; TopBar ctx% ≈ real session, RESET plausible vs block start; ManageBar
+shows no HEALTH; 0 console errors headless.

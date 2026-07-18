@@ -7,6 +7,8 @@ modules:
     url: http://localhost:7681
     health: { type: http, url: "http://localhost:7681/" }
     manage: { type: systemd-user, unit: ttyd.service, extra_units: [ttyd-upload.service] }
+    options:
+      tmux_session: main
   - id: comfyui
     title: COMFYUI
     kind: iframe
@@ -26,3 +28,30 @@ modules:
       media_dirs: ["~/Downloads/B-Rolls", "~/Videos", "~/ttyd-drops"]
       lut_dir: "~/Videos/LUTs"
       output_dir: "~/Videos/railjack-renders"
+
+# M6 cockpit — session telemetry, terminal buttons, catalog grouping.
+
+providers:
+  - name: anthropic
+    model_match: "^claude-"
+    window_hours: 5
+    context_limit: 200000
+  - name: zai
+    model_match: "^glm-"
+    window_hours: 5
+    context_limit: 200000
+
+buttons:
+  - label: BOOTSTRAP
+    insert: "Bootstrap: read hot.md, index.md, Cephalon.md, CLAUDE.md (+ .claude/agents), run python3 vault-check.py, git pull --ff-only to sync CephalonVoid, then give me a one-line status."
+  - label: COMMIT & PUSH
+    insert: "Session-end per Cephalon.md: update hot.md + logs/memory-log.md, run python3 vault-check.py, then commit and push the vault to CephalonVoid."
+
+catalog:
+  mcp_insert_template: "use the {name} MCP to "
+  groups:
+    - { name: F5, match: "^f5-" }
+    - { name: MEDIA, match: "comfyui|ffmpeg|davinci|youtube|story|channel|case|resolve" }
+    - { name: RESEARCH, match: "reach|search|reader|zread|newstank|notebooklm|radar" }
+    - { name: AGENTS, match: "agent|subagent|delegate|llm" }
+    - { name: WORKSPACE, match: "google|obsidian|workspace" }

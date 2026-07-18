@@ -11,9 +11,15 @@ export interface ModuleConfig {
   start_timeout_s?: number;
 }
 
+export interface CockpitButton {
+  label: string;
+  insert: string;
+}
+
 export interface AppConfig {
   machine: string;
   modules: ModuleConfig[];
+  buttons?: CockpitButton[];
 }
 
 interface State {

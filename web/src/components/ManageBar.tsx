@@ -1,16 +1,17 @@
 import { useState } from "react";
 import { fetchJSON } from "../api";
-import { useStore, pipStatus } from "../store";
+import { useStore } from "../store";
 
 /**
  * START / STOP / RESTART + LOGS drawer for a manageable module. Rendered above
  * the iframe frame area (never inside the iframe map) so toggling it can't
  * remount the tmux terminal. After any action we refetch /api/health so the pip
  * updates immediately instead of waiting for the next 5 s tick.
+ *
+ * M6: the HEALTH label/text row is gone — service health lives in the rail
+ * pips, so stating it twice was noise. Buttons + LOGS stay.
  */
 export default function ManageBar({ moduleId }: { moduleId: string }) {
-  const health = useStore((s) => s.healthMap[moduleId]);
-  const deadline = useStore((s) => s.starting[moduleId]);
   const timeoutS = useStore(
     (s) => s.config?.modules.find((m) => m.id === moduleId)?.start_timeout_s ?? 150,
   );
@@ -70,21 +71,9 @@ export default function ManageBar({ moduleId }: { moduleId: string }) {
     setLogsOpen(true);
   };
 
-  const status = pipStatus(health, deadline, Date.now());
-  const healthText =
-    status === "ok"
-      ? "OK"
-      : status === "starting"
-        ? "STARTING…"
-        : status === "down"
-          ? "DOWN"
-          : "UNKNOWN";
-
   return (
     <div className="hud hud--bracket m-2 mb-0 flex flex-col gap-2 p-2">
       <div className="flex items-center gap-2">
-        <span className="label">HEALTH</span>
-        <span className="mono">{healthText}</span>
         <span className="flex-1" />
         <button className="btn btn--signal" disabled={busy} onClick={() => act("start")}>
           START

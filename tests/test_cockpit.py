@@ -1,0 +1,278 @@
+"""M6 cockpit — terminal insert, catalog grouping, session block math.
+
+Stdlib + fastapi TestClient only; no new deps. tmux and the filesystem are
+mocked (monkeypatch the runner / point module path constants at tmp_path) —
+no real tmux, no real ~/.claude.
+"""
+
+import json
+from datetime import datetime, timedelta, timezone
+
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+from app import catalog, session_stats, terminal_input
+from app.config import (
+    CatalogGroup,
+    CatalogSpec,
+    MachineConfig,
+    Module,
+    Provider,
+)
+
+
+# ---------------------------------------------------------------- helpers
+
+
+def _mk_session():
+    """Build a MachineConfig whose catalog drives grouping + template."""
+    return MachineConfig(
+        machine="x",
+        hostnames=["x"],
+        modules=[Module(id="tmux", title="T", kind="iframe", options={"tmux_session": "main"})],
+        providers=[Provider(name="anthropic", model_match="^claude-", window_hours=5, context_limit=200_000)],
+        catalog=CatalogSpec(
+            mcp_insert_template="use the {name} MCP to ",
+            groups=[
+                CatalogGroup(name="F5", match="^f5-"),
+                CatalogGroup(name="MEDIA", match="comfyui|ffmpeg|davinci|youtube|story|channel|case|resolve"),
+                CatalogGroup(name="RESEARCH", match="reach|search|reader|zread|newstank|notebooklm|radar"),
+                CatalogGroup(name="AGENTS", match="agent|subagent|delegate|llm"),
+                CatalogGroup(name="WORKSPACE", match="google|obsidian|workspace"),
+            ],
+        ),
+    )
+
+
+# ---------------------------------------------------------------- block math
+
+
+def _dt(h, m=0):
+    return datetime(2026, 7, 18, h, m, tzinfo=timezone.utc)
+
+
+def test_block_floor_to_hour_single_event():
+    start, reset = session_stats._current_block([_dt(10, 35)], 5)
+    assert start == _dt(10)
+    assert reset == _dt(15)
+
+
+def test_block_no_gap_stays_in_one_block():
+    ev = [_dt(10, 35), _dt(11, 20), _dt(12, 0)]
+    start, reset = session_stats._current_block(ev, 5)
+    assert start == _dt(10)
+    assert reset == _dt(15)  # 10:00 + 5h
+
+
+def test_block_gap_starts_new_block():
+    # 5.5h gap → second event opens a new block, floored to its hour
+    ev = [_dt(10, 30), _dt(16, 0)]
+    start, reset = session_stats._current_block(ev, 5)
+    assert start == _dt(16)
+    assert reset == _dt(21)
+
+
+def test_block_dense_span_past_reset_starts_new_block():
+    # no single gap ≥5h, but the run crosses reset_at (10:00+5h=15:00)
+    ev = [_dt(10, 30), _dt(14, 55), _dt(15, 5)]
+    start, reset = session_stats._current_block(ev, 5)
+    assert start == _dt(15)
+    assert reset == _dt(20)
+
+
+def test_block_empty_returns_none():
+    assert session_stats._current_block([], 5) == (None, None)
+
+
+# ---------------------------------------------------------------- provider match
+
+
+def _providers():
+    return [
+        Provider(name="anthropic", model_match="^claude-", window_hours=5, context_limit=200_000),
+        Provider(name="zai", model_match="^glm-", window_hours=5, context_limit=200_000),
+    ]
+
+
+def test_provider_match_anthropic():
+    name, rx, win, lim = session_stats._match_provider("claude-fable-5", _providers())
+    assert name == "anthropic"
+    assert rx is not None and rx.search("claude-x")
+    assert (win, lim) == (5, 200_000)
+
+
+def test_provider_match_zai():
+    name, rx, _w, _l = session_stats._match_provider("glm-5", _providers())
+    assert name == "zai"
+    assert rx is not None and rx.search("glm-5") and not rx.search("claude-5")
+
+
+def test_provider_unknown_model_fallback():
+    name, rx, win, lim = session_stats._match_provider("gpt-4o", _providers())
+    assert name == "?"
+    assert rx is None  # no sibling files contribute to block math
+    assert (win, lim) == (5, 200_000)  # defaults retained
+
+
+def test_provider_none_model_fallback():
+    name, rx, _w, _l = session_stats._match_provider(None, _providers())
+    assert name == "?" and rx is None
+
+
+# ---------------------------------------------------------------- session end-to-end
+
+
+def test_session_state_parses_newest_transcript(monkeypatch, tmp_path):
+    root = tmp_path / "projects" / "slug"
+    root.mkdir(parents=True)
+    now = datetime.now(timezone.utc)
+
+    def _iso(dt):
+        return dt.isoformat()
+
+    lines = [
+        # user/tool lines contribute timestamps (block activity)
+        {"type": "user", "timestamp": _iso(now - timedelta(minutes=40))},
+        {"type": "assistant", "timestamp": _iso(now - timedelta(minutes=35)),
+         "message": {"model": "claude-fable-5",
+                     "usage": {"input_tokens": 2, "cache_read_input_tokens": 104314,
+                               "cache_creation_input_tokens": 433, "output_tokens": 280}}},
+        {"type": "user", "timestamp": _iso(now - timedelta(minutes=5))},
+    ]
+    (root / "abc.jsonl").write_text("\n".join(json.dumps(o) for o in lines))
+
+    monkeypatch.setattr(session_stats, "SESSIONS_ROOT", tmp_path / "projects")
+    monkeypatch.setattr(session_stats, "CONFIG", _mk_session())
+
+    st = session_stats._session_state()
+    assert st["provider"] == "anthropic"
+    assert st["model"] == "claude-fable-5"
+    assert st["context_tokens"] == 2 + 104314 + 433
+    assert st["context_limit"] == 200_000
+    assert st["context_pct"] == round((104749 / 200_000) * 100)  # 52
+    assert st["idle"] is False  # fresh mtime
+    # block start floored to the hour of the first (40m-ago) event
+    assert st["reset_at"] is not None
+
+
+def test_session_state_no_files_idle(monkeypatch, tmp_path):
+    monkeypatch.setattr(session_stats, "SESSIONS_ROOT", tmp_path)  # empty
+    st = session_stats._session_state()
+    assert st["idle"] is True
+    assert st["provider"] == "?"
+    assert st["context_tokens"] == 0
+
+
+# ---------------------------------------------------------------- terminal insert
+
+
+def _client(monkeypatch):
+    app = FastAPI()
+    app.include_router(terminal_input.router)
+    monkeypatch.setattr(
+        terminal_input, "CONFIG",
+        MachineConfig(machine="x", hostnames=["x"],
+                      modules=[Module(id="tmux", title="T", kind="iframe",
+                                      options={"tmux_session": "main"})]),
+    )
+    return TestClient(app)
+
+
+def test_insert_rejects_newline(monkeypatch):
+    c = _client(monkeypatch)
+    assert c.post("/api/terminal/insert", json={"text": "ls\nwhoami"}).status_code == 400
+    assert c.post("/api/terminal/insert", json={"text": "a\rb"}).status_code == 400
+
+
+def test_insert_rejects_oversize(monkeypatch):
+    c = _client(monkeypatch)
+    assert c.post("/api/terminal/insert", json={"text": "x" * 501}).status_code == 400
+
+
+def test_insert_happy_path_argv(monkeypatch):
+    calls = []
+
+    def fake_run(argv):
+        calls.append(argv)
+        return (0, "", "")
+
+    monkeypatch.setattr(terminal_input, "_run", fake_run)
+    c = _client(monkeypatch)
+
+    r = c.post("/api/terminal/insert", json={"text": "ls -la"})
+    assert r.status_code == 200
+    assert r.json() == {"status": "ok"}
+    assert calls == [["tmux", "send-keys", "-t", "main", "-l", "--", "ls -la"]]
+
+
+def test_insert_leading_dash_guarded_by_double_dash(monkeypatch):
+    calls = []
+    monkeypatch.setattr(terminal_input, "_run", lambda argv: (calls.append(argv) or (0, "", "")))
+    c = _client(monkeypatch)
+    assert c.post("/api/terminal/insert", json={"text": "/f5-vibe-check "}).status_code == 200
+    # `--` sits before the text so a leading `/` is treated literally, not a flag
+    assert calls[-1] == ["tmux", "send-keys", "-t", "main", "-l", "--", "/f5-vibe-check "]
+
+
+def test_insert_surfaces_tmux_stderr(monkeypatch):
+    monkeypatch.setattr(terminal_input, "_run", lambda argv: (1, "", "no server\n"))
+    c = _client(monkeypatch)
+    r = c.post("/api/terminal/insert", json={"text": "ls"})
+    assert r.status_code == 200
+    assert r.json() == {"status": "error", "detail": "no server"}
+
+
+# ---------------------------------------------------------------- catalog grouping
+
+
+def _catalog_env(monkeypatch, tmp_path):
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    for n in ("f5-comfyui-media", "agent-reach", "notebooklm", "rate-ck"):
+        (skills / n).mkdir()
+    monkeypatch.setattr(catalog, "SKILLS_DIR", skills)
+
+    # Project dir with its own .mcp.json (the Cephalon-vault `obsidian` case).
+    proj = tmp_path / "vault"
+    proj.mkdir()
+    (proj / ".mcp.json").write_text(json.dumps({"mcpServers": {"obsidian": {}}}))
+
+    cj = tmp_path / ".claude.json"
+    cj.write_text(json.dumps({
+        "mcpServers": {"zai-mcp-server": {}, "web-search-prime": {}},
+        "projects": {
+            str(proj): {"mcpServers": {"davinci-resolve": {}, "zai-mcp-server": {}}},
+        },
+    }))
+    monkeypatch.setattr(catalog, "CLAUDE_JSON", cj)
+    monkeypatch.setattr(catalog, "CONFIG", _mk_session())
+
+
+def test_catalog_skill_grouping_first_match_wins(monkeypatch, tmp_path):
+    _catalog_env(monkeypatch, tmp_path)
+    data = catalog._build()
+    by_name = {s["name"]: s for s in data["skills"]}
+    # f5-comfyui-media matches both ^f5- (F5) and MEDIA(comfyui) → F5 wins
+    assert by_name["f5-comfyui-media"]["group"] == "F5"
+    assert by_name["f5-comfyui-media"]["insert"] == "/f5-comfyui-media "
+    # agent-reach matches RESEARCH(reach) before AGENTS(agent) → RESEARCH wins
+    assert by_name["agent-reach"]["group"] == "RESEARCH"
+    assert by_name["notebooklm"]["group"] == "RESEARCH"
+    assert by_name["rate-ck"]["group"] == "OTHER"  # no rule matches
+
+
+def test_catalog_mcp_dedup_template_grouping(monkeypatch, tmp_path):
+    _catalog_env(monkeypatch, tmp_path)
+    data = catalog._build()
+    mcps = data["mcps"]
+    names = [m["name"] for m in mcps]
+    # global keys first, then project-scope (~/.claude.json), then the
+    # project's own .mcp.json; zai-mcp-server appears once (deduped)
+    assert names == ["zai-mcp-server", "web-search-prime", "davinci-resolve", "obsidian"]
+    by_name = {m["name"]: m for m in mcps}
+    # template substitution
+    assert by_name["zai-mcp-server"]["insert"] == "use the zai-mcp-server MCP to "
+    # grouping
+    assert by_name["web-search-prime"]["group"] == "RESEARCH"  # 'search'
+    assert by_name["davinci-resolve"]["group"] == "MEDIA"  # 'davinci'/'resolve'
+    assert by_name["zai-mcp-server"]["group"] == "OTHER"  # no rule matches
