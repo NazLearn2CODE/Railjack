@@ -15,7 +15,7 @@ from pathlib import Path
 import yaml
 from pydantic import BaseModel
 
-CONFIG_DIR = Path(__file__).resolve().parent.parent / "config"
+CONFIG_DIR = Path(__file__).resolve().parent.parent / "configs"
 
 
 class HealthSpec(BaseModel):
@@ -97,7 +97,7 @@ def select_config() -> MachineConfig:
     candidates = _available()
     names = ", ".join(p.stem for p in candidates) or "(none)"
     if not candidates:
-        raise RuntimeError(f"No machine configs in {CONFIG_DIR}; add config/<machine>.yaml.")
+        raise RuntimeError(f"No machine configs in {CONFIG_DIR}; add configs/<machine>.yaml.")
 
     override = os.environ.get("RAILJACK_CONFIG")
     if override:

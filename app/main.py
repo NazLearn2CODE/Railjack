@@ -1,7 +1,7 @@
 """Railjack hub — FastAPI app.
 
 ``GET /api/config`` (machine name + sanitized module list), ``/api/health`` and
-``/api/modules/...`` (manage), then a static mount of ``web/dist`` last so /api
+``/api/modules/...`` (manage), then a static mount of ``frontend/dist`` last so /api
 wins.
 """
 
@@ -29,7 +29,7 @@ app.include_router(catalog_router)
 app.include_router(session_router)
 app.include_router(terminal_router)
 
-DASHBOARD_DIST = Path(__file__).resolve().parent.parent / "web" / "dist"
+DASHBOARD_DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
 
 
 def _sanitize(m: Module) -> dict:
@@ -70,5 +70,5 @@ else:
         return (
             "<h1>Railjack</h1>"
             "<p>Hub up. Dashboard not built — run <code>npm install &amp;&amp; npm run build</code> "
-            "in <code>web/</code>.</p>"
+            "in <code>frontend/</code>.</p>"
         )
