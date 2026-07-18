@@ -21,6 +21,7 @@ interface CatalogEntry {
 }
 interface Catalog {
   skills: CatalogEntry[];
+  marketplace_skills: CatalogEntry[];
   mcps: CatalogEntry[];
 }
 interface Session {
@@ -74,6 +75,7 @@ export default function TopBar() {
   const buttons = useStore((s) => s.config?.buttons) ?? [];
   const [now, setNow] = useState(() => new Date());
   const [skillSel, setSkillSel] = useState("");
+  const [mktSel, setMktSel] = useState("");
   const [mcpSel, setMcpSel] = useState("");
 
   useEffect(() => {
@@ -101,6 +103,7 @@ export default function TopBar() {
   const clock = now.toLocaleTimeString("en-GB"); // HH:MM:SS 24h
 
   const skills = grouped(catalog?.skills ?? []);
+  const mktSkills = grouped(catalog?.marketplace_skills ?? []);
   const mcps = grouped(catalog?.mcps ?? []);
 
   // Telemetry thresholds.
@@ -157,6 +160,28 @@ export default function TopBar() {
             <OptGroup key={g.name} {...g} />
           ))}
         </select>
+
+        {mktSkills.length > 0 && (
+          <select
+            className="mono label"
+            style={SELECT_STYLE}
+            value={mktSel}
+            onChange={(e) => {
+              const v = e.target.value;
+              if (v) {
+                void insert(v);
+                setMktSel("");
+              }
+            }}
+          >
+            <option value="" disabled>
+              MARKETPLACE
+            </option>
+            {mktSkills.map((g) => (
+              <OptGroup key={g.name} {...g} />
+            ))}
+          </select>
+        )}
 
         <select
           className="mono label"

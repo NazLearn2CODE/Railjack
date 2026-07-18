@@ -8,16 +8,17 @@ patching the module global is enough.
 
 import pytest
 
-from app import session_stats
+from app import catalog, session_stats
 
 
 @pytest.fixture(autouse=True)
 def _reset_session_caches():
-    """Session telemetry keeps process-global caches (30 s result cache +
-    last-good usage retention). Clear both between tests so ordering can't leak
-    a cached reading into a test that expects a fresh fetch/fallback."""
+    """Session telemetry + catalog keep process-global caches. Clear them between
+    tests so ordering can't leak a cached reading into a test that expects a
+    fresh fetch/fallback."""
     session_stats._cache = None
     session_stats._last_usage.clear()
+    catalog._cache = None
     yield
 
 

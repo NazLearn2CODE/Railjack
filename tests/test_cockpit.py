@@ -382,6 +382,21 @@ def _catalog_env(monkeypatch, tmp_path):
         (skills / n).mkdir()
     monkeypatch.setattr(catalog, "SKILLS_DIR", skills)
 
+    # Installed plugin shipping skills → the marketplace-skills menu. Only dirs
+    # with a SKILL.md count; "notaskill" is ignored.
+    plug = tmp_path / "plug" / "marketing-skills" / "2.5.1"
+    for n in ("marketing-plan", "ads"):
+        (plug / "skills" / n).mkdir(parents=True)
+        (plug / "skills" / n / "SKILL.md").write_text("x")
+    (plug / "skills" / "notaskill").mkdir(parents=True)
+    ip = tmp_path / "installed_plugins.json"
+    ip.write_text(json.dumps({
+        "plugins": {
+            "marketing-skills@marketingskills": [{"scope": "user", "installPath": str(plug)}],
+        },
+    }))
+    monkeypatch.setattr(catalog, "INSTALLED_PLUGINS_JSON", ip)
+
     # Project dir with its own .mcp.json (the Cephalon-vault `obsidian` case).
     proj = tmp_path / "vault"
     proj.mkdir()
@@ -409,6 +424,23 @@ def test_catalog_skill_grouping_first_match_wins(monkeypatch, tmp_path):
     assert by_name["agent-reach"]["group"] == "RESEARCH"
     assert by_name["notebooklm"]["group"] == "RESEARCH"
     assert by_name["rate-ck"]["group"] == "OTHER"  # no rule matches
+
+
+def test_catalog_marketplace_skills_grouped_by_plugin(monkeypatch, tmp_path):
+    _catalog_env(monkeypatch, tmp_path)
+    data = catalog._build()
+    ms = data["marketplace_skills"]
+    # sorted within plugin; "notaskill" (no SKILL.md) excluded
+    assert [m["name"] for m in ms] == ["ads", "marketing-plan"]
+    # grouped by uppercased plugin name, /name slash invocation
+    assert all(m["group"] == "MARKETING-SKILLS" for m in ms)
+    assert {m["insert"] for m in ms} == {"/ads ", "/marketing-plan "}
+
+
+def test_catalog_marketplace_skills_missing_file_empty(monkeypatch, tmp_path):
+    _catalog_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(catalog, "INSTALLED_PLUGINS_JSON", tmp_path / "nope.json")
+    assert catalog._build()["marketplace_skills"] == []
 
 
 def test_catalog_mcp_dedup_template_grouping(monkeypatch, tmp_path):
