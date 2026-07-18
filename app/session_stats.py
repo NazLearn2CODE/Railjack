@@ -7,23 +7,29 @@ session's ``message.model`` → provider via the ``providers`` config (regex,
 ``window_hours``, ``context_limit``); unknown model → provider ``"?"`` with
 default 5 h / 200 k, ctx % still reported.
 
-5 h block math (ccusage convention): a new block starts at the first event
-after a ≥ window gap from the previous event OR past the previous block's
-``reset_at``; block start is floored to the hour; ``reset_at = block_start +
-window``. We return the block holding the newest event. 30 s in-process cache.
+Session %/reset come from the provider's **official usage API** when its
+``usage_source`` adapter is configured (``source: "api"``): anthropic-oauth →
+the same endpoint Claude Code's /usage uses; zai-quota → rate-ck's endpoint.
+On any API failure we fall back to the 5 h block heuristic below and mark
+``source: "estimate"``.
 
-Only files matching the active provider's model regex contribute block events
-(the active session + its siblings); pruned to mtime within ``window + 1 h``.
+5 h block math (ccusage convention, ESTIMATE ONLY — measured ~80 min drift vs
+the real Anthropic window on 2026-07-18): a new block starts at the first
+event after a ≥ window gap OR past the previous block's ``reset_at``; block
+start is floored to the hour; ``reset_at = block_start + window``. Only files
+matching the active provider's model regex contribute events. 30 s cache.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import re
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import httpx
 from fastapi import APIRouter
 
 from .config import CONFIG
@@ -31,6 +37,11 @@ from .config import CONFIG
 router = APIRouter()
 
 SESSIONS_ROOT = Path.home() / ".claude" / "projects"
+# OAuth token maintained (and refreshed) by Claude Code itself — we only read it.
+CREDS_FILE = Path.home() / ".claude" / ".credentials.json"
+ANTHROPIC_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
+ZAI_QUOTA_URL = "https://api.z.ai/api/monitor/usage/quota/limit"
+_USAGE_TIMEOUT = 5.0
 
 _CACHE_TTL = 30
 _DEFAULT_WINDOW = 5
@@ -46,14 +57,84 @@ def _parse_ts(ts: str) -> datetime | None:
         return None
 
 
-def _match_provider(model: str | None, providers) -> tuple[str, re.Pattern | None, float, int]:
-    """Return (name, compiled regex | None, window_hours, context_limit)."""
+def _match_provider(model: str | None, providers):
+    """Return (matched Provider | None, compiled regex | None)."""
     if model:
         for p in providers:
             rx = re.compile(p.model_match)
             if rx.search(model):
-                return p.name, rx, p.window_hours, p.context_limit
-    return "?", None, _DEFAULT_WINDOW, _DEFAULT_LIMIT
+                return p, rx
+    return None, None
+
+
+# ---------------------------------------------------------------- usage adapters
+#
+# Official per-provider usage APIs — the calibrated source for session %/reset
+# (2026-07-18: the JSONL block heuristic drifted ~80 min vs Claude Code's own
+# /usage; these endpoints match it). Each returns
+# {"session_pct": int, "weekly_pct": int | None, "reset_at": iso-str} or None
+# on any failure (offline, 401, missing key) — caller falls back to heuristic.
+# NEVER log or return tokens/keys.
+
+
+def _usage_anthropic() -> dict | None:
+    """Claude Code's own /usage source: OAuth usage endpoint, token from disk."""
+    try:
+        tok = json.loads(CREDS_FILE.read_text())["claudeAiOauth"]["accessToken"]
+        r = httpx.get(
+            ANTHROPIC_USAGE_URL,
+            headers={"Authorization": f"Bearer {tok}", "anthropic-beta": "oauth-2025-04-20"},
+            timeout=_USAGE_TIMEOUT,
+        )
+        r.raise_for_status()
+        d = r.json()
+        five, seven = d.get("five_hour") or {}, d.get("seven_day") or {}
+        if five.get("utilization") is None or not five.get("resets_at"):
+            return None
+        return {
+            "session_pct": round(five["utilization"]),
+            "weekly_pct": round(seven["utilization"]) if seven.get("utilization") is not None else None,
+            "reset_at": five["resets_at"],
+        }
+    except Exception:
+        return None
+
+
+def _usage_zai(key_env: str | None) -> dict | None:
+    """rate-ck's endpoint: TOKENS_LIMIT is the binding coding-plan quota."""
+    key = os.environ.get(key_env or "ZAI_API_KEY")
+    if not key:
+        return None
+    try:
+        r = httpx.get(
+            ZAI_QUOTA_URL, headers={"Authorization": f"Bearer {key}"}, timeout=_USAGE_TIMEOUT
+        )
+        r.raise_for_status()
+        limits = (r.json().get("data") or {}).get("limits") or []
+        tk = next((x for x in limits if x.get("type") == "TOKENS_LIMIT"), None)
+        if not tk or tk.get("percentage") is None or not tk.get("nextResetTime"):
+            return None
+        reset = datetime.fromtimestamp(tk["nextResetTime"] / 1000, tz=timezone.utc)
+        return {
+            "session_pct": round(tk["percentage"]),
+            "weekly_pct": None,
+            "reset_at": reset.isoformat(),
+        }
+    except Exception:
+        return None
+
+
+_USAGE_ADAPTERS = {
+    "anthropic-oauth": lambda p: _usage_anthropic(),
+    "zai-quota": lambda p: _usage_zai(p.key_env),
+}
+
+
+def _fetch_usage(provider) -> dict | None:
+    if provider is None:
+        return None
+    fn = _USAGE_ADAPTERS.get(provider.usage_source)
+    return fn(provider) if fn else None
 
 
 def _scan(path: Path) -> tuple[list[datetime], str | None, int]:
@@ -135,7 +216,10 @@ def _empty() -> dict:
         "context_tokens": 0,
         "context_limit": _DEFAULT_LIMIT,
         "context_pct": 0,
+        "session_pct": None,
+        "weekly_pct": None,
         "reset_at": None,
+        "source": "none",
         "idle": True,
     }
 
@@ -156,30 +240,42 @@ def _session_state() -> dict:
     idle = (now - newest_mtime) > timedelta(minutes=_IDLE_MIN)
 
     n_times, model, ctx = _scan(newest)
-    name, rx, window_h, limit = _match_provider(model, CONFIG.providers)
+    provider, rx = _match_provider(model, CONFIG.providers)
+    name = provider.name if provider else "?"
+    window_h = provider.window_hours if provider else _DEFAULT_WINDOW
+    limit = provider.context_limit if provider else _DEFAULT_LIMIT
 
-    # Block math: active session's events + sibling files whose model matches
-    # the provider regex, pruned to mtime within window+1 h.
-    events = list(n_times)
-    cutoff = now - timedelta(hours=window_h + 1)
-    for f in files:
-        if f == newest:
-            continue
-        try:
-            mt = datetime.fromtimestamp(f.stat().st_mtime, tz=timezone.utc)
-        except OSError:
-            continue
-        if mt < cutoff:
-            continue
-        # ponytail: unknown provider (rx is None) → no sibling matches; the
-        # active session's own events still define the block.
-        if rx is None:
-            continue
-        ftimes, fmodel, _ = _scan(f)
-        if fmodel and rx.search(fmodel):
-            events.extend(ftimes)
+    # Preferred: the provider's official usage API (calibrated vs /usage).
+    usage = _fetch_usage(provider)
+    if usage is not None:
+        session_pct, weekly_pct = usage["session_pct"], usage["weekly_pct"]
+        reset_iso, source = usage["reset_at"], "api"
+    else:
+        # Fallback: JSONL block heuristic — an ESTIMATE (drifts vs the real
+        # billing window anchor); events = active session + provider siblings.
+        events = list(n_times)
+        cutoff = now - timedelta(hours=window_h + 1)
+        for f in files:
+            if f == newest:
+                continue
+            try:
+                mt = datetime.fromtimestamp(f.stat().st_mtime, tz=timezone.utc)
+            except OSError:
+                continue
+            if mt < cutoff:
+                continue
+            # ponytail: unknown provider (rx is None) → no sibling matches; the
+            # active session's own events still define the block.
+            if rx is None:
+                continue
+            ftimes, fmodel, _ = _scan(f)
+            if fmodel and rx.search(fmodel):
+                events.extend(ftimes)
+        _, reset_at = _current_block(events, window_h)
+        session_pct, weekly_pct = None, None
+        reset_iso = reset_at.isoformat() if reset_at else None
+        source = "estimate"
 
-    block_start, reset_at = _current_block(events, window_h)
     pct = round(ctx / limit * 100) if limit else 0
     return {
         "provider": name,
@@ -187,7 +283,10 @@ def _session_state() -> dict:
         "context_tokens": ctx,
         "context_limit": limit,
         "context_pct": pct,
-        "reset_at": reset_at.isoformat() if reset_at else None,
+        "session_pct": session_pct,
+        "weekly_pct": weekly_pct,
+        "reset_at": reset_iso,
+        "source": source,
         "idle": idle,
     }
 

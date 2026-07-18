@@ -36,10 +36,13 @@ providers:
     model_match: "^claude-"
     window_hours: 5
     context_limit: 200000
+    usage_source: anthropic-oauth   # reads ~/.claude/.credentials.json (Claude Code keeps it fresh)
   - name: zai
     model_match: "^glm-"
     window_hours: 5
     context_limit: 200000
+    usage_source: zai-quota         # rate-ck endpoint; needs the key below in the server env
+    key_env: ZAI_API_KEY
 
 buttons:
   - label: BOOTSTRAP

@@ -22,6 +22,10 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=%h/Coding Projects/Railjack
+# z.ai session telemetry needs the key (units don't source ~/.bashrc).
+# Put ZAI_API_KEY=... in ~/.config/railjack/env (chmod 600). Optional:
+# telemetry falls back to an estimate without it.
+EnvironmentFile=-%h/.config/railjack/env
 ExecStart="%h/Coding Projects/Railjack/.venv/bin/uvicorn" app.main:app --port 8700
 Restart=on-failure
 RestartSec=3

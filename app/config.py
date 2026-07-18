@@ -52,6 +52,12 @@ class Provider(BaseModel):
     model_match: str  # regex tested against a session's model string
     window_hours: float = 5
     context_limit: int = 200_000
+    # M6.1: official usage API instead of the JSONL block heuristic.
+    # "anthropic-oauth" reads the OAuth token Claude Code maintains in
+    # ~/.claude/.credentials.json; "zai-quota" hits the rate-ck endpoint with
+    # the key from `key_env`. "none" (default) → heuristic only.
+    usage_source: str = "none"
+    key_env: str | None = None
 
 
 class Button(BaseModel):

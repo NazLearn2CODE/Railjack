@@ -29,7 +29,10 @@ interface Session {
   context_tokens: number;
   context_limit: number;
   context_pct: number;
+  session_pct: number | null;
+  weekly_pct: number | null;
   reset_at: string | null;
+  source: "api" | "estimate" | "none";
   idle: boolean;
 }
 
@@ -110,11 +113,22 @@ export default function TopBar() {
       : pct >= 70
         ? "var(--color-hazard)"
         : "var(--color-go)";
+  // Session/weekly quota % (from the provider's official API; null on estimate).
+  const sesPct = session?.session_pct ?? null;
+  const wkPct = session?.weekly_pct ?? null;
+  const sesStyle = (p: number): CSSProperties | undefined =>
+    p >= 90
+      ? { color: "var(--color-critical)" }
+      : p >= 70
+        ? { color: "var(--color-hazard)" }
+        : undefined;
   const resetMs = session?.reset_at ? Date.parse(session.reset_at) : 0;
   const remaining = resetMs ? Math.max(0, resetMs - now.getTime()) : 0;
   const totalMin = Math.floor(remaining / 60_000);
+  // "~" prefix marks the JSONL fallback estimate; API-sourced shows bare h:mm.
+  const estMark = session?.source === "estimate" ? "~" : "";
   const resetLabel = resetMs
-    ? `${Math.floor(totalMin / 60)}:${String(totalMin % 60).padStart(2, "0")}`
+    ? `${estMark}${Math.floor(totalMin / 60)}:${String(totalMin % 60).padStart(2, "0")}`
     : "—";
 
   return (
@@ -197,6 +211,22 @@ export default function TopBar() {
                 }}
               />
             </span>
+            {sesPct !== null && (
+              <>
+                <span className="label">SES</span>
+                <span className="mono" style={sesStyle(sesPct)}>
+                  {sesPct}%
+                </span>
+              </>
+            )}
+            {wkPct !== null && (
+              <>
+                <span className="label">WK</span>
+                <span className="mono" style={sesStyle(wkPct)}>
+                  {wkPct}%
+                </span>
+              </>
+            )}
             <span className="label">RESET</span>
             <span className="mono">{resetLabel}</span>
           </span>

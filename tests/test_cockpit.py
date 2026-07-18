@@ -95,28 +95,27 @@ def _providers():
 
 
 def test_provider_match_anthropic():
-    name, rx, win, lim = session_stats._match_provider("claude-fable-5", _providers())
-    assert name == "anthropic"
+    p, rx = session_stats._match_provider("claude-fable-5", _providers())
+    assert p is not None and p.name == "anthropic"
     assert rx is not None and rx.search("claude-x")
-    assert (win, lim) == (5, 200_000)
+    assert (p.window_hours, p.context_limit) == (5, 200_000)
 
 
 def test_provider_match_zai():
-    name, rx, _w, _l = session_stats._match_provider("glm-5", _providers())
-    assert name == "zai"
+    p, rx = session_stats._match_provider("glm-5", _providers())
+    assert p is not None and p.name == "zai"
     assert rx is not None and rx.search("glm-5") and not rx.search("claude-5")
 
 
 def test_provider_unknown_model_fallback():
-    name, rx, win, lim = session_stats._match_provider("gpt-4o", _providers())
-    assert name == "?"
+    p, rx = session_stats._match_provider("gpt-4o", _providers())
+    assert p is None  # caller substitutes defaults
     assert rx is None  # no sibling files contribute to block math
-    assert (win, lim) == (5, 200_000)  # defaults retained
 
 
 def test_provider_none_model_fallback():
-    name, rx, _w, _l = session_stats._match_provider(None, _providers())
-    assert name == "?" and rx is None
+    p, rx = session_stats._match_provider(None, _providers())
+    assert p is None and rx is None
 
 
 # ---------------------------------------------------------------- session end-to-end
@@ -153,6 +152,9 @@ def test_session_state_parses_newest_transcript(monkeypatch, tmp_path):
     assert st["idle"] is False  # fresh mtime
     # block start floored to the hour of the first (40m-ago) event
     assert st["reset_at"] is not None
+    # no usage_source configured → heuristic fallback is marked as such
+    assert st["source"] == "estimate"
+    assert st["session_pct"] is None
 
 
 def test_session_state_no_files_idle(monkeypatch, tmp_path):
@@ -161,6 +163,119 @@ def test_session_state_no_files_idle(monkeypatch, tmp_path):
     assert st["idle"] is True
     assert st["provider"] == "?"
     assert st["context_tokens"] == 0
+
+
+# ---------------------------------------------------------------- usage adapters (M6.1)
+
+
+class _FakeResp:
+    def __init__(self, payload):
+        self._payload = payload
+
+    def raise_for_status(self):
+        pass
+
+    def json(self):
+        return self._payload
+
+
+def test_usage_anthropic_parses(monkeypatch, tmp_path):
+    creds = tmp_path / ".credentials.json"
+    creds.write_text(json.dumps({"claudeAiOauth": {"accessToken": "tok-not-logged"}}))
+    monkeypatch.setattr(session_stats, "CREDS_FILE", creds)
+    payload = {
+        "five_hour": {"utilization": 20.0, "resets_at": "2026-07-18T05:19:59+00:00"},
+        "seven_day": {"utilization": 42.0, "resets_at": "2026-07-19T22:59:59+00:00"},
+    }
+    monkeypatch.setattr(session_stats.httpx, "get", lambda *a, **k: _FakeResp(payload))
+    u = session_stats._usage_anthropic()
+    assert u == {
+        "session_pct": 20,
+        "weekly_pct": 42,
+        "reset_at": "2026-07-18T05:19:59+00:00",
+    }
+
+
+def test_usage_anthropic_missing_creds_returns_none(monkeypatch, tmp_path):
+    monkeypatch.setattr(session_stats, "CREDS_FILE", tmp_path / "nope.json")
+    assert session_stats._usage_anthropic() is None
+
+
+def test_usage_zai_parses(monkeypatch):
+    monkeypatch.setenv("ZAI_API_KEY", "key-not-logged")
+    # rate-ck shape: TOKENS_LIMIT is the binding quota; TIME_LIMIT is ignored.
+    payload = {
+        "data": {
+            "limits": [
+                {"type": "TIME_LIMIT", "percentage": 68, "nextResetTime": 1785558806983},
+                {"type": "TOKENS_LIMIT", "percentage": 50, "nextResetTime": 1784336157957},
+            ]
+        }
+    }
+    monkeypatch.setattr(session_stats.httpx, "get", lambda *a, **k: _FakeResp(payload))
+    u = session_stats._usage_zai("ZAI_API_KEY")
+    assert u["session_pct"] == 50
+    assert u["weekly_pct"] is None
+    # 1784336157957 ms → aware UTC iso
+    assert u["reset_at"].startswith("2026-07-18T")
+
+
+def test_usage_zai_no_key_returns_none(monkeypatch):
+    monkeypatch.delenv("ZAI_API_KEY", raising=False)
+    assert session_stats._usage_zai("ZAI_API_KEY") is None
+
+
+def test_session_state_prefers_api_over_heuristic(monkeypatch, tmp_path):
+    root = tmp_path / "projects" / "slug"
+    root.mkdir(parents=True)
+    now = datetime.now(timezone.utc)
+    line = {
+        "type": "assistant",
+        "timestamp": now.isoformat(),
+        "message": {"model": "claude-fable-5", "usage": {"input_tokens": 100}},
+    }
+    (root / "abc.jsonl").write_text(json.dumps(line))
+    monkeypatch.setattr(session_stats, "SESSIONS_ROOT", tmp_path / "projects")
+
+    cfg = _mk_session()
+    cfg.providers[0].usage_source = "anthropic-oauth"
+    monkeypatch.setattr(session_stats, "CONFIG", cfg)
+    monkeypatch.setattr(
+        session_stats,
+        "_usage_anthropic",
+        lambda: {"session_pct": 11, "weekly_pct": 42, "reset_at": "2026-07-18T05:21:00+00:00"},
+    )
+
+    st = session_stats._session_state()
+    assert st["source"] == "api"
+    assert st["session_pct"] == 11
+    assert st["weekly_pct"] == 42
+    assert st["reset_at"] == "2026-07-18T05:21:00+00:00"
+    # context % still comes from the JSONL regardless of usage source
+    assert st["context_tokens"] == 100
+
+
+def test_session_state_api_failure_falls_back(monkeypatch, tmp_path):
+    root = tmp_path / "projects" / "slug"
+    root.mkdir(parents=True)
+    now = datetime.now(timezone.utc)
+    line = {
+        "type": "assistant",
+        "timestamp": now.isoformat(),
+        "message": {"model": "claude-fable-5", "usage": {"input_tokens": 100}},
+    }
+    (root / "abc.jsonl").write_text(json.dumps(line))
+    monkeypatch.setattr(session_stats, "SESSIONS_ROOT", tmp_path / "projects")
+
+    cfg = _mk_session()
+    cfg.providers[0].usage_source = "anthropic-oauth"
+    monkeypatch.setattr(session_stats, "CONFIG", cfg)
+    monkeypatch.setattr(session_stats, "_usage_anthropic", lambda: None)  # API down
+
+    st = session_stats._session_state()
+    assert st["source"] == "estimate"
+    assert st["session_pct"] is None
+    assert st["reset_at"] is not None  # heuristic still supplies a reset
 
 
 # ---------------------------------------------------------------- terminal insert
