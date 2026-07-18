@@ -31,6 +31,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 from .config import CONFIG
+from .zai import zai_message
 
 router = APIRouter()
 
@@ -39,7 +40,6 @@ router = APIRouter()
 FETCH_MODEL = "/home/NAZ/.claude/skills/f5-comfyui-media/scripts/fetch_model.py"
 # catalog/ subdir keeps this out of config.py's configs/*.yaml machine-config glob
 CATALOG_YAML = Path(__file__).resolve().parent.parent / "configs" / "catalog" / "comfyui.yaml"
-ZAI_URL = "https://api.z.ai/api/anthropic/v1/messages"
 
 _MODEL_EXTS = {".safetensors", ".ckpt", ".pt", ".pth", ".gguf", ".bin"}
 _OUT_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".mp4"}
@@ -467,23 +467,11 @@ async def generate(body: GenerateBody) -> dict:
 
 @router.post("/api/comfyui/expand")
 async def expand(body: ExpandBody) -> dict:
-    key = os.environ.get("ZAI_API_KEY")
-    if not key:
-        raise HTTPException(503, "ZAI_API_KEY unset")
     style = body.style or "cinematic photographic"
     msg = (f"Expand this idea into a rich Stable-Diffusion image prompt: {body.idea!r}. "
            f"Style: {style}. Cover subject, mood, lighting, composition, and style tags. "
            "One paragraph, no preamble.")
-    async with httpx.AsyncClient(timeout=30) as c:
-        r = await c.post(ZAI_URL, headers={
-            "x-api-key": key, "anthropic-version": "2023-06-01",
-            "content-type": "application/json",
-        }, json={"model": "glm-5", "max_tokens": 400,
-                 "messages": [{"role": "user", "content": msg}]})
-        r.raise_for_status()
-        data = r.json()
-    text = "".join(b.get("text", "") for b in data.get("content", []))
-    return {"prompt": text.strip()}
+    return {"prompt": await zai_message(msg)}
 
 
 @router.get("/api/comfyui/outputs")

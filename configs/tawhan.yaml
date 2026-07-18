@@ -37,6 +37,13 @@ modules:
       lut_dir: "~/Videos/LUTs"
       browse_root: "~"
       output_dir: "~/Downloads/VDO Outputs"
+  - id: notebooklm
+    title: RESEARCH
+    kind: panel
+    panel: notebooklm
+    options:
+      output_dir: "~/Downloads/NotebookLM Outputs"
+      browse_root: "~"
 
 # M6 cockpit — session telemetry, terminal buttons, catalog grouping.
 

@@ -19,6 +19,7 @@ from .config import CONFIG, Module
 from .ffmpeg_jobs import router as ffmpeg_router
 from .health import router as health_router
 from .manage import router as manage_router
+from .notebooklm import router as notebooklm_router
 from .session_stats import router as session_router
 from .terminal_input import router as terminal_router
 
@@ -27,6 +28,7 @@ app.include_router(health_router)
 app.include_router(manage_router)
 app.include_router(ffmpeg_router)
 app.include_router(comfyui_router)
+app.include_router(notebooklm_router)
 app.include_router(catalog_router)
 app.include_router(session_router)
 app.include_router(terminal_router)

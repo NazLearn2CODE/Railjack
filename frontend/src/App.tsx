@@ -7,9 +7,14 @@ import ModuleRail from "./components/ModuleRail";
 import FramePanel from "./components/FramePanel";
 import FfmpegPanel from "./components/FfmpegPanel";
 import ComfyPanel from "./components/ComfyPanel";
+import NotebookPanel from "./components/NotebookPanel";
 
 // kind:"panel" modules render their panel component from this map.
-const PANELS: Record<string, FC<{ module: ModuleConfig }>> = { ffmpeg: FfmpegPanel, comfyui: ComfyPanel };
+const PANELS: Record<string, FC<{ module: ModuleConfig }>> = {
+  ffmpeg: FfmpegPanel,
+  comfyui: ComfyPanel,
+  notebooklm: NotebookPanel,
+};
 
 export default function App() {
   const setConfig = useStore((s) => s.setConfig);
