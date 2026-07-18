@@ -52,10 +52,13 @@ export default function App() {
     return () => clearInterval(t);
   }, [starting]);
 
-  // Auto-select the first module once config lands.
+  // Auto-select once config lands: a matching URL hash (#<module-id>) wins,
+  // else the first module. Lets you deep-link/refresh straight into a panel.
   useEffect(() => {
     if (config && config.modules.length && !useStore.getState().activeModuleId) {
-      useStore.getState().setActive(config.modules[0].id);
+      const hash = decodeURIComponent(location.hash.replace(/^#/, ""));
+      const fromHash = config.modules.find((m) => m.id === hash);
+      useStore.getState().setActive(fromHash ? fromHash.id : config.modules[0].id);
     }
   }, [config]);
 

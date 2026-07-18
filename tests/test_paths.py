@@ -11,8 +11,11 @@ from app import ffmpeg_jobs
 
 
 def test_safe_input_rejects_traversal(ffmpeg_opts):
+    # Enough `..` to climb above the browse root (~) to the real /etc/passwd,
+    # which is outside every input root. (A `../` that lands back inside ~ is
+    # intentionally allowed now — footage can live anywhere under home.)
     with pytest.raises(ValueError):
-        ffmpeg_jobs._safe_input("../../etc/passwd")
+        ffmpeg_jobs._safe_input("../" * 12 + "etc/passwd")
 
 
 def test_safe_input_rejects_absolute(ffmpeg_opts):
@@ -57,6 +60,6 @@ def test_api_escaping_path_returns_400(ffmpeg_opts):
     client = TestClient(app)
     r = client.post(
         "/api/ffmpeg/jobs",
-        json={"op": "transcode_h264", "files": ["../../etc/passwd"]},
+        json={"op": "transcode_h264", "files": ["../" * 12 + "etc/passwd"]},
     )
     assert r.status_code == 400  # _validate raises before ffprobe is ever called

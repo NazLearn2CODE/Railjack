@@ -30,7 +30,7 @@ from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
 from .config import CONFIG
@@ -61,10 +61,34 @@ def _lut_root() -> Path:
     return Path(_OPTS["lut_dir"]).expanduser().resolve()
 
 
-def _output_root() -> Path:
-    o = Path(_OPTS["output_dir"]).expanduser().resolve()
-    o.mkdir(parents=True, exist_ok=True)
-    return o
+def _browse_root() -> Path:
+    """Root the file browser + job inputs/outputs are confined under (default ~)."""
+    return Path(_OPTS.get("browse_root", "~")).expanduser().resolve()
+
+
+def _default_output_dir() -> Path:
+    """Where renders land unless the UI picks another folder.
+
+    YAML ``output_dir`` sets it; absent, ``~/Downloads/VDO Outputs``.
+    """
+    o = _OPTS.get("output_dir")
+    if o:
+        return Path(o).expanduser().resolve()
+    return (Path.home() / "Downloads" / "VDO Outputs").resolve()
+
+
+def _input_roots() -> list[Path]:
+    """Confinement roots for job inputs: configured ``media_dirs`` ∪ browse root.
+
+    ``media_dirs`` keeps existing configs (and the test fixture's tmp root)
+    valid; the browse root lets footage come from anywhere under ~ that the
+    user navigated to via the ADD FOOTAGE browser.
+    """
+    roots = _media_roots()
+    br = _browse_root()
+    if br not in roots:
+        roots.append(br)
+    return roots
 
 
 # ---------------------------------------------------------------- path safety
@@ -84,8 +108,8 @@ def _under(path: Path, roots: list[Path]) -> bool:
 
 def _safe_input(raw: str) -> Path:
     p = Path(raw).expanduser().resolve()
-    if not _under(p, _media_roots()):
-        raise ValueError(f"path not under a configured media dir: {raw}")
+    if not _under(p, _input_roots()):
+        raise ValueError(f"path not under a browsable media dir: {raw}")
     return p
 
 
@@ -341,10 +365,20 @@ async def _execute(job: Job, argv: list[str], total_us: int) -> None:
 # ---------------------------------------------------------------- output naming
 
 
-def _output_path(op: str) -> Path:
+def _output_path(op: str, out_dir: Path) -> Path:
     ext = ".mov" if op == "transcode_dnxhr" else ".mp4"
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")
-    return _output_root() / f"{op}_{ts}{ext}"
+    return out_dir / f"{op}_{ts}{ext}"
+
+
+def _resolve_output_dir(raw: str | None) -> Path:
+    """Resolve + confine the render output dir (default ``_default_output_dir``),
+    creating it on demand. Raises 400 if a client-supplied dir escapes ~."""
+    d = Path(raw).expanduser().resolve() if raw else _default_output_dir()
+    if not _under(d, [_browse_root()]):
+        raise HTTPException(400, "output dir outside the browse root")
+    d.mkdir(parents=True, exist_ok=True)
+    return d
 
 
 # ---------------------------------------------------------------- API models
@@ -355,25 +389,70 @@ class JobBody(BaseModel):
     files: list[str]
     lut: str | None = None
     transition: float | None = None
-
-
-def _ensure_configured() -> None:
-    if not _OPTS.get("media_dirs") or not _OPTS.get("output_dir"):
-        raise HTTPException(503, "ffmpeg module has no media_dirs/output_dir configured")
+    output_dir: str | None = None  # UI-picked render folder; None → default
 
 
 # ---------------------------------------------------------------- endpoints
 
 
+@router.get("/api/ffmpeg/panel")
+def panel_config() -> dict:
+    """Video Lab bootstrap: browse root, default output dir, and the configured
+    media_dirs the UI seeds the workspace with on first load."""
+    return {
+        "browse_root": str(_browse_root()),
+        "default_output": str(_default_output_dir()),
+        "media_dirs": [str(r) for r in _media_roots() if r.is_dir()],
+    }
+
+
+@router.get("/api/ffmpeg/browse")
+def browse(path: str | None = None) -> dict:
+    """List immediate sub-folders (+ this folder's direct video count) under a
+    dir, for the ADD FOOTAGE / output-folder picker. Confined under the browse
+    root; hidden dot-entries skipped."""
+    root = _browse_root()
+    target = Path(path).expanduser().resolve() if path else root
+    if not _under(target, [root]):
+        raise HTTPException(400, "path outside the browse root")
+    if not target.is_dir():
+        raise HTTPException(404, "not a directory")
+    dirs: list[dict] = []
+    videos = 0
+    try:
+        for child in sorted(target.iterdir(), key=lambda p: p.name.lower()):
+            if child.name.startswith("."):
+                continue
+            if child.is_dir():
+                dirs.append({"name": child.name, "path": str(child)})
+            elif child.is_file() and child.suffix.lower() in VIDEO_EXTS:
+                videos += 1
+    except PermissionError:
+        raise HTTPException(403, "permission denied")
+    parent = str(target.parent) if target != root and _under(target.parent, [root]) else None
+    return {"path": str(target), "root": str(root), "parent": parent, "dirs": dirs, "video_count": videos}
+
+
 @router.get("/api/ffmpeg/files")
-def files() -> dict:
-    """Video files across all media_dirs, tagged by root. Missing dirs skip silently."""
+def files(dir: list[str] = Query(default=[])) -> dict:
+    """Video files (recursive) under the requested ``dir`` params, tagged by the
+    folder name. No ``dir`` → the configured ``media_dirs`` (back-compat). Each
+    requested dir is confined under the browse root; strays are skipped, and
+    missing dirs skip silently (never 500)."""
+    if dir:
+        roots = [Path(d).expanduser().resolve() for d in dir]
+        br = _browse_root()
+        roots = [r for r in roots if _under(r, [br])]
+    else:
+        roots = _media_roots()
     out: list[dict] = []
-    for root in _media_roots():
+    seen: set[str] = set()
+    for root in roots:
         if not root.is_dir():
             continue  # e.g. ~/Downloads/B-Rolls absent — never 500
         for p in sorted(root.rglob("*")):
-            if p.is_file() and p.suffix.lower() in VIDEO_EXTS:
+            if p.is_file() and p.suffix.lower() in VIDEO_EXTS and str(p) not in seen:
+                seen.add(str(p))
                 out.append({"root": root.name, "name": p.name, "path": str(p)})
     return {"files": out}
 
@@ -394,7 +473,6 @@ def luts() -> dict:
 
 def _validate(op: str, body: JobBody) -> tuple[list[Path], Path, dict]:
     """Resolve + confine paths, check op arity, collect op params. No ffprobe."""
-    _ensure_configured()
     if op not in BUILDERS:
         raise HTTPException(400, f"unknown op {op!r}; want one of {sorted(BUILDERS)}")
 
@@ -421,7 +499,8 @@ def _validate(op: str, body: JobBody) -> tuple[list[Path], Path, dict]:
             raise HTTPException(400, str(e))
     if op == "xfade":
         params["transition"] = body.transition if body.transition and body.transition > 0 else 0.5
-    return inputs, _output_path(op), params
+    out_dir = _resolve_output_dir(body.output_dir)
+    return inputs, _output_path(op, out_dir), params
 
 
 @router.post("/api/ffmpeg/jobs")

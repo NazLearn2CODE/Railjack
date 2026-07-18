@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { fetchJSON, usePolling } from "../api";
 import type { ModuleConfig } from "../store";
 
@@ -7,6 +7,11 @@ import type { ModuleConfig } from "../store";
  * op params + RUN, then a live job list (progress bar + log tail). Polls
  * /api/ffmpeg/jobs every 1 s while mounted (the panel only mounts for the
  * active module, so "mounted" ≈ "visible"). One job runs at a time server-side.
+ *
+ * M6.2: a baked-in file browser. FOOTAGE folders (persisted per browser) seed
+ * the CLIPS list via /api/ffmpeg/files?dir=…; ADD FOOTAGE opens a folder picker
+ * confined to the server's browse root (~). OUTPUT folder is likewise pickable
+ * (default ~/Downloads/VDO Outputs) and travels with the RUN request.
  */
 
 const OPS: { id: string; label: string; needs: "single" | "multi"; hint: string }[] = [
@@ -19,10 +24,32 @@ const OPS: { id: string; label: string; needs: "single" | "multi"; hint: string 
 
 interface FileEntry { root: string; name: string; path: string }
 interface LutEntry { name: string; path: string }
+interface PanelCfg { browse_root: string; default_output: string; media_dirs: string[] }
+interface BrowseResp { path: string; root: string; parent: string | null; dirs: { name: string; path: string }[]; video_count: number }
 interface Job {
   id: string; op: string; status: string; progress: number;
   output_path: string | null; error: string | null; logs: string[];
 }
+
+const WS_KEY = "railjack.ffmpeg.workspace";
+const OUT_KEY = "railjack.ffmpeg.output";
+
+function loadLS<T>(key: string): T | null {
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? (JSON.parse(raw) as T) : null;
+  } catch {
+    return null;
+  }
+}
+function saveLS(key: string, val: unknown): void {
+  try {
+    localStorage.setItem(key, JSON.stringify(val));
+  } catch {
+    /* private mode / quota — non-fatal, workspace just won't persist */
+  }
+}
+const baseName = (p: string) => p.replace(/\/+$/, "").split("/").pop() || p;
 
 function Pip({ status }: { status: string }) {
   const cls =
@@ -33,22 +60,124 @@ function Pip({ status }: { status: string }) {
   return <span className={cls} />;
 }
 
+/** Folder picker overlay. Navigates sub-folders under the server browse root;
+ * commits the currently-open folder via onPick. Used for both ADD FOOTAGE and
+ * choosing the OUTPUT folder (mode only changes the labels). */
+function FolderBrowser({
+  mode, start, onPick, onClose,
+}: { mode: "footage" | "output"; start: string; onPick: (p: string) => void; onClose: () => void }) {
+  const [path, setPath] = useState<string | null>(start || null);
+  const [data, setData] = useState<BrowseResp | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    const url = path ? `/api/ffmpeg/browse?path=${encodeURIComponent(path)}` : "/api/ffmpeg/browse";
+    fetchJSON<BrowseResp>(url)
+      .then((r) => { setData(r); setErr(null); if (path === null) setPath(r.path); })
+      .catch((e) => setErr(e instanceof Error ? e.message : String(e)));
+  }, [path]);
+
+  const commit = mode === "footage" ? "ADD THIS FOLDER" : "USE THIS FOLDER";
+
+  return (
+    <div className="fixed inset-0 z-40 flex items-center justify-center p-6" style={{ background: "color-mix(in srgb, #000 70%, transparent)" }}>
+      <div className="hud hud--bracket flex max-h-[80vh] w-full max-w-2xl flex-col gap-2 p-3">
+        <div className="flex items-center gap-2">
+          <span className="panel-title">{mode === "footage" ? "ADD FOOTAGE" : "OUTPUT FOLDER"}</span>
+          <span className="flex-1" />
+          <button className="btn" onClick={onClose}>CLOSE</button>
+        </div>
+        <div className="mono truncate text-xs text-muted" title={data?.path}>{data?.path ?? "…"}</div>
+        {err && <div className="mono text-xs" style={{ color: "var(--color-critical)" }}>{err}</div>}
+
+        <div className="flex min-h-40 flex-col gap-0.5 overflow-auto border border-edge bg-void p-1">
+          {data?.parent && (
+            <button className="row-in flex items-center gap-2 px-1 py-0.5 text-left" onClick={() => setPath(data.parent)}>
+              <span className="mono w-4 text-signal">↑</span>
+              <span className="mono flex-1 truncate">.. (up)</span>
+            </button>
+          )}
+          {data && data.dirs.length === 0 && <span className="label text-muted px-1 py-1">no sub-folders here</span>}
+          {data?.dirs.map((d) => (
+            <button key={d.path} className="row-in flex items-center gap-2 px-1 py-0.5 text-left" onClick={() => setPath(d.path)}>
+              <span className="mono w-4 text-muted">▸</span>
+              <span className="mono flex-1 truncate">{d.name}</span>
+            </button>
+          ))}
+        </div>
+
+        <div className="flex items-center gap-2">
+          <span className="label text-muted flex-1">
+            {data ? `${data.video_count} video${data.video_count === 1 ? "" : "s"} directly here` : ""}
+          </span>
+          <button
+            className="btn btn--signal"
+            disabled={!data}
+            onClick={() => data && onPick(data.path)}
+          >
+            {commit}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function FfmpegPanel({ module }: { module: ModuleConfig }) {
   const [op, setOp] = useState(OPS[0].id);
+  const [cfg, setCfg] = useState<PanelCfg | null>(null);
+  const [workspace, setWorkspace] = useState<string[] | null>(null); // null = not yet initialised
+  const [outputDir, setOutputDir] = useState<string>("");
   const [files, setFiles] = useState<FileEntry[]>([]);
   const [luts, setLuts] = useState<LutEntry[]>([]);
   const [selected, setSelected] = useState<string[]>([]); // ordered paths
   const [transition, setTransition] = useState(0.5);
   const [lutPath, setLutPath] = useState<string>("");
   const [runErr, setRunErr] = useState<string | null>(null);
+  const [browser, setBrowser] = useState<"footage" | "output" | null>(null);
 
+  // Bootstrap: panel config + LUTs. Seed workspace/output from saved state,
+  // falling back to the server's media_dirs / default output.
   useEffect(() => {
-    fetchJSON<{ files: FileEntry[] }>("/api/ffmpeg/files").then((r) => setFiles(r.files)).catch(() => setFiles([]));
+    fetchJSON<PanelCfg>("/api/ffmpeg/panel").then((c) => {
+      setCfg(c);
+      const savedWs = loadLS<string[]>(WS_KEY);
+      setWorkspace(savedWs ?? c.media_dirs);
+      const savedOut = loadLS<string>(OUT_KEY);
+      setOutputDir(savedOut ?? c.default_output);
+    }).catch(() => { setCfg({ browse_root: "~", default_output: "", media_dirs: [] }); setWorkspace([]); });
+
     fetchJSON<{ luts: LutEntry[] }>("/api/ffmpeg/luts").then((r) => {
       setLuts(r.luts);
       if (r.luts[0]) setLutPath(r.luts[0].path);
     }).catch(() => setLuts([]));
   }, []);
+
+  // Clips = videos under the workspace folders. Refetch when the set changes.
+  const refetchFiles = useCallback((dirs: string[]) => {
+    if (dirs.length === 0) { setFiles([]); return; }
+    const q = dirs.map((d) => `dir=${encodeURIComponent(d)}`).join("&");
+    fetchJSON<{ files: FileEntry[] }>(`/api/ffmpeg/files?${q}`).then((r) => setFiles(r.files)).catch(() => setFiles([]));
+  }, []);
+
+  useEffect(() => {
+    if (workspace === null) return; // not initialised yet
+    saveLS(WS_KEY, workspace);
+    refetchFiles(workspace);
+  }, [workspace, refetchFiles]);
+
+  const addFolder = (p: string) => {
+    setWorkspace((cur) => (cur && cur.includes(p) ? cur : [...(cur ?? []), p]));
+    setBrowser(null);
+  };
+  const removeFolder = (p: string) =>
+    setWorkspace((cur) => (cur ?? []).filter((d) => d !== p));
+
+  const pickOutput = (p: string) => {
+    setOutputDir(p);
+    saveLS(OUT_KEY, p);
+    setBrowser(null);
+  };
 
   const { data } = usePolling<{ jobs: Job[] }>("/api/ffmpeg/jobs", 1000);
   const jobs = data?.jobs ?? [];
@@ -63,12 +192,9 @@ export default function FfmpegPanel({ module }: { module: ModuleConfig }) {
   const toggle = (path: string) =>
     setSelected((cur) => (cur.includes(path) ? cur.filter((p) => p !== path) : [...cur, path]));
 
-  // clear selection that no longer fits the op's arity is the user's call —
-  // the RUN button simply won't enable. Keep order stable on toggle-off.
-
   const run = async () => {
     setRunErr(null);
-    const body: Record<string, unknown> = { op, files: selected };
+    const body: Record<string, unknown> = { op, files: selected, output_dir: outputDir || undefined };
     if (op === "xfade") body.transition = transition;
     if (op === "lut") body.lut = lutPath;
     try {
@@ -83,11 +209,36 @@ export default function FfmpegPanel({ module }: { module: ModuleConfig }) {
     }
   };
 
+  const ws = workspace ?? [];
+
   return (
     <div className="flex h-full w-full flex-col gap-2 overflow-auto p-3">
       <div className="flex items-center gap-2 px-1">
         <span className="panel-title">{module.title}</span>
         {live && <span className="label text-signal">RUNNING</span>}
+      </div>
+
+      {/* FOOTAGE folders + OUTPUT */}
+      <div className="hud hud--bracket reveal reveal-2 flex flex-col gap-2 p-3">
+        <div className="flex items-center gap-2">
+          <span className="label">FOOTAGE</span>
+          <span className="flex-1" />
+          <button className="btn btn--signal" onClick={() => setBrowser("footage")}>ADD FOOTAGE</button>
+        </div>
+        <div className="flex flex-wrap gap-1">
+          {ws.length === 0 && <span className="label text-muted">no folders — click ADD FOOTAGE</span>}
+          {ws.map((d) => (
+            <span key={d} className="mono flex items-center gap-1 border border-edge bg-void px-1.5 py-0.5 text-xs" title={d}>
+              {baseName(d)}
+              <button className="text-muted hover:text-signal" onClick={() => removeFolder(d)} title="remove">×</button>
+            </span>
+          ))}
+        </div>
+        <div className="flex items-center gap-2">
+          <span className="label">OUTPUT</span>
+          <span className="mono flex-1 truncate text-xs text-muted" title={outputDir}>{outputDir || "…"}</span>
+          <button className="btn" onClick={() => setBrowser("output")}>CHANGE</button>
+        </div>
       </div>
 
       {/* OP + params + RUN */}
@@ -136,7 +287,11 @@ export default function FfmpegPanel({ module }: { module: ModuleConfig }) {
           CLIPS{meta.needs === "multi" ? " — order = stitch/crossfade order" : ""}
         </span>
         <div className="flex flex-col gap-0.5 overflow-auto">
-          {files.length === 0 && <span className="label text-muted">no video files in media dirs</span>}
+          {files.length === 0 && (
+            <span className="label text-muted">
+              {ws.length === 0 ? "add a footage folder to see clips" : "no video files in these folders"}
+            </span>
+          )}
           {files.map((f) => {
             const idx = selected.indexOf(f.path);
             const on = idx >= 0;
@@ -195,6 +350,15 @@ export default function FfmpegPanel({ module }: { module: ModuleConfig }) {
           );
         })}
       </div>
+
+      {browser && (
+        <FolderBrowser
+          mode={browser}
+          start={browser === "output" ? outputDir : (cfg?.browse_root ?? "")}
+          onPick={browser === "output" ? pickOutput : addFolder}
+          onClose={() => setBrowser(null)}
+        />
+      )}
     </div>
   );
 }

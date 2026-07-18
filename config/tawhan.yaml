@@ -25,9 +25,12 @@ modules:
     kind: panel
     panel: ffmpeg
     options:
+      # media_dirs seed the workspace on first load; ADD FOOTAGE can pull from
+      # anywhere under browse_root (~). output_dir is the default render folder.
       media_dirs: ["~/Downloads/B-Rolls", "~/Videos", "~/ttyd-drops"]
       lut_dir: "~/Videos/LUTs"
-      output_dir: "~/Videos/railjack-renders"
+      browse_root: "~"
+      output_dir: "~/Downloads/VDO Outputs"
 
 # M6 cockpit — session telemetry, terminal buttons, catalog grouping.
 
