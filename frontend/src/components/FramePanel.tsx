@@ -1,6 +1,5 @@
 import type { FC } from "react";
 import { useStore, type ModuleConfig } from "../store";
-import ManageBar from "./ManageBar";
 
 export default function FramePanel({ panels }: { panels: Record<string, FC<{ module: ModuleConfig }>> }) {
   const modules = useStore((s) => s.config?.modules) ?? [];
@@ -17,10 +16,6 @@ export default function FramePanel({ panels }: { panels: Record<string, FC<{ mod
         </span>
         <span className="label">{active?.kind.toUpperCase()}</span>
       </div>
-
-      {/* ManageBar is chrome above the frame area (never inside the iframe map),
-          so toggling it can't remount the tmux terminal session. */}
-      {active?.manage && <ManageBar moduleId={active.id} />}
 
       <div className="relative min-h-0 flex-1">
         {/*

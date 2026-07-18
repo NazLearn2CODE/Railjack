@@ -25,7 +25,7 @@ export default function App() {
     };
   }, [setConfig]);
 
-  // Health pips: poll every 5 s. ManageBar also pushes a fresh fetch after an action.
+  // Health pips: poll every 5 s.
   const { data: health } = usePolling<Record<string, string>>("/api/health", 5000);
   useEffect(() => {
     if (health) setHealth(health);

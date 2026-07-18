@@ -177,6 +177,16 @@
 .mono {
   font-family: var(--font-mono);
 }
+/* Sidebar telemetry percentages: mono −15% (16→13.6px), glow +50% over
+   .panel-title (8px@60% → 12px@90%, 20px@30% → 30px@45%). currentColor so the
+   glow tracks the hazard/crit text color. */
+.pct {
+  font-family: var(--font-mono);
+  font-size: 13.6px;
+  text-shadow:
+    0 0 12px color-mix(in srgb, currentColor 90%, transparent),
+    0 0 30px color-mix(in srgb, currentColor 45%, transparent);
+}
 .display {
   font-family: var(--font-display);
 }
