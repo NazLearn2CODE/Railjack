@@ -406,3 +406,8 @@
   text-shadow: 0 0 6px var(--color-signal);
   color: var(--color-signal) !important;
 }
+/* Proven, fitting model name in the Comfy Lab bay — green phosphor glow. */
+.glow-go {
+  color: var(--color-go);
+  text-shadow: 0 0 10px color-mix(in srgb, var(--color-go) 60%, transparent);
+}

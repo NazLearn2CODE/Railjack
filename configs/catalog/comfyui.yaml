@@ -1,0 +1,66 @@
+# Curated ComfyUI model catalog for the ComfyUI panel.
+#
+# All URLs HEAD-checked 200 on 2026-07-19 (Comfy-Org repackaged repos; note
+# Krea-2 keeps files at repo root, HunyuanVideo_1.5_repackaged uses split_files/
+# — see skills/f5-comfyui-media/references/model-install.md). size_gb from the
+# HF API (fit math uses vram_gb, not size). Runtime fields (`installed`, `fit`)
+# are NOT here — the API computes them from the filesystem and options.vram_gb.
+entries:
+  - id: krea2-turbo-fp8
+    name: "Krea 2 Turbo (fp8)"
+    family: krea
+    modality: image
+    variant: turbo-fp8
+    vram_gb: 13
+    proven: true
+    components:
+      - folder: checkpoints
+        filename: krea2_turbo_fp8_scaled.safetensors
+        url: https://huggingface.co/Comfy-Org/Krea-2/resolve/main/diffusion_models/krea2_turbo_fp8_scaled.safetensors
+        size_gb: 12.24
+      - folder: text_encoders
+        filename: qwen3vl_4b_fp8_scaled.safetensors
+        url: https://huggingface.co/Comfy-Org/Krea-2/resolve/main/text_encoders/qwen3vl_4b_fp8_scaled.safetensors
+        size_gb: 4.88
+      - folder: vae
+        filename: qwen_image_vae.safetensors
+        url: https://huggingface.co/Comfy-Org/Krea-2/resolve/main/vae/qwen_image_vae.safetensors
+        size_gb: 0.24
+
+  - id: hunyuanvideo15-720p-i2v
+    name: "HunyuanVideo 1.5 720p I2V (fp16)"
+    family: hunyuan-video
+    modality: video
+    variant: 720p-i2v
+    vram_gb: 24
+    proven: false
+    components:
+      - folder: diffusion_models
+        filename: hunyuanvideo1.5_720p_i2v_fp16.safetensors
+        url: https://huggingface.co/Comfy-Org/HunyuanVideo_1.5_repackaged/resolve/main/split_files/diffusion_models/hunyuanvideo1.5_720p_i2v_fp16.safetensors
+        size_gb: 15.51
+      - folder: text_encoders
+        filename: qwen_2.5_vl_7b_fp8_scaled.safetensors
+        url: https://huggingface.co/Comfy-Org/HunyuanVideo_1.5_repackaged/resolve/main/split_files/text_encoders/qwen_2.5_vl_7b_fp8_scaled.safetensors
+        size_gb: 8.74
+      - folder: text_encoders
+        filename: byt5_small_glyphxl_fp16.safetensors
+        url: https://huggingface.co/Comfy-Org/HunyuanVideo_1.5_repackaged/resolve/main/split_files/text_encoders/byt5_small_glyphxl_fp16.safetensors
+        size_gb: 0.41
+      - folder: vae
+        filename: hunyuanvideo15_vae_fp16.safetensors
+        url: https://huggingface.co/Comfy-Org/HunyuanVideo_1.5_repackaged/resolve/main/split_files/vae/hunyuanvideo15_vae_fp16.safetensors
+        size_gb: 2.35
+
+  - id: sdxl-base-10
+    name: "Stable Diffusion XL Base 1.0"
+    family: sdxl
+    modality: image
+    variant: base-1.0
+    vram_gb: 8
+    proven: false
+    components:
+      - folder: checkpoints
+        filename: sd_xl_base_1.0.safetensors
+        url: https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0/resolve/main/sd_xl_base_1.0.safetensors
+        size_gb: 6.94

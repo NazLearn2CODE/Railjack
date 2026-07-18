@@ -6,9 +6,10 @@ import TopBar from "./components/TopBar";
 import ModuleRail from "./components/ModuleRail";
 import FramePanel from "./components/FramePanel";
 import FfmpegPanel from "./components/FfmpegPanel";
+import ComfyPanel from "./components/ComfyPanel";
 
 // kind:"panel" modules render their panel component from this map.
-const PANELS: Record<string, FC<{ module: ModuleConfig }>> = { ffmpeg: FfmpegPanel };
+const PANELS: Record<string, FC<{ module: ModuleConfig }>> = { ffmpeg: FfmpegPanel, comfyui: ComfyPanel };
 
 export default function App() {
   const setConfig = useStore((s) => s.setConfig);

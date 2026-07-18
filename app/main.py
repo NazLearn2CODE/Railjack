@@ -14,6 +14,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
 from .catalog import router as catalog_router
+from .comfyui import router as comfyui_router
 from .config import CONFIG, Module
 from .ffmpeg_jobs import router as ffmpeg_router
 from .health import router as health_router
@@ -25,6 +26,7 @@ app = FastAPI(title="Railjack")
 app.include_router(health_router)
 app.include_router(manage_router)
 app.include_router(ffmpeg_router)
+app.include_router(comfyui_router)
 app.include_router(catalog_router)
 app.include_router(session_router)
 app.include_router(terminal_router)
