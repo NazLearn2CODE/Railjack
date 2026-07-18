@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import signal
 import subprocess
 from collections import deque
@@ -51,6 +52,37 @@ def _ffmpeg_module_options() -> dict:
 
 
 _OPTS = _ffmpeg_module_options()
+
+
+# ---------------------------------------------------------------- xfade transitions (live)
+# The TRANSITION dropdown renders this verbatim, so the list auto-updates with
+# ffmpeg upgrades — never hardcode transition names. Mirrors caps.sh's awk: the
+# xfade help lists each style as a bare word followed by its default int value.
+_XFADE: list[str] | None = None
+_TRANS_LINE = re.compile(r"^\s+([a-z][a-z0-9_]*)\s+-?\d+\s")
+
+
+def _xfade_transitions() -> list[str]:
+    """Sorted xfade transition names this ffmpeg build supports (cached at first call)."""
+    global _XFADE
+    if _XFADE is not None:
+        return _XFADE
+    found: set[str] = set()
+    try:
+        r = subprocess.run(
+            ["ffmpeg", "-h", "filter=xfade"], capture_output=True, text=True, timeout=10
+        )
+        for ln in (r.stdout or "").splitlines():
+            m = _TRANS_LINE.match(ln)
+            if m:
+                found.add(m.group(1))
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+    names = sorted(found)
+    if "fade" not in names:
+        names = ["fade", *names]  # safe fallback so xfade always has a default
+    _XFADE = names
+    return names
 
 
 def _media_roots() -> list[Path]:
@@ -239,7 +271,7 @@ def xfade(inputs: list[Path], out: Path, p: dict) -> list[str]:
     for k in range(n - 1):
         nxt = f"vx{k + 1}" if k < n - 2 else "vout"
         chains.append(
-            f"[{prev}][v{k + 1}]xfade=transition=fade:duration={d}:"
+            f"[{prev}][v{k + 1}]xfade=transition={p.get('style', 'fade')}:duration={d}:"
             f"offset={offsets[k]:.3f}[{nxt}]"
         )
         prev = nxt
@@ -260,16 +292,127 @@ def xfade(inputs: list[Path], out: Path, p: dict) -> list[str]:
     return argv
 
 
+# ---------------------------------------------------------------- single-clip effects (§4–§6 family)
+# One clip in, one clip out; each maps to a recipes.md section.
+
+def fade(inputs: list[Path], out: Path, p: dict) -> list[str]:
+    """§5: fade video in at 0 and out at DUR−fd (audio too, if present)."""
+    fd = p["fade"]
+    st_out = max(0.0, p["durations"][0] - fd)
+    vf = f"fade=t=in:st=0:d={fd},fade=t=out:st={st_out}:d={fd}"
+    argv = ["ffmpeg", "-y", "-i", str(inputs[0]), "-vf", vf]
+    if p["audio"]:
+        argv += ["-af", f"afade=t=in:st=0:d={fd},afade=t=out:st={st_out}:d={fd}"]
+    return argv + _master() + [str(out)]
+
+
+def _atempo_chain(factor: float) -> str:
+    """atempo spans [0.5, 2.0] per stage; chain to reach factor in [0.25, 16].
+
+    ponytail: ceiling is 16 (four 2× stages) — beyond that use a real editor.
+    """
+    parts: list[str] = []
+    cur = factor
+    while cur > 2.0:
+        parts.append("atempo=2.0")
+        cur /= 2.0
+    while cur < 0.5:
+        parts.append("atempo=0.5")
+        cur /= 0.5
+    parts.append(f"atempo={cur}")
+    return ",".join(parts)
+
+
+def speed(inputs: list[Path], out: Path, p: dict) -> list[str]:
+    """§6: speed ramp. video setpts=1/factor*PTS; audio atempo chain."""
+    f = p["speed"]
+    vpts = 1.0 / f
+    if p["audio"]:
+        filt = f"[0:v]setpts={vpts}*PTS[v];[0:a]{_atempo_chain(f)}[a]"
+        return ["ffmpeg", "-y", "-i", str(inputs[0]), "-filter_complex", filt,
+                "-map", "[v]", "-map", "[a]", *_master(), str(out)]
+    return ["ffmpeg", "-y", "-i", str(inputs[0]), "-vf", f"setpts={vpts}*PTS", *_master(), str(out)]
+
+
+def _vf_op(filt: str):
+    """Factory: a single-clip op that applies one -vf filter + the master block.
+    The 7 taste effects (denoise/sharpen/…) are each one filter string — DRY."""
+    def _build(inputs: list[Path], out: Path, _p: dict) -> list[str]:
+        return ["ffmpeg", "-y", "-i", str(inputs[0]), "-vf", filt, *_master(), str(out)]
+    return _build
+
+
+denoise = _vf_op("hqdn3d=4:3:6:4.5")     # luma_spatial:chroma:luma_tmp:chroma_tmp
+sharpen = _vf_op("unsharp=5:5:1.0:5:5:0.0")  # luma 5×5 amt 1.0, chroma off
+vignette = _vf_op("vignette=PI/5")
+grain = _vf_op("noise=alls=20:allf=t+u")  # allf=t+u = temporal+uniform (film grain)
+mirrorh = _vf_op("hflip")
+mirrorv = _vf_op("vflip")
+grayscale = _vf_op("hue=s=0")             # saturation 0 = desaturate, keeps pixfmt
+
+
+def loudnorm(inputs: list[Path], out: Path, _p: dict) -> list[str]:
+    """§7: EBU R128 loudness normalize. Audio filtered, video copied (no re-encode)."""
+    return ["ffmpeg", "-y", "-i", str(inputs[0]), "-af", "loudnorm=I=-16:TP=-1.5:LRA=11",
+            "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", str(out)]
+
+
+def volume(inputs: list[Path], out: Path, p: dict) -> list[str]:
+    """Audio gain (linear factor); video copied."""
+    return ["ffmpeg", "-y", "-i", str(inputs[0]), "-af", f"volume={p['gain']}",
+            "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", str(out)]
+
+
 BUILDERS = {
     "transcode_h264": transcode_h264,
     "concat": concat,
     "lut": lut,
     "xfade": xfade,
     "transcode_dnxhr": transcode_dnxhr,
+    # EFFECTS (single clip):
+    "fade": fade,
+    "speed": speed,
+    "denoise": denoise,
+    "sharpen": sharpen,
+    "vignette": vignette,
+    "grain": grain,
+    "mirrorh": mirrorh,
+    "mirrorv": mirrorv,
+    "grayscale": grayscale,
+    # AUDIO (single clip):
+    "loudnorm": loudnorm,
+    "volume": volume,
 }
 
+# ---------------------------------------------------------------- op catalog (single source of truth)
+# Adding an op = (1) write a builder fn above, (2) append ONE row here, (3) register
+# it in BUILDERS. The import-time assert below keeps this list, BUILDERS, _MULTI, and
+# AUDIO_OPS from drifting — so a new no-param effect grows the Video Lab menu with
+# ZERO frontend edits (the UI renders /api/ffmpeg/ops verbatim, grouped by `cat`).
+_CATALOG: list[dict] = [
+    {"id": "concat",         "label": "Butt-cut stitch",    "cat": "ASSEMBLY",  "needs": "multi",  "hint": "≥2 clips, in order"},
+    {"id": "xfade",          "label": "Crossfade chain",    "cat": "ASSEMBLY",  "needs": "multi",  "hint": "≥2 clips + transition"},
+    {"id": "lut",            "label": "Apply LUT",          "cat": "LOOK",      "needs": "single", "hint": "one clip + a .cube LUT"},
+    {"id": "fade",           "label": "Fade in/out",        "cat": "EFFECTS",   "needs": "single", "hint": "0.5s in + out"},
+    {"id": "speed",          "label": "Speed ramp",         "cat": "EFFECTS",   "needs": "single", "hint": "2× fast / 0.5× slow"},
+    {"id": "denoise",        "label": "Denoise",            "cat": "EFFECTS",   "needs": "single", "hint": "hqdn3d"},
+    {"id": "sharpen",        "label": "Sharpen",            "cat": "EFFECTS",   "needs": "single", "hint": "unsharp"},
+    {"id": "vignette",       "label": "Vignette",           "cat": "EFFECTS",   "needs": "single", "hint": "darken edges"},
+    {"id": "grain",          "label": "Film grain",         "cat": "EFFECTS",   "needs": "single", "hint": "add grain"},
+    {"id": "mirrorh",        "label": "Mirror H",           "cat": "EFFECTS",   "needs": "single", "hint": "hflip"},
+    {"id": "mirrorv",        "label": "Mirror V",           "cat": "EFFECTS",   "needs": "single", "hint": "vflip"},
+    {"id": "grayscale",      "label": "Grayscale",          "cat": "EFFECTS",   "needs": "single", "hint": "desaturate"},
+    {"id": "loudnorm",       "label": "Loudness normalize", "cat": "AUDIO",     "needs": "single", "audio": True, "hint": "EBU R128 −16 LUFS"},
+    {"id": "volume",         "label": "Volume/gain",        "cat": "AUDIO",     "needs": "single", "audio": True, "hint": "×2 gain"},
+    {"id": "transcode_h264", "label": "H.264 master",       "cat": "TRANSCODE", "needs": "single", "hint": "CRF 18 master"},
+    {"id": "transcode_dnxhr","label": "DNxHR (Resolve)",    "cat": "TRANSCODE", "needs": "single", "hint": "edit intermediate"},
+]
+assert {c["id"] for c in _CATALOG} == set(BUILDERS), "BUILDERS and _CATALOG drifted — sync them"
+
 # ops that take exactly one clip vs. ops that need >= 2 (ordered)
-_MULTI = {"concat", "xfade"}
+_MULTI = {c["id"] for c in _CATALOG if c["needs"] == "multi"}
+# ops that require an audio stream — guarded in create_job after ffprobe
+AUDIO_OPS = {c["id"] for c in _CATALOG if c.get("audio")}
 
 
 def _total_duration(op: str, probes: list[tuple[float, bool]], p: dict) -> float:
@@ -277,6 +420,9 @@ def _total_duration(op: str, probes: list[tuple[float, bool]], p: dict) -> float
     if op == "xfade":
         # §2: total = Σdur − (n−1)·transition (each crossfade overlaps the join)
         return max(0.0, sum(durs) - (len(durs) - 1) * p["transition"])
+    if op == "speed":
+        # output time = input / factor (progress tracks out_time, which is output time)
+        return max(0.0, sum(durs) / (p.get("speed") or 2.0))
     return sum(durs)  # concat = Σdur; single-clip ops = that clip's duration
 
 
@@ -388,7 +534,11 @@ class JobBody(BaseModel):
     op: str
     files: list[str]
     lut: str | None = None
-    transition: float | None = None
+    transition: float | None = None        # xfade crossfade duration (s)
+    transition_style: str | None = None    # xfade transition name (fade/wipeleft/…)
+    fade: float | None = None              # fade in/out duration (s)
+    speed: float | None = None             # speed factor (2.0 = 2× fast)
+    gain: float | None = None              # audio gain factor (2.0 = 2×)
     output_dir: str | None = None  # UI-picked render folder; None → default
 
 
@@ -471,6 +621,20 @@ def luts() -> dict:
     return {"luts": out}
 
 
+@router.get("/api/ffmpeg/transitions")
+def list_transitions() -> dict:
+    """Live xfade transition names for the TRANSITION dropdown (auto-updates with ffmpeg)."""
+    return {"transitions": _xfade_transitions()}
+
+
+@router.get("/api/ffmpeg/ops")
+def list_ops() -> dict:
+    """Op catalog for the Video Lab menu — grouped by `cat` client-side. Single
+    source of truth: BUILDERS and this list are kept in sync by an import-time
+    assert, so the menu grows by appending one row (no frontend edit needed)."""
+    return {"ops": _CATALOG}
+
+
 def _validate(op: str, body: JobBody) -> tuple[list[Path], Path, dict]:
     """Resolve + confine paths, check op arity, collect op params. No ffprobe."""
     if op not in BUILDERS:
@@ -499,6 +663,14 @@ def _validate(op: str, body: JobBody) -> tuple[list[Path], Path, dict]:
             raise HTTPException(400, str(e))
     if op == "xfade":
         params["transition"] = body.transition if body.transition and body.transition > 0 else 0.5
+        params["style"] = body.transition_style or "fade"
+    if op == "fade":
+        params["fade"] = body.fade if body.fade and body.fade > 0 else 0.5
+    if op == "speed":
+        # atempo chain ceiling is 16; clamp negatives/zero to the 2× default
+        params["speed"] = min(16.0, max(0.25, body.speed)) if body.speed else 2.0
+    if op == "volume":
+        params["gain"] = body.gain if body.gain and body.gain > 0 else 2.0
     out_dir = _resolve_output_dir(body.output_dir)
     return inputs, _output_path(op, out_dir), params
 
@@ -521,6 +693,9 @@ async def create_job(body: JobBody) -> dict:
 
     params["audio"] = all(has_a for _, has_a in probes)
     params["durations"] = [d for d, _ in probes]
+
+    if op in AUDIO_OPS and not params["audio"]:
+        raise HTTPException(400, f"{op} needs an audio stream; this clip has none")
 
     argv = BUILDERS[op](inputs, out, params)
     # global flags the progress pump depends on: machine-readable key=value

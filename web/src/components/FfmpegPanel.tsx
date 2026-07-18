@@ -14,12 +14,17 @@ import type { ModuleConfig } from "../store";
  * (default ~/Downloads/VDO Outputs) and travels with the RUN request.
  */
 
-const OPS: { id: string; label: string; needs: "single" | "multi"; hint: string }[] = [
-  { id: "transcode_h264", label: "TRANSCODE → H.264", needs: "single", hint: "one clip → CRF 18 master" },
-  { id: "concat", label: "STITCH (concat)", needs: "multi", hint: "≥2 clips, in order" },
-  { id: "lut", label: "APPLY LUT", needs: "single", hint: "one clip + a .cube LUT" },
-  { id: "xfade", label: "CROSSFADE (xfade)", needs: "multi", hint: "≥2 clips, in order" },
-  { id: "transcode_dnxhr", label: "TRANSCODE → DNxHR", needs: "single", hint: "one clip → Resolve edit intermediate" },
+/**
+ * Op catalog is backend-driven: /api/ffmpeg/ops is the single source of truth
+ * (an import-time assert keeps it synced with BUILDERS). The menu is grouped
+ * client-side by `cat`, so adding a no-param effect in the backend grows this
+ * menu with zero frontend edit. FALLBACK_OPS only covers a fetch failure so the
+ * panel still renders.
+ */
+interface Op { id: string; label: string; needs: "single" | "multi"; hint: string; cat: string }
+
+const FALLBACK_OPS: Op[] = [
+  { id: "transcode_h264", label: "H.264 master", needs: "single", hint: "CRF 18 master", cat: "TRANSCODE" },
 ];
 
 interface FileEntry { root: string; name: string; path: string }
@@ -124,7 +129,8 @@ function FolderBrowser({
 }
 
 export default function FfmpegPanel({ module }: { module: ModuleConfig }) {
-  const [op, setOp] = useState(OPS[0].id);
+  const [catalog, setCatalog] = useState<Op[]>(FALLBACK_OPS);
+  const [op, setOp] = useState("transcode_h264");
   const [cfg, setCfg] = useState<PanelCfg | null>(null);
   const [workspace, setWorkspace] = useState<string[] | null>(null); // null = not yet initialised
   const [outputDir, setOutputDir] = useState<string>("");
@@ -132,6 +138,11 @@ export default function FfmpegPanel({ module }: { module: ModuleConfig }) {
   const [luts, setLuts] = useState<LutEntry[]>([]);
   const [selected, setSelected] = useState<string[]>([]); // ordered paths
   const [transition, setTransition] = useState(0.5);
+  const [xstyle, setXstyle] = useState("fade");
+  const [transitions, setTransitions] = useState<string[]>(["fade"]);
+  const [fadeDur, setFadeDur] = useState(0.5);
+  const [speedFac, setSpeedFac] = useState(2);
+  const [gain, setGain] = useState(2);
   const [lutPath, setLutPath] = useState<string>("");
   const [runErr, setRunErr] = useState<string | null>(null);
   const [browser, setBrowser] = useState<"footage" | "output" | null>(null);
@@ -151,6 +162,13 @@ export default function FfmpegPanel({ module }: { module: ModuleConfig }) {
       setLuts(r.luts);
       if (r.luts[0]) setLutPath(r.luts[0].path);
     }).catch(() => setLuts([]));
+
+    fetchJSON<{ ops: Op[] }>("/api/ffmpeg/ops").then((r) => {
+      if (r.ops.length) setCatalog(r.ops);
+    }).catch(() => {});
+    fetchJSON<{ transitions: string[] }>("/api/ffmpeg/transitions").then((r) => {
+      if (r.transitions.length) setTransitions(r.transitions);
+    }).catch(() => {});
   }, []);
 
   // Clips = videos under the workspace folders. Refetch when the set changes.
@@ -183,7 +201,8 @@ export default function FfmpegPanel({ module }: { module: ModuleConfig }) {
   const jobs = data?.jobs ?? [];
   const live = jobs.some((j) => j.status === "queued" || j.status === "running");
 
-  const meta = OPS.find((o) => o.id === op)!;
+  const meta = catalog.find((o) => o.id === op) ?? FALLBACK_OPS[0];
+  const cats = Array.from(new Set(catalog.map((o) => o.cat))); // order of first appearance
   const canRun =
     !live &&
     (meta.needs === "multi" ? selected.length >= 2 : selected.length === 1) &&
@@ -195,8 +214,11 @@ export default function FfmpegPanel({ module }: { module: ModuleConfig }) {
   const run = async () => {
     setRunErr(null);
     const body: Record<string, unknown> = { op, files: selected, output_dir: outputDir || undefined };
-    if (op === "xfade") body.transition = transition;
+    if (op === "xfade") { body.transition = transition; body.transition_style = xstyle; }
     if (op === "lut") body.lut = lutPath;
+    if (op === "fade") body.fade = fadeDur;
+    if (op === "speed") body.speed = speedFac;
+    if (op === "volume") body.gain = gain;
     try {
       await fetchJSON<{ id: string }>("/api/ffmpeg/jobs", {
         method: "POST",
@@ -243,23 +265,44 @@ export default function FfmpegPanel({ module }: { module: ModuleConfig }) {
 
       {/* OP + params + RUN */}
       <div className="hud hud--bracket reveal reveal-3 flex flex-col gap-2 p-3">
-        <div className="flex items-center gap-2">
-          <span className="label">OP</span>
-          <select className="input flex-1" value={op} onChange={(e) => setOp(e.target.value)}>
-            {OPS.map((o) => <option key={o.id} value={o.id}>{o.label}</option>)}
-          </select>
-          <span className="label text-muted">{meta.hint}</span>
+        {/* one <select> per category; all share `op`, so picking in one moves it */}
+        <div className="flex flex-wrap items-center gap-2">
+          {cats.map((cat) => {
+            const opts = catalog.filter((o) => o.cat === cat);
+            return (
+              <label key={cat} className="flex items-center gap-1">
+                <span className="label whitespace-nowrap text-muted">{cat}</span>
+                <select
+                  className="input"
+                  value={opts.some((o) => o.id === op) ? op : ""}
+                  onChange={(e) => e.target.value && setOp(e.target.value)}
+                >
+                  <option value="">—</option>
+                  {opts.map((o) => <option key={o.id} value={o.id}>{o.label}</option>)}
+                </select>
+              </label>
+            );
+          })}
         </div>
+        <span className="label text-muted">{meta.hint}</span>
 
         {op === "xfade" && (
-          <label className="flex items-center gap-2">
-            <span className="label">TRANSITION (s)</span>
-            <input
-              className="input w-24"
-              type="number" min={0.1} step={0.1} value={transition}
-              onChange={(e) => setTransition(Math.max(0.1, Number(e.target.value) || 0.5))}
-            />
-          </label>
+          <>
+            <label className="flex items-center gap-2">
+              <span className="label">TRANSITION</span>
+              <select className="input flex-1" value={xstyle} onChange={(e) => setXstyle(e.target.value)}>
+                {transitions.map((t) => <option key={t} value={t}>{t}</option>)}
+              </select>
+            </label>
+            <label className="flex items-center gap-2">
+              <span className="label">DURATION (s)</span>
+              <input
+                className="input w-24"
+                type="number" min={0.1} step={0.1} value={transition}
+                onChange={(e) => setTransition(Math.max(0.1, Number(e.target.value) || 0.5))}
+              />
+            </label>
+          </>
         )}
 
         {op === "lut" && (
@@ -269,6 +312,30 @@ export default function FfmpegPanel({ module }: { module: ModuleConfig }) {
               {luts.length === 0 && <option value="">(no LUTs found)</option>}
               {luts.map((l) => <option key={l.path} value={l.path}>{l.name}</option>)}
             </select>
+          </label>
+        )}
+
+        {op === "fade" && (
+          <label className="flex items-center gap-2">
+            <span className="label">FADE (s)</span>
+            <input className="input w-24" type="number" min={0.1} step={0.1} value={fadeDur}
+              onChange={(e) => setFadeDur(Math.max(0.1, Number(e.target.value) || 0.5))} />
+          </label>
+        )}
+
+        {op === "speed" && (
+          <label className="flex items-center gap-2">
+            <span className="label">SPEED (×)</span>
+            <input className="input w-24" type="number" min={0.25} max={16} step={0.25} value={speedFac}
+              onChange={(e) => setSpeedFac(Math.min(16, Math.max(0.25, Number(e.target.value) || 2)))} />
+          </label>
+        )}
+
+        {op === "volume" && (
+          <label className="flex items-center gap-2">
+            <span className="label">GAIN (×)</span>
+            <input className="input w-24" type="number" min={0.1} step={0.1} value={gain}
+              onChange={(e) => setGain(Math.max(0.1, Number(e.target.value) || 2))} />
           </label>
         )}
 
