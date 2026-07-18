@@ -118,6 +118,49 @@ def test_provider_none_model_fallback():
     assert p is None and rx is None
 
 
+# -------------------------------------------------------- per-model context limit
+def test_context_limit_resolves_glm52_to_1m():
+    # The reported bug: config said 200k, real limit is 1M → gauge was 5× off.
+    assert session_stats._resolve_context_limit("glm-5.2", 200_000) == 1_000_000
+
+
+def test_context_limit_claude_family_200k():
+    assert session_stats._resolve_context_limit("claude-opus-4-8", 200_000) == 200_000
+
+
+def test_context_limit_unknown_model_uses_fallback():
+    assert session_stats._resolve_context_limit("gpt-4o", 128_000) == 128_000
+
+
+def test_context_limit_none_model_uses_fallback():
+    assert session_stats._resolve_context_limit(None, 200_000) == 200_000
+
+
+def test_session_clamps_stale_table_entry_below_observed_context(monkeypatch, tmp_path):
+    """If a model accepts more than the table/limit claims (proof its real limit
+    is ≥ ctx), the gauge denominator rises to ctx so it never reads >100 %."""
+    root = tmp_path / "projects" / "slug"
+    root.mkdir(parents=True)
+    now = datetime.now(timezone.utc)
+    # glm-5-turbo isn't in the table → falls back to provider's 200k, but ctx
+    # (350k) exceeds it: clamp must lift the denominator to 350k → 100 %.
+    line = {
+        "type": "assistant",
+        "timestamp": now.isoformat(),
+        "message": {"model": "glm-5-turbo",
+                    "usage": {"input_tokens": 350_000, "cache_read_input_tokens": 0,
+                              "cache_creation_input_tokens": 0, "output_tokens": 0}},
+    }
+    (root / "abc.jsonl").write_text(json.dumps(line))
+    monkeypatch.setattr(session_stats, "SESSIONS_ROOT", tmp_path / "projects")
+    monkeypatch.setattr(session_stats, "CONFIG", _mk_session())
+
+    st = session_stats._session_state()
+    assert st["context_tokens"] == 350_000
+    assert st["context_limit"] == 350_000  # clamped up from 200k
+    assert st["context_pct"] == 100
+
+
 # ---------------------------------------------------------------- session end-to-end
 
 
@@ -146,9 +189,10 @@ def test_session_state_parses_newest_transcript(monkeypatch, tmp_path):
     st = session_stats._session_state()
     assert st["provider"] == "anthropic"
     assert st["model"] == "claude-fable-5"
-    assert st["context_tokens"] == 2 + 104314 + 433
+    # input (2 + 104314 + 433) + output (280) = post-turn context fill
+    assert st["context_tokens"] == 2 + 104314 + 433 + 280
     assert st["context_limit"] == 200_000
-    assert st["context_pct"] == round((104749 / 200_000) * 100)  # 52
+    assert st["context_pct"] == round((105029 / 200_000) * 100)  # 53
     assert st["idle"] is False  # fresh mtime
     # block start floored to the hour of the first (40m-ago) event
     assert st["reset_at"] is not None

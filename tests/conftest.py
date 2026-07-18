@@ -18,6 +18,7 @@ def _reset_session_caches():
     fresh fetch/fallback."""
     session_stats._cache = None
     session_stats._last_usage.clear()
+    session_stats._max_seen.clear()
     catalog._cache = None
     yield
 

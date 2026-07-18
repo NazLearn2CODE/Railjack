@@ -38,12 +38,12 @@ providers:
   - name: anthropic
     model_match: "^claude-"
     window_hours: 5
-    context_limit: 200000
+    context_limit: 200000           # fallback only — per-model table in session_stats._MODEL_CONTEXT_LIMITS wins
     usage_source: anthropic-oauth   # reads ~/.claude/.credentials.json (Claude Code keeps it fresh)
   - name: zai
     model_match: "^glm-"
     window_hours: 5
-    context_limit: 200000
+    context_limit: 200000           # fallback only — glm-5.2 resolves to 1M via the per-model table
     usage_source: zai-quota         # rate-ck endpoint; needs the key below in the server env
     key_env: ZAI_API_KEY
 

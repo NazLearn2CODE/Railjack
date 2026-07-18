@@ -2,10 +2,15 @@
 
 Newest ``~/.claude/projects/<slug>/<uuid>.jsonl`` by mtime (``idle`` if >10 min
 stale). Context tokens = ``input_tokens + cache_read_input_tokens +
-cache_creation_input_tokens`` of the last assistant ``message.usage``. The
-session's ``message.model`` → provider via the ``providers`` config (regex,
-``window_hours``, ``context_limit``); unknown model → provider ``"?"`` with
-default 5 h / 200 k, ctx % still reported.
+cache_creation_input_tokens + output_tokens`` of the last assistant
+``message.usage`` (input is the conversation at request time; +output is the
+post-turn fill the gauge should show). The denominator is the model's *real*
+context limit, resolved per-model from a curated table (``_MODEL_CONTEXT_
+LIMITS``) — provider ``context_limit`` is only the fallback for unlisted
+models, and an empirical floor (``_max_seen``) clamps it so a stale entry can
+never push the gauge past 100 %. The session's ``message.model`` → provider
+via the ``providers`` config (regex, ``window_hours``); unknown model →
+provider ``"?"`` with default 5 h / 200 k, ctx % still reported.
 
 Session %/reset come from the provider's **official usage API** when its
 ``usage_source`` adapter is configured (``source: "api"``): anthropic-oauth →
@@ -53,6 +58,20 @@ _USAGE_RETAIN = 600
 _cache: tuple[float, dict] | None = None
 _last_usage: dict[str, tuple[float, dict]] = {}
 
+# Per-model context limits — the real denominator for the CTX %. Public, stable
+# specs; z.ai's /models endpoint returns no context_window, so a curated table
+# is the source of truth (anthropic /v1/models has it, but a static table avoids
+# the extra call/failure mode for values that never change). First regex match
+# wins; provider.context_limit is the fallback. Extend as new models ship.
+_MODEL_CONTEXT_LIMITS: list[tuple[re.Pattern, int]] = [
+    (re.compile(r"^glm-5\.2"), 1_000_000),  # z.ai: 200K → 1M extension
+    (re.compile(r"^claude-"), 200_000),
+]
+# Largest input context ever observed per model — proof its real limit is ≥ that,
+# so clamping a stale table entry to this floor keeps the gauge ≤ 100 % until the
+# table catches up. Creeps up for unknown models; no-op when the table is right.
+_max_seen: dict[str, int] = {}
+
 
 def _parse_ts(ts: str) -> datetime | None:
     try:
@@ -69,6 +88,18 @@ def _match_provider(model: str | None, providers):
             if rx.search(model):
                 return p, rx
     return None, None
+
+
+def _resolve_context_limit(model: str | None, fallback: int) -> int:
+    """Model's real context window: table match, else the provider fallback.
+
+    Re-resolved from the live model string every poll, so a mid-session
+    ``/model`` switch picks up the new limit automatically — no switch detection.
+    """
+    for rx, lim in _MODEL_CONTEXT_LIMITS:
+        if model and rx.search(model):
+            return lim
+    return fallback
 
 
 # ---------------------------------------------------------------- usage adapters
@@ -191,10 +222,13 @@ def _scan(path: Path) -> tuple[list[datetime], str | None, int]:
                         model = m
                     usage = msg.get("usage")
                     if isinstance(usage, dict):
+                        # input = conversation at request time; +output = the
+                        # post-turn fill (what the gauge should reflect).
                         ctx = (
                             int(usage.get("input_tokens", 0))
                             + int(usage.get("cache_read_input_tokens", 0))
                             + int(usage.get("cache_creation_input_tokens", 0))
+                            + int(usage.get("output_tokens", 0))
                         )
     except OSError:
         pass
@@ -265,7 +299,13 @@ def _session_state() -> dict:
     provider, rx = _match_provider(model, CONFIG.providers)
     name = provider.name if provider else "?"
     window_h = provider.window_hours if provider else _DEFAULT_WINDOW
-    limit = provider.context_limit if provider else _DEFAULT_LIMIT
+    # Denominator: the model's real limit (per-model table), clamped to the
+    # largest context we've ever seen it accept so a stale table entry can't
+    # make the gauge read >100 % (proof: if it accepted N, its limit is ≥ N).
+    resolved = _resolve_context_limit(model, provider.context_limit if provider else _DEFAULT_LIMIT)
+    if model:
+        _max_seen[model] = max(_max_seen.get(model, 0), ctx)
+    limit = max(resolved, _max_seen.get(model, 0))
 
     # Preferred: the provider's official usage API (calibrated vs /usage).
     usage = _fetch_usage(provider)
