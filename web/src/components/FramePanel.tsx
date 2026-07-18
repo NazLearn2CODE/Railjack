@@ -10,7 +10,7 @@ export default function FramePanel({ panels }: { panels: Record<string, FC<{ mod
   const Panel = active?.panel ? panels[active.panel] : undefined;
 
   return (
-    <section className="hud hud--bracket reveal reveal-3 m-2 flex min-h-0 flex-1 flex-col overflow-hidden">
+    <section className="hud hud--glass hud--bracket reveal reveal-3 m-2 flex min-h-0 flex-1 flex-col overflow-hidden">
       <div className="flex items-center justify-between border-b border-edge bg-panel px-3 py-2">
         <span className="label">
           <span className="text-signal">▸</span> {active?.title ?? "—"}
@@ -22,7 +22,7 @@ export default function FramePanel({ panels }: { panels: Record<string, FC<{ mod
           so toggling it can't remount the tmux terminal session. */}
       {active?.manage && <ManageBar moduleId={active.id} />}
 
-      <div className="relative min-h-0 flex-1 bg-void">
+      <div className="relative min-h-0 flex-1">
         {/*
           CRITICAL: every iframe module is rendered ONCE here and toggled via
           CSS display. We never conditionally unmount on module switch — a
@@ -33,7 +33,7 @@ export default function FramePanel({ panels }: { panels: Record<string, FC<{ mod
             key={m.id}
             src={m.url}
             title={m.title}
-            className="absolute inset-0 h-full w-full border-0 bg-white"
+            className="absolute inset-0 h-full w-full border-0"
             style={{ display: activeId === m.id ? "block" : "none" }}
           />
         ))}

@@ -128,6 +128,12 @@
     linear-gradient(color-mix(in srgb, var(--color-panel) 92%, transparent), var(--color-panel));
   backdrop-filter: blur(2px);
 }
+/* Glass variant, scoped to the terminal frame: lets the HUD field grid/glow show
+   through the embedded ttyd iframe (whose page renders transparent in-iframe).
+   Other panels keep the solid .hud bg. */
+.hud--glass {
+  background: color-mix(in srgb, var(--color-panel) 38%, transparent);
+}
 .hud--bracket::before,
 .hud--bracket::after {
   content: "";
