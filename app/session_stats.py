@@ -47,7 +47,11 @@ _CACHE_TTL = 30
 _DEFAULT_WINDOW = 5
 _DEFAULT_LIMIT = 200_000
 _IDLE_MIN = 10
+# Anthropic's /usage endpoint is tightly rate-limited and 429s intermittently;
+# reuse the last good reading this long so the strip doesn't flap to the estimate.
+_USAGE_RETAIN = 600
 _cache: tuple[float, dict] | None = None
+_last_usage: dict[str, tuple[float, dict]] = {}
 
 
 def _parse_ts(ts: str) -> datetime | None:
@@ -131,10 +135,28 @@ _USAGE_ADAPTERS = {
 
 
 def _fetch_usage(provider) -> dict | None:
+    """Provider's official usage API, with last-good retention.
+
+    A raw failure (e.g. Anthropic's /usage 429ing every other poll) would flap
+    the strip to the JSONL estimate. So on failure we reuse the last successful
+    reading for up to ``_USAGE_RETAIN`` s: ``reset_at`` is absolute so the
+    countdown stays correct, and ``session_pct`` only goes slightly stale — fine
+    for a slow 5 h/7 d window. Past the window we give up → caller falls back to
+    the estimate.
+    """
     if provider is None:
         return None
     fn = _USAGE_ADAPTERS.get(provider.usage_source)
-    return fn(provider) if fn else None
+    if not fn:
+        return None
+    fresh = fn(provider)
+    if fresh is not None:
+        _last_usage[provider.name] = (time.monotonic(), fresh)
+        return fresh
+    cached = _last_usage.get(provider.name)
+    if cached and time.monotonic() - cached[0] < _USAGE_RETAIN:
+        return cached[1]
+    return None
 
 
 def _scan(path: Path) -> tuple[list[datetime], str | None, int]:

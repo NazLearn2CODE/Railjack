@@ -278,6 +278,41 @@ def test_session_state_api_failure_falls_back(monkeypatch, tmp_path):
     assert st["reset_at"] is not None  # heuristic still supplies a reset
 
 
+def test_fetch_usage_retains_last_good_on_transient_failure(monkeypatch):
+    """A transient API failure (e.g. Anthropic /usage 429) reuses the last good
+    reading instead of dropping to None, so the strip doesn't flap to estimate."""
+    prov = _mk_session().providers[0]
+    prov.usage_source = "anthropic-oauth"
+    good = {"session_pct": 77, "weekly_pct": 12, "reset_at": "2026-07-18T05:19:59+00:00"}
+
+    calls = {"n": 0}
+
+    def flaky():
+        calls["n"] += 1
+        return good if calls["n"] == 1 else None  # first ok, then 429s
+
+    monkeypatch.setattr(session_stats, "_usage_anthropic", flaky)
+    assert session_stats._fetch_usage(prov) == good  # fresh
+    assert session_stats._fetch_usage(prov) == good  # retained across failure
+    assert calls["n"] == 2
+
+
+def test_fetch_usage_drops_after_retention_window(monkeypatch):
+    """Past the retention window a persistent failure yields None → estimate."""
+    prov = _mk_session().providers[0]
+    prov.usage_source = "anthropic-oauth"
+    good = {"session_pct": 77, "weekly_pct": 12, "reset_at": "2026-07-18T05:19:59+00:00"}
+
+    seq = [good, None]
+    monkeypatch.setattr(session_stats, "_usage_anthropic", lambda: seq.pop(0))
+    clock = [1000.0]
+    monkeypatch.setattr(session_stats.time, "monotonic", lambda: clock[0])
+
+    assert session_stats._fetch_usage(prov) == good
+    clock[0] += session_stats._USAGE_RETAIN + 1  # age the cached reading out
+    assert session_stats._fetch_usage(prov) is None
+
+
 # ---------------------------------------------------------------- terminal insert
 
 

@@ -122,14 +122,13 @@ export default function TopBar() {
       : p >= 70
         ? { color: "var(--color-hazard)" }
         : undefined;
-  const resetMs = session?.reset_at ? Date.parse(session.reset_at) : 0;
+  // RESET is shown only for real API telemetry; the JSONL estimate reset (which
+  // used to render as "~h:mm") is noise, so it's dropped entirely.
+  const isApi = session?.source === "api";
+  const resetMs = isApi && session?.reset_at ? Date.parse(session.reset_at) : 0;
   const remaining = resetMs ? Math.max(0, resetMs - now.getTime()) : 0;
   const totalMin = Math.floor(remaining / 60_000);
-  // "~" prefix marks the JSONL fallback estimate; API-sourced shows bare h:mm.
-  const estMark = session?.source === "estimate" ? "~" : "";
-  const resetLabel = resetMs
-    ? `${estMark}${Math.floor(totalMin / 60)}:${String(totalMin % 60).padStart(2, "0")}`
-    : "—";
+  const resetLabel = `${Math.floor(totalMin / 60)}:${String(totalMin % 60).padStart(2, "0")}`;
 
   return (
     <header className="hud hud--bracket reveal reveal-1 m-2 mb-0 flex flex-wrap items-center justify-between gap-2 px-4 py-2">
@@ -227,8 +226,12 @@ export default function TopBar() {
                 </span>
               </>
             )}
-            <span className="label">RESET</span>
-            <span className="mono">{resetLabel}</span>
+            {resetMs > 0 && (
+              <>
+                <span className="label">RESET</span>
+                <span className="mono">{resetLabel}</span>
+              </>
+            )}
           </span>
         ) : (
           <span className="label">IDLE</span>
