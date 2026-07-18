@@ -7,8 +7,9 @@ slash invocation); grouped by the config regex rules.
 ``marketplace_skills`` = skills shipped by installed plugins (dirs under each
 plugin's ``skills/`` that contain a ``SKILL.md``), read from
 ``~/.claude/plugins/installed_plugins.json`` → each entry's ``installPath``;
-grouped by plugin name (marketing first — it's the big set). Same ``/name ``
-slash invocation (non-colliding plugin skills resolve unqualified).
+grouped by plugin name (marketing first — it's the big set). Insert = the
+fully-qualified ``/plugin:name `` slash form (always unambiguous, unlike a bare
+``/name`` that could collide with a personal skill).
 ``mcps`` = ``mcpServers`` keys merged from ``~/.claude.json``: the top-level
 object plus every ``projects.<path>.mcpServers`` scope, deduped by name (insert
 text from the configurable template); grouped by the config regex rules.
@@ -94,9 +95,9 @@ def _installed_plugin_roots() -> list[tuple[str, Path]]:
 def _marketplace_skills() -> list[dict]:
     """Skills shipped by installed plugins, grouped by plugin (uppercased).
 
-    A plugin skill is a ``skills/<name>/`` dir with a ``SKILL.md``. Same ``/name``
-    invocation as personal skills — Claude Code resolves non-colliding plugin
-    skills unqualified. Deduped by (plugin, name).
+    A plugin skill is a ``skills/<name>/`` dir with a ``SKILL.md``. Insert = the
+    fully-qualified ``/plugin:name `` form (Claude Code's unambiguous namespace
+    for plugin skills, e.g. ``/code-review:code-review``). Deduped by (plugin, name).
     """
     out: list[dict] = []
     seen: set[tuple[str, str]] = set()
@@ -111,7 +112,9 @@ def _marketplace_skills() -> list[dict]:
             if key in seen:
                 continue
             seen.add(key)
-            out.append({"name": p.name, "insert": f"/{p.name} ", "group": plugin.upper()})
+            out.append(
+                {"name": p.name, "insert": f"/{plugin}:{p.name} ", "group": plugin.upper()}
+            )
     return out
 
 

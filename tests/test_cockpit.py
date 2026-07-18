@@ -432,9 +432,12 @@ def test_catalog_marketplace_skills_grouped_by_plugin(monkeypatch, tmp_path):
     ms = data["marketplace_skills"]
     # sorted within plugin; "notaskill" (no SKILL.md) excluded
     assert [m["name"] for m in ms] == ["ads", "marketing-plan"]
-    # grouped by uppercased plugin name, /name slash invocation
+    # grouped by uppercased plugin name; fully-qualified /plugin:name insert
     assert all(m["group"] == "MARKETING-SKILLS" for m in ms)
-    assert {m["insert"] for m in ms} == {"/ads ", "/marketing-plan "}
+    assert {m["insert"] for m in ms} == {
+        "/marketing-skills:ads ",
+        "/marketing-skills:marketing-plan ",
+    }
 
 
 def test_catalog_marketplace_skills_missing_file_empty(monkeypatch, tmp_path):
