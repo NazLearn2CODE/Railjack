@@ -128,7 +128,7 @@ function FolderBrowser({
   );
 }
 
-export default function FfmpegPanel({ module }: { module: ModuleConfig }) {
+export default function FfmpegPanel({ module: _module }: { module: ModuleConfig }) {
   const [catalog, setCatalog] = useState<Op[]>(FALLBACK_OPS);
   const [op, setOp] = useState("transcode_h264");
   const [cfg, setCfg] = useState<PanelCfg | null>(null);
@@ -235,10 +235,11 @@ export default function FfmpegPanel({ module }: { module: ModuleConfig }) {
 
   return (
     <div className="flex h-full w-full flex-col gap-2 overflow-auto p-3">
-      <div className="flex items-center gap-2 px-1">
-        <span className="panel-title">{module.title}</span>
-        {live && <span className="label text-signal">RUNNING</span>}
-      </div>
+      {live && (
+        <div className="flex items-center gap-2 px-1">
+          <span className="label text-signal">RUNNING</span>
+        </div>
+      )}
 
       {/* FOOTAGE folders + OUTPUT */}
       <div className="hud hud--bracket reveal reveal-2 flex flex-col gap-2 p-3">

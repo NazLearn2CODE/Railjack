@@ -1,5 +1,6 @@
 import type { FC } from "react";
 import { useStore, type ModuleConfig } from "../store";
+import CockpitControls from "./CockpitControls";
 
 export default function FramePanel({ panels }: { panels: Record<string, FC<{ module: ModuleConfig }>> }) {
   const modules = useStore((s) => s.config?.modules) ?? [];
@@ -10,11 +11,9 @@ export default function FramePanel({ panels }: { panels: Record<string, FC<{ mod
 
   return (
     <section className="hud hud--glass hud--bracket reveal reveal-3 m-2 flex min-h-0 flex-1 flex-col overflow-hidden">
-      <div className="flex items-center justify-between border-b border-edge bg-panel px-3 py-2">
-        <span className="label">
-          <span className="text-signal">▸</span> {active?.title ?? "—"}
-        </span>
-        <span className="label">{active?.kind.toUpperCase()}</span>
+      <div className="flex items-center justify-between gap-2 flex-wrap border-b border-edge bg-panel px-3 py-1.5">
+        <span className="panel-title">▸ {active?.title ?? "—"}</span>
+        <CockpitControls />
       </div>
 
       <div className="relative min-h-0 flex-1">

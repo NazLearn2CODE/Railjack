@@ -7,7 +7,7 @@ import { useStore, type ModuleConfig } from "../store";
  * drives the model downloader (catalog → /download), and runs text-to-image
  * generation (/generate). Two confidence modes: CONFIDENT fires /generate
  * directly; otherwise SEND TO TAWHAN types the request into the tmux pane for
- * human review (mirrors TopBar's /terminal/insert). Mirrors FfmpegPanel's
+ * human review (mirrors CockpitControls' /terminal/insert). Mirrors FfmpegPanel's
  * structure: hud cards, reveal stagger, Pip + progress-bar job rows.
  */
 

@@ -22,6 +22,7 @@ interface Session {
 }
 
 export default function ModuleRail() {
+  const machine = useStore((s) => s.config?.machine);
   const modules = useStore((s) => s.config?.modules) ?? [];
   const activeId = useStore((s) => s.activeModuleId);
   const setActive = useStore((s) => s.setActive);
@@ -58,6 +59,10 @@ export default function ModuleRail() {
 
   return (
     <nav className="hud hud--bracket reveal reveal-2 m-2 flex w-44 shrink-0 flex-col gap-1 p-2">
+      <div className="mb-1 border-b border-edge px-1 pb-2">
+        <div className="panel-title">▸ RAILJACK</div>
+        <div className="label">// {(machine ?? "—").toUpperCase()}</div>
+      </div>
       <span className="label mb-1 px-1">MODULES</span>
       {modules.map((m) => {
         const active = m.id === activeId;

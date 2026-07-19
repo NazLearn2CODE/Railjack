@@ -6,8 +6,7 @@ import { useStore } from "../store";
  * Cockpit catalog dropdowns + config buttons. Each only *types* a short string
  * into the tmux session (POST /api/terminal/insert) — NO Enter — then flips the
  * active module to TERMINAL so the typed text is visible. Naz reviews and
- * presses Enter in the pane. (Telemetry + clock moved to the bottom of
- * ModuleRail.)
+ * presses Enter in the pane. Sits in the FramePanel header row.
  */
 
 interface CatalogEntry {
@@ -25,7 +24,8 @@ const SELECT_STYLE: CSSProperties = {
   background: "var(--color-panel-2)",
   color: "var(--color-phosphor-dim)",
   border: "1px solid var(--color-edge)",
-  padding: "4px 6px",
+  padding: "3px 5px",
+  fontSize: "11px",
 };
 
 /** Group entries preserving first-appearance order (OTHER sinks to its place). */
@@ -54,8 +54,7 @@ function OptGroup({ name, items }: { name: string; items: CatalogEntry[] }) {
   );
 }
 
-export default function TopBar() {
-  const machine = useStore((s) => s.config?.machine);
+export default function CockpitControls() {
   const buttons = useStore((s) => s.config?.buttons) ?? [];
   const [skillSel, setSkillSel] = useState("");
   const [mktSel, setMktSel] = useState("");
@@ -82,81 +81,74 @@ export default function TopBar() {
   const mcps = grouped(catalog?.mcps ?? []);
 
   return (
-    <header className="hud hud--bracket reveal reveal-1 m-2 mb-0 flex flex-wrap items-center justify-between gap-2 px-4 py-2">
-      <div className="flex items-center gap-3">
-        <span className="panel-title">▸ RAILJACK</span>
-        <span className="label">// {(machine ?? "—").toUpperCase()}</span>
-      </div>
-
-      <div className="flex flex-wrap items-center gap-2">
-        <select
-          className="mono label"
-          style={SELECT_STYLE}
-          value={skillSel}
-          onChange={(e) => {
-            const v = e.target.value;
-            if (v) {
-              void insert(v);
-              setSkillSel("");
-            }
-          }}
-        >
-          <option value="" disabled>
-            SKILLS
-          </option>
-          {skills.map((g) => (
-            <OptGroup key={g.name} {...g} />
-          ))}
-        </select>
-
-        {mktSkills.length > 0 && (
-          <select
-            className="mono label"
-            style={SELECT_STYLE}
-            value={mktSel}
-            onChange={(e) => {
-              const v = e.target.value;
-              if (v) {
-                void insert(v);
-                setMktSel("");
-              }
-            }}
-          >
-            <option value="" disabled>
-              MARKETPLACE
-            </option>
-            {mktSkills.map((g) => (
-              <OptGroup key={g.name} {...g} />
-            ))}
-          </select>
-        )}
-
-        <select
-          className="mono label"
-          style={SELECT_STYLE}
-          value={mcpSel}
-          onChange={(e) => {
-            const v = e.target.value;
-            if (v) {
-              void insert(v);
-              setMcpSel("");
-            }
-          }}
-        >
-          <option value="" disabled>
-            MCP
-          </option>
-          {mcps.map((g) => (
-            <OptGroup key={g.name} {...g} />
-          ))}
-        </select>
-
-        {buttons.map((b) => (
-          <button key={b.label} className="btn btn--signal" onClick={() => void insert(b.insert)}>
-            {b.label}
-          </button>
+    <div className="flex flex-wrap items-center gap-1.5">
+      <select
+        className="mono label"
+        style={SELECT_STYLE}
+        value={skillSel}
+        onChange={(e) => {
+          const v = e.target.value;
+          if (v) {
+            void insert(v);
+            setSkillSel("");
+          }
+        }}
+      >
+        <option value="" disabled>
+          SKILLS
+        </option>
+        {skills.map((g) => (
+          <OptGroup key={g.name} {...g} />
         ))}
-      </div>
-    </header>
+      </select>
+
+      {mktSkills.length > 0 && (
+        <select
+          className="mono label"
+          style={SELECT_STYLE}
+          value={mktSel}
+          onChange={(e) => {
+            const v = e.target.value;
+            if (v) {
+              void insert(v);
+              setMktSel("");
+            }
+          }}
+        >
+          <option value="" disabled>
+            MARKETPLACE
+          </option>
+          {mktSkills.map((g) => (
+            <OptGroup key={g.name} {...g} />
+          ))}
+        </select>
+      )}
+
+      <select
+        className="mono label"
+        style={SELECT_STYLE}
+        value={mcpSel}
+        onChange={(e) => {
+          const v = e.target.value;
+          if (v) {
+            void insert(v);
+            setMcpSel("");
+          }
+        }}
+      >
+        <option value="" disabled>
+          MCP
+        </option>
+        {mcps.map((g) => (
+          <OptGroup key={g.name} {...g} />
+        ))}
+      </select>
+
+      {buttons.map((b) => (
+        <button key={b.label} className="btn btn--signal btn--compact" onClick={() => void insert(b.insert)}>
+          {b.label}
+        </button>
+      ))}
+    </div>
   );
 }

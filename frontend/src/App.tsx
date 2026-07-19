@@ -2,7 +2,6 @@ import { useEffect } from "react";
 import type { FC } from "react";
 import { fetchJSON, usePolling } from "./api";
 import { useStore, type AppConfig, type ModuleConfig } from "./store";
-import TopBar from "./components/TopBar";
 import ModuleRail from "./components/ModuleRail";
 import FramePanel from "./components/FramePanel";
 import FfmpegPanel from "./components/FfmpegPanel";
@@ -73,7 +72,6 @@ export default function App() {
       <div className="scanlines" />
       <div className="grain" />
       <div className="relative z-10 flex h-full w-full flex-col">
-        <TopBar />
         <div className="flex min-h-0 flex-1">
           <ModuleRail />
           <FramePanel panels={PANELS} />

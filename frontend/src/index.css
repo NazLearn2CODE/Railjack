@@ -287,6 +287,12 @@
   background: color-mix(in srgb, var(--color-signal) 18%, var(--color-panel));
   box-shadow: 0 0 14px color-mix(in srgb, var(--color-signal) 35%, transparent);
 }
+/* Slim cockpit buttons for the frame-panel header row. */
+.btn--compact {
+  font-size: 11px;
+  padding: 3px 8px;
+  letter-spacing: 0.1em;
+}
 .btn--hazard:hover:not(:disabled) {
   border-color: var(--color-hazard);
   color: var(--color-hazard);
