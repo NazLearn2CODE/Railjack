@@ -44,6 +44,12 @@ modules:
     options:
       output_dir: "~/Downloads/NotebookLM Outputs"
       browse_root: "~"
+  - id: n8n
+    title: N8N
+    kind: iframe
+    url: http://127.0.0.1:5678/
+    health: { type: http, url: "http://127.0.0.1:5678/healthz" }
+    manage: { type: systemd-user, unit: n8n.service }
 
 # M6 cockpit — session telemetry, terminal buttons, catalog grouping.
 
