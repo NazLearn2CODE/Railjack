@@ -307,3 +307,39 @@ def test_catalog_endpoint_fit_and_installed(comfy_opts, monkeypatch):
     assert e["installed"] is True
     assert e["components"][0]["installed"] is True
     assert "verified" not in e["components"][0]   # verified is YAML-only
+
+
+# ---------------------------------------------------------------- delete / uninstall
+
+def test_delete_removes_installed_component_files(comfy_opts, monkeypatch):
+    entry = {"id": "t", "components": [
+        {"folder": "checkpoints", "filename": "a.safetensors", "url": "http://u/a", "size_gb": 1},
+        {"folder": "vae", "filename": "b.safetensors", "url": "http://u/b", "size_gb": 1},
+    ]}
+    monkeypatch.setattr(comfyui, "_catalog", lambda: (entry,))
+    ck = comfy_opts["models"] / "checkpoints"; ck.mkdir()
+    vae = comfy_opts["models"] / "vae"; vae.mkdir()
+    a = ck / "a.safetensors"; a.write_bytes(b"x")
+    b = vae / "b.safetensors"; b.write_bytes(b"y")
+    out = asyncio.run(comfyui.delete(comfyui.DeleteBody(entry_id="t")))
+    assert not a.exists() and not b.exists()
+    assert len(out["deleted"]) == 2
+
+
+def test_delete_404_unknown_entry(comfy_opts, monkeypatch):
+    monkeypatch.setattr(comfyui, "_catalog", lambda: ())
+    with pytest.raises(HTTPException) as ex:
+        asyncio.run(comfyui.delete(comfyui.DeleteBody(entry_id="ghost")))
+    assert ex.value.status_code == 404
+
+
+def test_delete_skips_missing_and_refuses_path_escape(comfy_opts, monkeypatch):
+    # missing file is skipped (no error); a folder escaping models_dir is refused.
+    entry = {"id": "t", "components": [
+        {"folder": "checkpoints", "filename": "gone.safetensors", "url": "http://u", "size_gb": 1},
+        {"folder": "../../etc", "filename": "passwd", "url": "http://u", "size_gb": 1},
+    ]}
+    monkeypatch.setattr(comfyui, "_catalog", lambda: (entry,))
+    ck = comfy_opts["models"] / "checkpoints"; ck.mkdir()
+    out = asyncio.run(comfyui.delete(comfyui.DeleteBody(entry_id="t")))
+    assert out["deleted"] == []

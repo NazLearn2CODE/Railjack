@@ -1,4 +1,4 @@
-import { useEffect, useState, type ChangeEvent } from "react";
+import { useCallback, useEffect, useState, type ChangeEvent } from "react";
 import { fetchJSON, usePolling } from "../api";
 import { useStore, type ModuleConfig } from "../store";
 
@@ -100,13 +100,14 @@ export default function ComfyPanel({ module }: { module: ModuleConfig }) {
   const jobs = jobsData?.jobs ?? [];
   const files = [...(outData?.files ?? [])].sort((a, b) => b.mtime - a.mtime);
 
-  // Bootstrap catalog + installed (one-shot, like FfmpegPanel's panel/luts fetch).
-  useEffect(() => {
+  // Catalog + installed (re-fetched on mount and after an uninstall).
+  const refresh = useCallback(() => {
     fetchJSON<{ entries: CatalogEntry[] }>("/api/comfyui/catalog")
       .then((r) => setCatalog(r.entries)).catch(() => setCatalog([]));
     fetchJSON<Installed>("/api/comfyui/installed")
       .then(setInstalled).catch(() => {});
   }, []);
+  useEffect(() => { refresh(); }, [refresh]);
 
   // Keep the saved model valid once the installed list lands.
   useEffect(() => {
@@ -156,6 +157,17 @@ export default function ComfyPanel({ module }: { module: ModuleConfig }) {
         body: JSON.stringify({ entry_id }),
       });
     } catch { /* jobs card surfaces failures */ }
+  };
+
+  const uninstall = async (entry_id: string) => {
+    try {
+      await fetchJSON<{ deleted: string[] }>("/api/comfyui/delete", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ entry_id }),
+      });
+      refresh();
+    } catch { /* non-fatal */ }
   };
 
   const compose = () => {
@@ -302,7 +314,18 @@ export default function ComfyPanel({ module }: { module: ModuleConfig }) {
                       {e.size_gb} GB · {e.components.length} files
                     </span>
                     {e.installed ? (
-                      <span className="label whitespace-nowrap" style={{ color: "var(--color-go)" }}>✓ INSTALLED</span>
+                      <span className="flex items-center gap-1 whitespace-nowrap">
+                        <span className="label" style={{ color: "var(--color-go)" }}>✓ INSTALLED</span>
+                        <button
+                          className="btn btn--crit"
+                          title="Delete this model's files from disk"
+                          onClick={() => {
+                            if (window.confirm(`Delete ${e.name} and its files? Re-download anytime.`)) uninstall(e.id);
+                          }}
+                        >
+                          DELETE
+                        </button>
+                      </span>
                     ) : (
                       <button
                         className="btn whitespace-nowrap"

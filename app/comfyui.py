@@ -373,6 +373,10 @@ class DownloadBody(BaseModel):
     entry_id: str
 
 
+class DeleteBody(BaseModel):
+    entry_id: str
+
+
 class GenerateBody(BaseModel):
     prompt: str
     negative: str | None = None
@@ -444,6 +448,23 @@ async def download(body: DownloadBody) -> dict:
         task.add_done_callback(_BG.discard)
         ids.append(jid)
     return {"job_ids": ids}
+
+
+@router.post("/api/comfyui/delete")
+async def delete(body: DeleteBody) -> dict:
+    """Uninstall an entry: delete its installed component files (catalog stays)."""
+    e = next((x for x in _catalog() if x["id"] == body.entry_id), None)
+    if not e:
+        raise HTTPException(404, "unknown catalog entry")
+    models_dir = _models_dir()
+    deleted: list[str] = []
+    for c in e.get("components", []):
+        for folder in _FOLDER_ALIASES.get(c["folder"], (c["folder"],)):
+            p = (models_dir / folder / c["filename"]).resolve()
+            if _under(p, [models_dir]) and p.is_file():
+                p.unlink()
+                deleted.append(str(p))
+    return {"deleted": deleted}
 
 
 @router.post("/api/comfyui/generate")
