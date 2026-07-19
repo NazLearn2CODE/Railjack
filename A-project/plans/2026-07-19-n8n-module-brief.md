@@ -1,9 +1,6 @@
 # N8N module for home Railjack — build brief (self-contained)
 
-**Status: PLANNED — not started.** Update this line as phases land
-(`PHASE A DONE`, etc.). If you are a fresh agent (GLM-5 / GLM-5.2 / anyone)
-picking this up cold: this file is the whole spec — read it top to bottom,
-then check § Progress log at the bottom for where the last agent stopped.
+**Status: PHASE A DONE · PHASE B DONE · Phase C helpers pre-written (inert) — BLOCKED on Naz's manual browser step (C.1: owner account + API key).** Verify A + B green; Verify C NOT-VERIFIED (needs the key). Next: Naz does C.1 in a browser, then any agent runs Verify C and proceeds to Phase D. If you are a fresh agent picking this up cold: this file is the whole spec — read it top to bottom, then check § Progress log at the bottom for where the last agent stopped.
 
 ## Context (why / who)
 
@@ -178,4 +175,23 @@ the key); `trigger.sh --test` round-trips against a scratch Webhook workflow.
   via CSS → switching modules never remounts any iframe, terminal included);
   `.venv/bin/pytest -q` = **154 passed** (1 pre-existing Starlette/httpx
   deprecation warning, unrelated). NOTE: brief's `app/tests/` path is actually
-  `./tests/` at repo root — tests found and green there.
+  `./tests/` at repo root — tests found and green there. Local commit
+  `6d920b5` on `feat/n8n-module` (NO push — Phase D's job, shared-main push
+  forbidden).
+- 2026-07-19 GLM-5 (builder): **Phase C helpers PRE-WRITTEN, inert.** Wrote
+  `~/n8n/trigger.sh` (`--test` toggle, POST to `/webhook[-test]/<path>`, no key
+  needed) and `~/n8n/api.sh` (sources `~/n8n/.secrets.env`, wraps
+  `curl -H "X-N8N-API-KEY: $N8N_API_KEY"` against `/api/v1/*`); both `chmod +x`,
+  loopback-only (`http://127.0.0.1:5678`), arg-usage guards. Self-checks (run,
+  not diff-read): trigger.sh no-arg → exit 2 + usage; trigger.sh probe POST to
+  `/__naz_probe__` → n8n answered **404** (webhook router live, URL constructed
+  correctly — curl's real exit was 22, the `head`-pipe `$?` read 0, cosmetic
+  only); api.sh missing-key guard fires → `N8N_API_KEY not set` exit 2 (correct
+  — `.secrets.env` has only the encryption key so far). **STOPPED before Phase
+  C step 1 as instructed:** did NOT create the n8n owner account and did NOT
+  mint the API key (Naz's manual browser step; ttyd blocks paste). **Verify C
+  = NOT-VERIFIED, blocked on Naz** — `api.sh GET /workflows` 200 and
+  `trigger.sh --test` round-trip both need the key + a scratch webhook workflow,
+  which only exist after Naz's manual step. BLOCKER for next agent/Naz: (1) do
+  Phase C step 1 in a browser at `http://localhost:5678`, (2) append
+  `N8N_API_KEY=...` to `~/n8n/.secrets.env` (mode 600), (3) run Verify C.
