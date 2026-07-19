@@ -338,3 +338,17 @@ remain Cephalon-session work (Tawhan).
   xterm input automation is fragile) — the guarantee is the shared tmux
   session, which both clients attach to (brief: "Already true on this box").
   Browser check = VERIFIED. Local commit pending on `feat/n8n-module`.
+- 2026-07-19 GLM-5 (builder): **Phase F committed `cdc3264`** on
+  `feat/n8n-module`.
+- 2026-07-19 GLM-5 (builder): **Phase D′ DONE — VERIFIED.** Pre-state: local
+  `main` (`8ec4ad5`) was a strict ancestor of `feat/n8n-module` (`cdc3264`) →
+  no divergence; somatic `machine/railjack` sat at `8ec4ad5` too → push would
+  be fast-forward, no force. Executed: `git checkout main` →
+  `git merge --ff-only feat/n8n-module` (linear, `8ec4ad5..cdc3264`, no merge
+  commit) → `git push somatic main:machine/railjack` (explicit refspec, so it
+  CANNOT reach shared `main`). Post-state verified via `git ls-remote somatic`:
+  `refs/heads/machine/railjack` = `cdc3264` (advanced, FF), `refs/heads/main`
+  (shared) = `8f2928d` **unchanged** — the 2026-07-18 force-push rule held.
+  No force used anywhere. Vault/hot.md updates deliberately NOT done by this
+  builder — Cephalon-session work per the brief (Tawhan/Naz). **All phases
+  (A, B, C, E, F, D′) now VERIFIED and landed.**
