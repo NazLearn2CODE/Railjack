@@ -1,7 +1,7 @@
 import { useEffect, memo } from "react";
 import type { FC } from "react";
 import { fetchJSON, usePolling } from "./api";
-import { useStore, type AppConfig, type ModuleConfig } from "./store";
+import { useStore, dockOpenFor, type AppConfig, type ModuleConfig } from "./store";
 import ModuleRail from "./components/ModuleRail";
 import FramePanel from "./components/FramePanel";
 import FfmpegPanel from "./components/FfmpegPanel";
@@ -46,6 +46,8 @@ export default function App() {
   const setConfig = useStore((s) => s.setConfig);
   const setHealth = useStore((s) => s.setHealth);
   const config = useStore((s) => s.config);
+  const activeModuleId = useStore((s) => s.activeModuleId);
+  const dockOpen = useStore((s) => s.dockOpen);
 
   useEffect(() => {
     let alive = true;
@@ -94,6 +96,13 @@ export default function App() {
     }
   }, [config]);
 
+  // LIVE dock renders when a top-level `dock:` is configured AND the top-bar
+  // LIVE button is toggled on for the active module. The initial per-module
+  // state comes from the `live_dock` YAML default (n8n open, others closed);
+  // the button (in FramePanel) lets Naz override it live on any module.
+  const activeModule = config?.modules.find((m) => m.id === activeModuleId);
+  const showDock = Boolean(config?.dock) && dockOpenFor(dockOpen, activeModule);
+
   return (
     <div className="field relative h-full w-full">
       <div className="scanlines" />
@@ -103,7 +112,7 @@ export default function App() {
           <ModuleRail />
           <FramePanel panels={PANELS} />
         </div>
-        {config?.dock && (
+        {showDock && config?.dock && (
           <LiveDock
             title={config.dock.title}
             url={config.dock.url}

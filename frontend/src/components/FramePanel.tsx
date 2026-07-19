@@ -1,5 +1,5 @@
 import type { FC } from "react";
-import { useStore, type ModuleConfig } from "../store";
+import { useStore, dockOpenFor, type ModuleConfig } from "../store";
 import CockpitControls from "./CockpitControls";
 
 export default function FramePanel({ panels }: { panels: Record<string, FC<{ module: ModuleConfig }>> }) {
@@ -9,10 +9,33 @@ export default function FramePanel({ panels }: { panels: Record<string, FC<{ mod
   const iframeMods = modules.filter((m) => m.kind === "iframe");
   const Panel = active?.panel ? panels[active.panel] : undefined;
 
+  // LIVE dock toggle. The button only appears when a `dock:` is configured for
+  // this machine; it flips the dock open/closed for the current module. Its
+  // highlighted state mirrors whether the dock is currently showing.
+  const hasDock = useStore((s) => Boolean(s.config?.dock));
+  const dockOpen = useStore((s) => s.dockOpen);
+  const toggleDock = useStore((s) => s.toggleDock);
+  const liveOn = dockOpenFor(dockOpen, active ?? undefined);
+
   return (
     <section className="hud hud--glass hud--bracket reveal reveal-3 m-2 flex min-h-0 flex-1 flex-col overflow-hidden">
       <div className="flex items-center justify-between gap-2 flex-wrap border-b border-edge bg-panel px-3 py-1.5">
-        <span className="panel-title">▸ {active?.title ?? "—"}</span>
+        <div className="flex items-center gap-2">
+          <span className="panel-title">▸ {active?.title ?? "—"}</span>
+          {hasDock && active && (
+            <button
+              onClick={() => toggleDock(active.id)}
+              // btn--compact matches the BOOTSTRAP button's height (3px/8px pad,
+              // 11px font). Highlighted (btn--signal) when open, dim otherwise.
+              className={`btn btn--compact hud--bracket flex items-center gap-1.5 ${liveOn ? "btn--signal" : "opacity-60"}`}
+              title={liveOn ? "Hide the LIVE terminal" : "Show the LIVE terminal"}
+              aria-pressed={liveOn}
+            >
+              <span className={liveOn ? "pip pip--go" : "pip"} aria-hidden />
+              <span>LIVE</span>
+            </button>
+          )}
+        </div>
         <CockpitControls />
       </div>
 

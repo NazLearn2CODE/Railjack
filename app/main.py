@@ -50,6 +50,9 @@ def _sanitize(m: Module) -> dict:
         out["panel"] = m.panel
     out["health"] = m.health is not None
     out["manage"] = m.manage is not None
+    # Per-module opt-in for the LIVE terminal dock (default False). The frontend
+    # only renders the dock when the ACTIVE module has this true.
+    out["live_dock"] = m.live_dock
     # start_timeout_s is safe to expose (no argv/units): the UI keeps a module's
     # pip amber "STARTING…" for this long after a fire-and-forget (pending) start.
     if m.manage is not None:
