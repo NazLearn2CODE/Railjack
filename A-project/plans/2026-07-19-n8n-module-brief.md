@@ -141,6 +141,69 @@ the key); `trigger.sh --test` round-trips against a scratch Webhook workflow.
 - Verify by running (curl/pytest/browser), then report VERIFIED/NOT-VERIFIED
   per phase honestly.
 
+## Phase E — n8n iframe fix (cookie site mismatch)
+
+**Diagnosis (Tawhan, 2026-07-19):** Verify C now PASSES (Naz minted the key;
+`api.sh GET /workflows` → 200). But the n8n tab renders blank in the hub.
+`curl -sI 127.0.0.1:5678/` shows **no** X-Frame-Options/CSP headers — not a
+frame block. Cause: the hub is browsed at `localhost:8700` while the module
+iframe src is `127.0.0.1:5678` — browsers treat localhost vs 127.0.0.1 as
+DIFFERENT sites, so n8n's auth cookie is third-party → blocked → editor never
+boots. (ttyd works because it has no cookies. Tasai's Somatic config has the
+same mismatch — same symptom there.)
+
+1. In `configs/tawhan.yaml` change the n8n module `url` to
+   `http://localhost:5678/` (leave `health:` on 127.0.0.1 — that's
+   server-side curl, unaffected). Restart the Railjack service.
+2. Verify: load `http://localhost:8700`, switch to N8N — the editor UI must
+   actually render (signin/setup page or canvas), not blank. Automate if you
+   can (playwright-cli skill exists on this machine — screenshot the hub with
+   the N8N module active); otherwise mark BROWSER-CHECK-PENDING for Naz.
+3. **Fallback if the localhost swap is NOT enough:** add a reverse-proxy route
+   in `app/main.py` (`/n8n/{path:path}` → `127.0.0.1:5678`, stream, keep
+   headers) and set `N8N_PATH=/n8n/` + `N8N_EDITOR_BASE_URL=http://localhost:8700/n8n/`
+   in `~/n8n/n8n.env`, iframe src `/n8n/` (same-origin, cookies first-party by
+   construction). Only build this if step 1 verifiably fails.
+
+## Phase F — bottom live-terminal dock (shared tmux session)
+
+Naz's ask: a persistent terminal strip at the BOTTOM of the screen, visible
+regardless of which module is active, so he can watch builds happen while
+prompting. It must mirror the SAME tmux session as the TERMINAL module.
+
+**Already true on this box (verified):** ttyd runs `tmux new -A -s main` — every
+ttyd client attaches to the same session — and global `window-size latest` is
+set (tmux 3.7b), so a small dock client won't shrink the main terminal view.
+So the dock is just a SECOND iframe to the same ttyd URL. Zero terminal infra.
+
+1. Config (`app/config.py`): add an optional top-level `dock:` to AppConfig:
+   ```yaml
+   dock:
+     title: LIVE
+     url: http://localhost:7681
+     height: 220
+   ```
+   Optional field, default None; serve it through `/api/config`. Add a pydantic
+   test mirroring existing config tests.
+2. Frontend (`App.tsx`): when `config.dock` exists, render below the main
+   flex row: a strip `hud hud--glass hud--bracket m-2 mt-0` with fixed height
+   from config, containing (a) a slim header row (`border-b border-edge px-3
+   py-1` with `▸ LIVE` in `.panel-title`), and (b) the iframe
+   (`h-full w-full border-0`). Render ONCE, never unmount, always visible.
+   Follow `~/Cephalon/20-projects/railjack-design-language.md` — hud bracket
+   corners, no radius, glass so the field shows through the transparent ttyd.
+   Main row keeps `flex-1 min-h-0`; dock is `shrink-0`.
+3. Verify: pytest green, `frontend` build (tsc + vite) clean, `/api/config`
+   returns the dock block, browser: dock visible under every module, typing in
+   the dock mirrors in the TERMINAL module (same session) — screenshot via
+   playwright-cli if possible, else BROWSER-CHECK-PENDING.
+
+## Phase D′ — wrap-up (revised)
+
+After E+F verified: commit on `feat/n8n-module`, merge to local `main`,
+push **only** `git push somatic main:machine/railjack`. Vault/hot.md updates
+remain Cephalon-session work (Tawhan).
+
 ## Progress log (append here, newest last)
 
 - 2026-07-19 Tawhan (Fable): brief written; nothing built yet.
@@ -195,3 +258,49 @@ the key); `trigger.sh --test` round-trips against a scratch Webhook workflow.
   which only exist after Naz's manual step. BLOCKER for next agent/Naz: (1) do
   Phase C step 1 in a browser at `http://localhost:5678`, (2) append
   `N8N_API_KEY=...` to `~/n8n/.secrets.env` (mode 600), (3) run Verify C.
+- 2026-07-19 GLM-5 (builder): **Verify C re-confirmed GREEN** (you said it passed;
+  I re-checked). `N8N_API_KEY` present in `~/n8n/.secrets.env` (mode 600). Raw
+  `curl -H X-N8N-API-Key GET /api/v1/workflows` = **200** `{"data":[],"nextCursor":null}`,
+  stable 5/5 polls. NOTE: `api.sh GET /workflows` intermittently prints a 500
+  (curl exit 22 from its `-fsS`) — n8n's transient runner-broker flakiness on
+  first hit (documented Orokin gotcha), NOT a config error; immediate retry
+  returns 200. No action needed.
+- 2026-07-19 GLM-5 (builder): **Phase E DONE — VERIFIED (reverse-proxy fallback
+  REQUIRED; the localhost swap alone was insufficient).** Tried step 1 (one-line
+  `url: http://localhost:5678/`) FIRST per the brief — **it verifiably failed**:
+  real python-playwright (the `playwright-cli` wrapper is NOT installed on this
+  box; used `/usr/bin/python3` + the cached Chromium instead) loaded
+  `http://localhost:8700#n8n` and the browser console logged `Refused to display
+  'http://localhost:5678/' in a frame because it set 'X-Frame-Options' to
+  'sameorigin'.` Root cause CORRECTS the brief's diagnosis: the blocker is
+  **origin** (localhost:8700 ≠ localhost:5678 → different origin → n8n's own
+  `X-Frame-Options: SAMEORIGIN` refuses), not only the cookie-site mismatch.
+  (Why Tawhan's `curl -sI` missed it: n8n emits X-Frame-Options on **GET**, not
+  **HEAD** — `curl -s -D -` shows it, `curl -sI` does not.) So built the
+  reverse-proxy fallback. Implementation: new `app/n8n_proxy.py` (httpx async
+  streaming reverse proxy, mounted before the catch-all static mount in
+  `app/main.py`), iframe `url: /n8n/` (same-origin by construction). n8n env
+  gains `N8N_PATH=/n8n/` + `N8N_EDITOR_BASE_URL=http://localhost:8700/n8n/` in
+  `~/n8n/n8n.env` (host-level, not committed). Four bugs hit + fixed in order:
+  (1) `StreamingResponse(headers=list)` → `'list' has no attribute items'`;
+  fixed with `Headers(raw=[(bytes,bytes)])` to preserve duplicate Set-Cookie.
+  (2) Proxy preserved the `/n8n` prefix → n8n served SPA-fallback HTML for
+  assets (assets live at root, dynamic app under /n8n/); fixed by **stripping**
+  the prefix. (3) Browser rendered raw gzip bytes (iframe body was binary,
+  empty title): httpx streaming `aiter_bytes()` does NOT auto-decompress in
+  0.28.1; fixed by forcing `Accept-Encoding: identity` upstream (loopback,
+  bandwidth free) — dropping the inbound value was insufficient because
+  `httpx.AsyncClient()` re-adds `gzip, deflate` by default. Root paths
+  `/healthz`, `/api/v1`, `/webhook` stay at root on the direct port →
+  server-side health + `api.sh` **not regressed**. Evidence: `curl -H
+  'Accept-Encoding: gzip, br' http://localhost:8700/n8n/` = 200 text/html
+  20672 B, starts `<!DOCTYPE html>`; assets via proxy now `text/javascript`
+  (697322 B); browser DOM probe: `iframeUrl=http://localhost:8700/n8n/signin`,
+  `docTitle="n8n.io - Workflow Automation"`, `#app` mounted, `bodyText="Sign in
+  Email Password Sign in Forgot my password"`, **0 pageerrors** (the lone
+  console 401 is the expected unauthenticated auth-check in a fresh browser
+  context). `pytest -q` = **157 passed** (was 154; +3 in new
+  `tests/test_n8n_proxy.py`: prefix strip, identity forcing, query passthrough
+  via a stdlib `http.server` stub — no real n8n needed). Screenshot
+  `/tmp/railjack-n8n-final.png`. Browser check = VERIFIED (real headless
+  Chromium). Local commit pending on `feat/n8n-module`.

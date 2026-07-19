@@ -47,7 +47,11 @@ modules:
   - id: n8n
     title: N8N
     kind: iframe
-    url: http://127.0.0.1:5678/
+    # Phase E: same-origin via the hub's /n8n/ reverse proxy (app/n8n_proxy.py).
+    # Relative so it resolves against the hub origin (localhost:8700) → fixes
+    # n8n's X-Frame-Options:SAMEORIGIN + third-party-cookie block. n8n env has
+    # N8N_PATH=/n8n/ so its assets prefix correctly.
+    url: /n8n/
     health: { type: http, url: "http://127.0.0.1:5678/healthz" }
     manage: { type: systemd-user, unit: n8n.service }
 
