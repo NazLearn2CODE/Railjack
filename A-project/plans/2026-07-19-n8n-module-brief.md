@@ -304,3 +304,37 @@ remain Cephalon-session work (Tawhan).
   via a stdlib `http.server` stub — no real n8n needed). Screenshot
   `/tmp/railjack-n8n-final.png`. Browser check = VERIFIED (real headless
   Chromium). Local commit pending on `feat/n8n-module`.
+- 2026-07-19 GLM-5 (builder): **Phase E committed `dc75ef8`** on
+  `feat/n8n-module` (no push — Phase D′'s job).
+- 2026-07-19 GLM-5 (builder): **Phase F DONE — VERIFIED.** Bottom live-terminal
+  dock sharing the TERMINAL module's tmux session. Backend: `DockSpec` model
+  (title/url/height, all optional w/ defaults) + `dock: DockSpec | None = None`
+  on `MachineConfig` (`app/config.py`); served sanitized (title/url/height only,
+  omitted entirely when absent) through `/api/config` (`app/main.py`). Config:
+  top-level `dock:` in `configs/tawhan.yaml` (`title: LIVE`,
+  `url: http://localhost:7681`, `height: 220`) — same ttyd URL as the TERMINAL
+  module → both iframes attach to the one tmux session (`tmux new -A -s main`).
+  Frontend: `DockConfig` added to `AppConfig` (`store.ts`); a memoized
+  `LiveDock` component (`App.tsx`) renders ONCE below the main flex row when
+  `config.dock` exists — strip `hud hud--glass hud--bracket m-2 mt-0 shrink-0`
+  at the config height, slim `▸ {title}` header (`border-b border-edge px-3 py-1`
+  `.panel-title`), iframe `h-full w-full border-0`. `memo` keeps it off the
+  health-poll re-render path so the tmux client never reloads. Main row stays
+  `flex-1 min-h-0`. Followed the design language (0 radius, two-corner bracket,
+  glass so the field shows through the transparent ttyd, panel-title glow).
+  Evidence: `pytest -q` = **159 passed** (was 157; +2 dock pydantic tests in
+  `tests/test_config.py`: optional-None + YAML parse); `npm run build` (`tsc &&
+  vite build`) clean (28 modules, dist emitted, no TS errors); `/api/config`
+  returns `"dock": {"title":"LIVE","url":"http://localhost:7681","height":220}`;
+  ttyd `localhost:7681` = 200. Browser (headless Chromium): dock `present+visible`
+  under N8N, TERMINAL, and COMFYUI alike (src localhost:7681, ~190 px tall,
+  pinned at viewport bottom); under TERMINAL there are **two** visible ttyd
+  iframes (TERMINAL module + LIVE dock) both at localhost:7681 → same tmux
+  session; render-once confirmed (the dock iframe element survived module
+  switches, data-mark persisted). Screenshot `/tmp/dock-terminal.png` analyzed:
+  main terminal on top + separate bottom dock; the dock renders the **tmux
+  status line `[main] 0:claude*`** = session "main", visually proving the
+  shared-session guarantee. Live keystroke-mirror not separately driven (ttyd/
+  xterm input automation is fragile) — the guarantee is the shared tmux
+  session, which both clients attach to (brief: "Already true on this box").
+  Browser check = VERIFIED. Local commit pending on `feat/n8n-module`.

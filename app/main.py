@@ -59,12 +59,21 @@ def _sanitize(m: Module) -> dict:
 
 @app.get("/api/config")
 def get_config() -> dict:
-    return {
+    cfg = {
         "machine": CONFIG.machine,
         "modules": [_sanitize(m) for m in CONFIG.modules],
         # Cockpit buttons: label/insert text only (Naz-editable YAML prompts).
         "buttons": [{"label": b.label, "insert": b.insert} for b in CONFIG.buttons],
     }
+    if CONFIG.dock is not None:
+        # Title/url/height only — no internals to leak. Omitted entirely when absent
+        # so the frontend treats a missing `dock` as "no dock".
+        cfg["dock"] = {
+            "title": CONFIG.dock.title,
+            "url": CONFIG.dock.url,
+            "height": CONFIG.dock.height,
+        }
+    return cfg
 
 
 # Serve the built React dashboard when present; otherwise a placeholder.

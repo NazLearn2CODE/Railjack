@@ -75,6 +75,16 @@ class CatalogSpec(BaseModel):
     groups: list[CatalogGroup] = []
 
 
+class DockSpec(BaseModel):
+    """Phase F: optional always-visible bottom terminal dock. Its iframe points
+    at the same ttyd URL as the TERMINAL module, so both clients attach to the
+    one tmux session (`tmux new -A -s main`) — typing in one mirrors in the other."""
+
+    title: str = "LIVE"
+    url: str
+    height: int = 220
+
+
 class MachineConfig(BaseModel):
     machine: str
     hostnames: list[str]
@@ -82,6 +92,7 @@ class MachineConfig(BaseModel):
     providers: list[Provider] = []
     buttons: list[Button] = []
     catalog: CatalogSpec = CatalogSpec()
+    dock: DockSpec | None = None
 
 
 def _available() -> list[Path]:

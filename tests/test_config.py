@@ -59,3 +59,25 @@ def test_no_configs_at_all(monkeypatch, tmp_path):
     monkeypatch.delenv("RAILJACK_CONFIG", raising=False)
     with pytest.raises(RuntimeError):
         config.select_config()
+
+
+def test_dock_optional_defaults_none():
+    # No `dock:` key → the field is None, so the frontend renders no dock.
+    cfg = config.MachineConfig(machine="x", hostnames=["x"], modules=[])
+    assert cfg.dock is None
+
+
+def test_dock_parses_from_yaml(monkeypatch, tmp_path):
+    (tmp_path / "x.yaml").write_text(
+        "machine: x\nhostnames: [x]\nmodules: []\n"
+        "dock:\n  title: LIVE\n  url: http://localhost:7681\n  height: 220\n"
+    )
+    monkeypatch.setattr(config, "CONFIG_DIR", tmp_path)
+    monkeypatch.delenv("RAILJACK_CONFIG", raising=False)
+    monkeypatch.setattr(config.socket, "gethostname", lambda: "x")
+    cfg = config.select_config()
+    assert cfg.dock is not None
+    assert cfg.dock.title == "LIVE"
+    assert cfg.dock.url == "http://localhost:7681"
+    assert cfg.dock.height == 220
+

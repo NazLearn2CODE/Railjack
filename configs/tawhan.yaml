@@ -55,6 +55,14 @@ modules:
     health: { type: http, url: "http://127.0.0.1:5678/healthz" }
     manage: { type: systemd-user, unit: n8n.service }
 
+# Phase F: always-visible bottom terminal dock. Same ttyd URL as the TERMINAL
+# module → both attach to the one tmux session (tmux new -A -s main); typing in
+# the dock mirrors in TERMINAL and vice versa. Optional; omit `dock:` to hide.
+dock:
+  title: LIVE
+  url: http://localhost:7681
+  height: 220
+
 # M6 cockpit — session telemetry, terminal buttons, catalog grouping.
 
 providers:

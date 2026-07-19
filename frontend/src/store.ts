@@ -16,10 +16,17 @@ export interface CockpitButton {
   insert: string;
 }
 
+export interface DockConfig {
+  title: string;
+  url: string;
+  height: number;
+}
+
 export interface AppConfig {
   machine: string;
   modules: ModuleConfig[];
   buttons?: CockpitButton[];
+  dock?: DockConfig;
 }
 
 interface State {
