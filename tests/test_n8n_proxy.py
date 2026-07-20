@@ -13,7 +13,6 @@ import http.server
 import threading
 from contextlib import contextmanager
 
-import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 

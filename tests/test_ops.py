@@ -124,11 +124,49 @@ def test_speed_no_audio_uses_vf():
     ("mirrorh", "hflip"),
     ("mirrorv", "vflip"),
     ("grayscale", "hue=s=0"),
+    # 2026-07-20 LOOK batch (incl. the M6.4-deferred fixed-step color trims)
+    ("sepia", "colorchannelmixer=.393"),
+    ("warm", "colortemperature=temperature=4500"),
+    ("cool", "colortemperature=temperature=8500"),
+    ("vibrance", "vibrance=intensity=0.4"),
+    ("brightness_up", "eq=brightness=0.06"),
+    ("brightness_down", "eq=brightness=-0.06"),
+    ("contrast_up", "eq=contrast=1.15"),
+    ("contrast_down", "eq=contrast=0.9"),
+    ("saturation_up", "eq=saturation=1.3"),
+    ("saturation_down", "eq=saturation=0.7"),
+    # 2026-07-20 EFFECTS batch
+    ("negative", "negate"),
+    ("posterize", "lutrgb=r=round(val/51)*51"),
+    ("pixelize", "pixelize=width=16:height=16"),
+    ("cartoon", "edgedetect=mode=colormix"),
+    ("deband", "deband"),
+    ("deflicker", "deflicker"),
+    ("sharpen_strong", "unsharp=7:7:2.5"),
+    ("denoise_heavy", "hqdn3d=8:6:12:9"),
 ])
 def test_effect_factory_applies_filter_and_master(op, needle):
     argv = ffmpeg_jobs.BUILDERS[op](IN, OUT, _p())
     assert needle in _vf(argv)
     assert "libx264" in argv  # master block re-encodes
+
+
+def test_new_ops_are_single_clip_and_paramless():
+    """The 2026-07-20 batch must stay no-param single-clip ops — the zero-
+    frontend-edit growth invariant (FfmpegPanel only has param UI for
+    xfade/lut/fade/speed/volume)."""
+    new = {"sepia", "warm", "cool", "vibrance", "brightness_up", "brightness_down",
+           "contrast_up", "contrast_down", "saturation_up", "saturation_down",
+           "negative", "posterize", "pixelize", "cartoon", "deband", "deflicker",
+           "sharpen_strong", "denoise_heavy"}
+    rows = {c["id"]: c for c in ffmpeg_jobs._CATALOG}
+    assert new <= set(rows)
+    for op in new:
+        assert rows[op]["needs"] == "single"
+        assert rows[op]["cat"] in ("LOOK", "EFFECTS")
+        assert not rows[op].get("audio")
+        assert op not in ffmpeg_jobs._MULTI
+        assert op not in ffmpeg_jobs.AUDIO_OPS
 
 
 # -- audio ops -------------------------------------------------------------

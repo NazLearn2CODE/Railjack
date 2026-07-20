@@ -350,6 +350,31 @@ mirrorh = _vf_op("hflip")
 mirrorv = _vf_op("vflip")
 grayscale = _vf_op("hue=s=0")             # saturation 0 = desaturate, keeps pixfmt
 
+# 2026-07-20 batch — every filter probed against the installed ffmpeg 8.1.2
+# (`ffmpeg -h filter=<name>`) before landing here.
+# LOOK — color looks + the M6.4-deferred brightness/contrast/saturation trims
+# (fixed steps: a parameterized version would need new FfmpegPanel inputs,
+# breaking the zero-frontend-edit growth invariant).
+sepia = _vf_op("colorchannelmixer=.393:.769:.189:0:.349:.686:.168:0:.272:.534:.131")
+warm = _vf_op("colortemperature=temperature=4500")   # shift toward tungsten
+cool = _vf_op("colortemperature=temperature=8500")   # shift toward shade/blue
+vibrance = _vf_op("vibrance=intensity=0.4")          # boost muted colors, spare skin
+brightness_up = _vf_op("eq=brightness=0.06")
+brightness_down = _vf_op("eq=brightness=-0.06")
+contrast_up = _vf_op("eq=contrast=1.15")
+contrast_down = _vf_op("eq=contrast=0.9")
+saturation_up = _vf_op("eq=saturation=1.3")
+saturation_down = _vf_op("eq=saturation=0.7")
+# EFFECTS — stylize + repair
+negative = _vf_op("negate")
+posterize = _vf_op("lutrgb=r=round(val/51)*51:g=round(val/51)*51:b=round(val/51)*51")  # 6 levels/channel
+pixelize = _vf_op("pixelize=width=16:height=16")     # mosaic blocks
+cartoon = _vf_op("edgedetect=mode=colormix:high=0")  # painted/comic mix
+deband = _vf_op("deband")                            # smooth gradient banding
+deflicker = _vf_op("deflicker")                      # even out luma flicker
+sharpen_strong = _vf_op("unsharp=7:7:2.5:7:7:0.0")   # heavier 7×7 amt 2.5
+denoise_heavy = _vf_op("hqdn3d=8:6:12:9")            # 2× the standard denoise
+
 
 def loudnorm(inputs: list[Path], out: Path, _p: dict) -> list[str]:
     """§7: EBU R128 loudness normalize. Audio filtered, video copied (no re-encode)."""
@@ -379,6 +404,26 @@ BUILDERS = {
     "mirrorh": mirrorh,
     "mirrorv": mirrorv,
     "grayscale": grayscale,
+    # LOOK (single clip, 2026-07-20):
+    "sepia": sepia,
+    "warm": warm,
+    "cool": cool,
+    "vibrance": vibrance,
+    "brightness_up": brightness_up,
+    "brightness_down": brightness_down,
+    "contrast_up": contrast_up,
+    "contrast_down": contrast_down,
+    "saturation_up": saturation_up,
+    "saturation_down": saturation_down,
+    # EFFECTS (single clip, 2026-07-20):
+    "negative": negative,
+    "posterize": posterize,
+    "pixelize": pixelize,
+    "cartoon": cartoon,
+    "deband": deband,
+    "deflicker": deflicker,
+    "sharpen_strong": sharpen_strong,
+    "denoise_heavy": denoise_heavy,
     # AUDIO (single clip):
     "loudnorm": loudnorm,
     "volume": volume,
@@ -393,6 +438,16 @@ _CATALOG: list[dict] = [
     {"id": "concat",         "label": "Butt-cut stitch",    "cat": "ASSEMBLY",  "needs": "multi",  "hint": "≥2 clips, in order"},
     {"id": "xfade",          "label": "Crossfade chain",    "cat": "ASSEMBLY",  "needs": "multi",  "hint": "≥2 clips + transition"},
     {"id": "lut",            "label": "Apply LUT",          "cat": "LOOK",      "needs": "single", "hint": "one clip + a .cube LUT"},
+    {"id": "sepia",          "label": "Sepia",              "cat": "LOOK",      "needs": "single", "hint": "vintage brown tone"},
+    {"id": "warm",           "label": "Warm temp",          "cat": "LOOK",      "needs": "single", "hint": "toward tungsten 4500K"},
+    {"id": "cool",           "label": "Cool temp",          "cat": "LOOK",      "needs": "single", "hint": "toward blue 8500K"},
+    {"id": "vibrance",       "label": "Vibrance",           "cat": "LOOK",      "needs": "single", "hint": "boost muted colors"},
+    {"id": "brightness_up",  "label": "Brightness +",       "cat": "LOOK",      "needs": "single", "hint": "lift +0.06"},
+    {"id": "brightness_down","label": "Brightness −",       "cat": "LOOK",      "needs": "single", "hint": "lower −0.06"},
+    {"id": "contrast_up",    "label": "Contrast +",         "cat": "LOOK",      "needs": "single", "hint": "×1.15"},
+    {"id": "contrast_down",  "label": "Contrast −",         "cat": "LOOK",      "needs": "single", "hint": "×0.9"},
+    {"id": "saturation_up",  "label": "Saturation +",       "cat": "LOOK",      "needs": "single", "hint": "×1.3"},
+    {"id": "saturation_down","label": "Saturation −",       "cat": "LOOK",      "needs": "single", "hint": "×0.7"},
     {"id": "fade",           "label": "Fade in/out",        "cat": "EFFECTS",   "needs": "single", "hint": "0.5s in + out"},
     {"id": "speed",          "label": "Speed ramp",         "cat": "EFFECTS",   "needs": "single", "hint": "2× fast / 0.5× slow"},
     {"id": "denoise",        "label": "Denoise",            "cat": "EFFECTS",   "needs": "single", "hint": "hqdn3d"},
@@ -402,6 +457,14 @@ _CATALOG: list[dict] = [
     {"id": "mirrorh",        "label": "Mirror H",           "cat": "EFFECTS",   "needs": "single", "hint": "hflip"},
     {"id": "mirrorv",        "label": "Mirror V",           "cat": "EFFECTS",   "needs": "single", "hint": "vflip"},
     {"id": "grayscale",      "label": "Grayscale",          "cat": "EFFECTS",   "needs": "single", "hint": "desaturate"},
+    {"id": "negative",       "label": "Negative",           "cat": "EFFECTS",   "needs": "single", "hint": "invert colors"},
+    {"id": "posterize",      "label": "Posterize",          "cat": "EFFECTS",   "needs": "single", "hint": "6 levels/channel"},
+    {"id": "pixelize",       "label": "Pixelize",           "cat": "EFFECTS",   "needs": "single", "hint": "16px mosaic"},
+    {"id": "cartoon",        "label": "Cartoon edges",      "cat": "EFFECTS",   "needs": "single", "hint": "edge-colormix look"},
+    {"id": "deband",         "label": "Deband",             "cat": "EFFECTS",   "needs": "single", "hint": "smooth banding"},
+    {"id": "deflicker",      "label": "Deflicker",          "cat": "EFFECTS",   "needs": "single", "hint": "even out flicker"},
+    {"id": "sharpen_strong", "label": "Sharpen strong",     "cat": "EFFECTS",   "needs": "single", "hint": "unsharp 7×7 ×2.5"},
+    {"id": "denoise_heavy",  "label": "Denoise heavy",      "cat": "EFFECTS",   "needs": "single", "hint": "hqdn3d ×2"},
     {"id": "loudnorm",       "label": "Loudness normalize", "cat": "AUDIO",     "needs": "single", "audio": True, "hint": "EBU R128 −16 LUFS"},
     {"id": "volume",         "label": "Volume/gain",        "cat": "AUDIO",     "needs": "single", "audio": True, "hint": "×2 gain"},
     {"id": "transcode_h264", "label": "H.264 master",       "cat": "TRANSCODE", "needs": "single", "hint": "CRF 18 master"},

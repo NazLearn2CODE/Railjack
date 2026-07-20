@@ -9,9 +9,11 @@ import { useStore, type ModuleConfig } from "../store";
  * generate, artifacts, output feed, jobs). Mirrors ComfyPanel/FfmpegPanel
  * idioms: usePolling/fetchJSON, Pip + progress-bar job rows, reveal stagger.
  *
- * Gating: state.available===false → notice; state.authed===false → login
- * (inserts `notebooklm login` into the terminal then jumps to the tmux module,
- * same module-switch ComfyPanel uses).
+ * Gating: st.available===false → notice + INITIALIZE / RETRY (POST
+ * /api/nblm/probe re-resolves the CLI + forces a fresh auth check, flipping
+ * the panel live); st.authed===false → login (inserts `notebooklm login` into
+ * the terminal then jumps to the tmux module, same module-switch ComfyPanel
+ * uses) + RE-CHECK.
  */
 
 interface NblmState {
@@ -100,6 +102,22 @@ export default function NotebookPanel({ module: _module }: { module: ModuleConfi
   const [mdCache, setMdCache] = useState<Record<string, string>>({});
 
   const { data: state } = usePolling<NblmState>("/api/nblm/state", 30000);
+  // INITIALIZE / RETRY: POST /api/nblm/probe re-resolves the CLI + forces a
+  // fresh auth check server-side. Its result overrides the polled state until
+  // the next poll lands (both hit the same live computation, so they agree).
+  const [probed, setProbed] = useState<NblmState | null>(null);
+  const [probing, setProbing] = useState(false);
+  useEffect(() => { setProbed(null); }, [state]);
+  const st = probed ?? state;
+  const probe = async () => {
+    if (probing) return;
+    setProbing(true);
+    try {
+      const r = await fetchJSON<NblmState>("/api/nblm/probe", { method: "POST" });
+      setProbed(r);
+    } catch { /* keep current card; the 30s poll re-checks anyway */ }
+    finally { setProbing(false); }
+  };
   const { data: jobsData } = usePolling<{ jobs: Job[] }>("/api/nblm/jobs", 1000);
   const jobs = jobsData?.jobs ?? [];
 
@@ -139,10 +157,11 @@ export default function NotebookPanel({ module: _module }: { module: ModuleConfi
     else localStorage.removeItem("nblm.notebook");
   };
 
-  // Load the notebook list once the service is available + authed.
+  // Load the notebook list once the service is available + authed (polled OR
+  // freshly probed via INITIALIZE — st covers both).
   useEffect(() => {
-    if (state?.available && state.authed) refreshNotebooks();
-  }, [state?.available, state?.authed, refreshNotebooks]);
+    if (st?.available && st.authed) refreshNotebooks();
+  }, [st?.available, st?.authed, refreshNotebooks]);
 
   // Catalog is static — one shot.
   useEffect(() => {
@@ -321,24 +340,27 @@ export default function NotebookPanel({ module: _module }: { module: ModuleConfi
 
   // --- render --------------------------------------------------------------
 
-  if (!state) {
+  if (!st) {
     return (
       <div className="flex h-full w-full items-center justify-center">
         <span className="label text-muted">CONNECTING…<span className="caret" /></span>
       </div>
     );
   }
-  if (state.available === false) {
+  if (st.available === false) {
     return (
       <div className="flex h-full w-full items-center justify-center p-6">
-        <div className="hud hud--bracket reveal reveal-1 flex max-w-md flex-col items-center gap-2 p-6 text-center">
+        <div className="hud hud--bracket reveal reveal-1 flex max-w-md flex-col items-center gap-3 p-6 text-center">
           <span className="panel-title">RESEARCH NOT AVAILABLE ON THIS MACHINE</span>
-          <span className="mono text-sm text-muted">{state.reason ?? "see server logs"}</span>
+          <span className="mono text-sm text-muted">{st.reason ?? "see server logs"}</span>
+          <button className="btn btn--signal" disabled={probing} onClick={probe}>
+            INITIALIZE / RETRY{probing && <span className="caret" />}
+          </button>
         </div>
       </div>
     );
   }
-  if (state.authed === false) {
+  if (st.authed === false) {
     return (
       <div className="flex h-full w-full items-center justify-center p-6">
         <div className="hud hud--bracket reveal reveal-1 flex max-w-md flex-col items-center gap-3 p-6 text-center">
@@ -346,9 +368,15 @@ export default function NotebookPanel({ module: _module }: { module: ModuleConfi
           <span className="mono text-sm text-muted">
             run <span className="glow-go">notebooklm login</span> in the terminal, then return
           </span>
-          <button className="btn btn--signal" onClick={insertLogin}>
-            INSERT LOGIN COMMAND IN TERMINAL
-          </button>
+          {st.reason && <span className="mono text-xs text-muted">{st.reason}</span>}
+          <div className="flex gap-1">
+            <button className="btn btn--signal" onClick={insertLogin}>
+              INSERT LOGIN COMMAND IN TERMINAL
+            </button>
+            <button className="btn" disabled={probing} onClick={probe}>
+              RE-CHECK{probing && <span className="caret" />}
+            </button>
+          </div>
         </div>
       </div>
     );
@@ -370,8 +398,8 @@ export default function NotebookPanel({ module: _module }: { module: ModuleConfi
           <span className="panel-title">RESEARCH DECK</span>
           <span className="pip pip--go" />
         </div>
-        {state.account && (
-          <span className="label truncate text-muted" title={state.account}>{state.account}</span>
+        {st.account && (
+          <span className="label truncate text-muted" title={st.account}>{st.account}</span>
         )}
         <input
           className="input" placeholder="search notebooks"

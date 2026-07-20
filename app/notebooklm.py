@@ -39,7 +39,32 @@ router = APIRouter()
 
 # ---------------------------------------------------------------- module options
 
-CLI = shutil.which("notebooklm") or "notebooklm"  # argv[0]
+# CLI discovery. ``shutil.which`` only sees the *service's* PATH — under the
+# systemd user unit started at machine boot that is the bare default
+# (/usr/local/sbin:/usr/local/bin:/usr/bin), which misses ``~/.local/bin``
+# where uv/pipx put the notebooklm shim. So: which() first, then explicit
+# well-known locations — and re-resolve at REQUEST time via ``_availability()``,
+# never frozen at import (a wrong boot-time answer must not stick for the
+# whole server lifetime).
+_FALLBACK_CLI_DIRS: list[Path] = [
+    Path("~/.local/bin").expanduser(),
+    Path("/usr/local/bin"),
+]
+
+
+def _resolve_cli() -> str | None:
+    """Absolute path to the notebooklm CLI, or None if it truly isn't installed."""
+    found = shutil.which("notebooklm")
+    if found:
+        return found
+    for d in _FALLBACK_CLI_DIRS:
+        p = d / "notebooklm"
+        if p.is_file() and os.access(p, os.X_OK):
+            return str(p)
+    return None
+
+
+CLI = _resolve_cli() or "notebooklm"  # argv[0]; refreshed by _availability()
 
 
 def _nblm_options() -> dict:
@@ -60,12 +85,20 @@ def _browse_root() -> Path:
     return Path(_OPTS.get("browse_root", "~")).expanduser().resolve()
 
 
-_AVAILABLE = bool(shutil.which("notebooklm")) and bool(_OPTS)
-_AVAIL_REASON: str | None = (
-    None if _AVAILABLE
-    else ("notebooklm CLI not on PATH" if not shutil.which("notebooklm")
-          else "notebooklm module not registered")
-)
+def _availability() -> tuple[bool, str | None]:
+    """(available, reason) computed at CALL time — never cached. On success it
+    also refreshes the module-level ``CLI`` argv[0] so every endpoint uses the
+    freshly resolved path."""
+    global CLI
+    path = _resolve_cli()
+    if path is None:
+        return (False,
+                "notebooklm CLI not found — checked PATH and ~/.local/bin. "
+                "Install it (uv tool install notebooklm-py), then press INITIALIZE.")
+    if not _OPTS:
+        return False, "notebooklm module not registered in this machine's config"
+    CLI = path
+    return True, None
 
 
 # ---------------------------------------------------------------- path safety
@@ -409,10 +442,28 @@ class PolishBody(BaseModel):
 
 @router.get("/api/nblm/state")
 async def state() -> dict:
-    if not _AVAILABLE:
-        return {"available": False, "reason": _AVAIL_REASON, "authed": False, "account": None}
+    available, reason = _availability()
+    if not available:
+        return {"available": False, "reason": reason, "authed": False, "account": None}
     authed, account = await _auth_state()
     return {"available": True, "reason": None, "authed": authed, "account": account}
+
+
+@router.post("/api/nblm/probe")
+async def probe() -> dict:
+    """Manual INITIALIZE / RETRY from the panel: re-resolve the CLI and force a
+    FRESH auth check (drops the 60s auth cache) so the UI can flip live. Same
+    shape as ``state`` plus a plain-words ``reason`` when auth fails."""
+    global _AUTH_CACHE
+    available, reason = _availability()
+    if not available:
+        return {"available": False, "reason": reason, "authed": False, "account": None}
+    _AUTH_CACHE = None  # bypass the cache — this is an explicit re-check
+    authed, account = await _auth_state()
+    reason = None if authed else (
+        "CLI found, but not logged in (auth missing or expired) — "
+        "run `notebooklm login` in the terminal, then RE-CHECK.")
+    return {"available": True, "reason": reason, "authed": authed, "account": account}
 
 
 @router.get("/api/nblm/notebooks")

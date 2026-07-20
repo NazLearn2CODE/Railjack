@@ -148,6 +148,7 @@ def _entry_view(e: dict, models_dir: Path, machine: float) -> dict:
         "variant": e.get("variant"),
         "vram_gb": e.get("vram_gb"),
         "proven": e.get("proven", False),
+        "unrestricted": bool(e.get("unrestricted", False)),
         "installed": bool(comps) and all_in,
         "fit": _fit(float(e.get("vram_gb", 0) or 0), machine),
         "size_gb": round(size, 2),
@@ -257,6 +258,7 @@ class Job:
     id: str
     kind: str  # "download" | "generate"
     label: str
+    entry_id: str | None = None  # catalog entry a download belongs to (None for generate)
     status: str = "queued"  # queued | running | done | error | cancelled
     progress: int = 0
     output_paths: list[str] = field(default_factory=list)
@@ -268,7 +270,8 @@ class Job:
 
     def to_dict(self) -> dict:
         return {
-            "id": self.id, "kind": self.kind, "label": self.label, "status": self.status,
+            "id": self.id, "kind": self.kind, "label": self.label,
+            "entry_id": self.entry_id, "status": self.status,
             "progress": self.progress, "output_paths": self.output_paths,
             "error": self.error, "logs": list(self.logs),
         }
@@ -285,6 +288,9 @@ _PCT = re.compile(r"(\d+)%")
 
 
 async def _run_download(job: Job, url: str, folder: Path, filename: str) -> None:
+    if job.cancel:  # cancelled while still queued — never spawn the fetch
+        job.status = "cancelled"
+        return
     argv = ["python3", FETCH_MODEL, url, "--folder", str(folder), "--name", filename]
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -373,6 +379,10 @@ class DownloadBody(BaseModel):
     entry_id: str
 
 
+class CancelDownloadBody(BaseModel):
+    entry_id: str
+
+
 class DeleteBody(BaseModel):
     entry_id: str
 
@@ -419,8 +429,11 @@ async def state() -> dict:
 
 @router.get("/api/comfyui/catalog")
 def catalog() -> dict:
+    """Model Bay list. Only entries this machine can actually run (fit == "ok")
+    are exposed — over-VRAM entries are dropped server-side, not greyed out."""
     md, mv = _models_dir(), _machine_vram()
-    return {"entries": [_entry_view(e, md, mv) for e in _catalog()]}
+    views = (_entry_view(e, md, mv) for e in _catalog())
+    return {"entries": [v for v in views if v["fit"] == "ok"]}
 
 
 @router.get("/api/comfyui/installed")
@@ -441,13 +454,29 @@ async def download(body: DownloadBody) -> dict:
         folder = (models_dir / c["folder"])
         folder.mkdir(parents=True, exist_ok=True)
         jid = uuid4().hex[:8]
-        job = Job(id=jid, kind="download", label=f"{c['folder']}/{c['filename']}")
+        job = Job(id=jid, kind="download", label=f"{c['folder']}/{c['filename']}",
+                  entry_id=body.entry_id)
         _JOBS[jid] = job
         task = asyncio.create_task(_run_download(job, c["url"], folder, c["filename"]))
         _BG.add(task)
         task.add_done_callback(_BG.discard)
         ids.append(jid)
     return {"job_ids": ids}
+
+
+@router.post("/api/comfyui/download/cancel")
+async def cancel_download(body: CancelDownloadBody) -> dict:
+    """Cancel every queued/running download job that belongs to a catalog entry
+    (the Model Bay card's DOWNLOADING — CANCEL control). Idempotent: an entry
+    with no live jobs returns an empty list."""
+    cancelled: list[str] = []
+    for j in _JOBS.values():
+        if j.kind == "download" and j.entry_id == body.entry_id and j.status in _RUNNING:
+            j.cancel = True
+            if j.proc is not None:
+                j.proc.send_signal(signal.SIGTERM)
+            cancelled.append(j.id)
+    return {"cancelled": cancelled}
 
 
 @router.post("/api/comfyui/delete")

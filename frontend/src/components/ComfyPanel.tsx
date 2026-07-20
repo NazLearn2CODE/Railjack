@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type ChangeEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type ChangeEvent } from "react";
 import { fetchJSON, usePolling } from "../api";
 import { useStore, type ModuleConfig } from "../store";
 
@@ -34,6 +34,7 @@ interface CatalogEntry {
   variant: string;
   vram_gb: number;
   proven: boolean;
+  unrestricted: boolean;
   installed: boolean;
   fit: "ok" | "warn" | "no";
   size_gb: number;
@@ -45,6 +46,7 @@ interface Job {
   id: string;
   kind: string;
   label: string;
+  entry_id: string | null;
   status: string;
   progress: number;
   output_paths: string[] | null;
@@ -93,6 +95,8 @@ export default function ComfyPanel({ module }: { module: ModuleConfig }) {
   const [installed, setInstalled] = useState<Installed>({ image: [], video: [] });
   const [starting, setStarting] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  // Default OFF every load: uncensored checkpoints stay hidden until toggled.
+  const [showUnrestricted, setShowUnrestricted] = useState(false);
 
   const { data: state } = usePolling<ComfyState>("/api/comfyui/state", 5000);
   const { data: jobsData } = usePolling<{ jobs: Job[] }>("/api/comfyui/jobs", 1000);
@@ -108,6 +112,17 @@ export default function ComfyPanel({ module }: { module: ModuleConfig }) {
       .then(setInstalled).catch(() => {});
   }, []);
   useEffect(() => { refresh(); }, [refresh]);
+
+  // When the last live download finishes, re-fetch catalog/installed so the
+  // Model Bay flips components to INSTALLED without a manual reload.
+  const activeDownloads = jobs.filter(
+    (j) => j.kind === "download" && (j.status === "queued" || j.status === "running"),
+  ).length;
+  const prevActive = useRef(0);
+  useEffect(() => {
+    if (prevActive.current > 0 && activeDownloads === 0) refresh();
+    prevActive.current = activeDownloads;
+  }, [activeDownloads, refresh]);
 
   // Keep the saved model valid once the installed list lands.
   useEffect(() => {
@@ -152,6 +167,16 @@ export default function ComfyPanel({ module }: { module: ModuleConfig }) {
   const download = async (entry_id: string) => {
     try {
       await fetchJSON<{ job_ids: string[] }>("/api/comfyui/download", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ entry_id }),
+      });
+    } catch { /* jobs card surfaces failures */ }
+  };
+
+  const cancelEntry = async (entry_id: string) => {
+    try {
+      await fetchJSON<{ cancelled: string[] }>("/api/comfyui/download/cancel", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ entry_id }),
@@ -251,7 +276,10 @@ export default function ComfyPanel({ module }: { module: ModuleConfig }) {
     );
   }
 
-  const byModality = (mod: "image" | "video") => catalog.filter((e) => e.modality === mod);
+  // Backend already drops entries that don't fit this machine (fit != "ok");
+  // here we additionally hide unrestricted checkpoints unless toggled on.
+  const byModality = (mod: "image" | "video") =>
+    catalog.filter((e) => e.modality === mod && (showUnrestricted || !e.unrestricted));
   const canGen = up && prompt.trim().length > 0 && model.length > 0;
   const live = jobs.some((j) => j.status === "queued" || j.status === "running");
   const composer: { lbl: string; val: string; set: (v: string) => void }[] = [
@@ -276,6 +304,18 @@ export default function ComfyPanel({ module }: { module: ModuleConfig }) {
         )}
         {live && <span className="label text-signal">BUSY</span>}
         <span className="flex-1" />
+        <button
+          className="btn"
+          style={showUnrestricted ? {
+            borderColor: "var(--color-hazard)",
+            color: "var(--color-hazard)",
+            background: "color-mix(in srgb, var(--color-hazard) 10%, var(--color-panel))",
+          } : undefined}
+          onClick={() => setShowUnrestricted((v) => !v)}
+          title="Show/hide unrestricted (uncensored) checkpoints in the Model Bay"
+        >
+          [UNRESTRICTED]
+        </button>
         {!up && (
           <button className="btn btn--signal" disabled={starting} onClick={start}>
             {starting ? "STARTING…" : "START"}
@@ -297,44 +337,95 @@ export default function ComfyPanel({ module }: { module: ModuleConfig }) {
             <div key={mod} className="flex flex-col gap-0.5">
               <span className="label text-muted">{mod}</span>
               {rows.map((e) => {
-                const nameClass =
-                  e.fit === "ok" && e.proven ? "mono glow-go" :
-                  e.fit === "warn" ? "mono" : "mono text-muted";
-                const nameStyle = e.fit === "warn" ? { color: "var(--color-hazard)" } : undefined;
+                // Backend only sends fit == "ok" entries; proven models keep the glow.
+                const entryJobs = jobs.filter((j) => j.kind === "download" && j.entry_id === e.id);
+                const liveJobs = entryJobs.filter((j) => j.status === "queued" || j.status === "running");
+                const inFlight = liveJobs.length > 0;
+                const runningNow = liveJobs.some((j) => j.status === "running");
                 return (
                   <div
                     key={e.id}
-                    className="row-in flex items-center gap-2 border border-edge bg-void px-2 py-1"
-                    style={e.fit === "no" ? { opacity: 0.4 } : undefined}
+                    className="row-in flex flex-col gap-1 border border-edge bg-void px-2 py-1"
                   >
-                    <span className={`${nameClass} flex-1 truncate`} style={nameStyle} title={`${e.family} · ${e.variant}`}>
-                      {e.name}
-                    </span>
-                    <span className="mono text-xs text-muted whitespace-nowrap">
-                      {e.size_gb} GB · {e.components.length} files
-                    </span>
-                    {e.installed ? (
-                      <span className="flex items-center gap-1 whitespace-nowrap">
-                        <span className="label" style={{ color: "var(--color-go)" }}>✓ INSTALLED</span>
-                        <button
-                          className="btn btn--crit"
-                          title="Delete this model's files from disk"
-                          onClick={() => {
-                            if (window.confirm(`Delete ${e.name} and its files? Re-download anytime.`)) uninstall(e.id);
-                          }}
-                        >
-                          DELETE
-                        </button>
-                      </span>
-                    ) : (
-                      <button
-                        className="btn whitespace-nowrap"
-                        disabled={e.fit === "no"}
-                        onClick={() => download(e.id)}
+                    <div className="flex items-center gap-2">
+                      <span
+                        className={`${e.proven ? "mono glow-go" : "mono"} flex-1 truncate`}
+                        title={`${e.family} · ${e.variant}`}
                       >
-                        DOWNLOAD
-                      </button>
-                    )}
+                        {e.name}
+                      </span>
+                      {e.unrestricted && (
+                        <span className="label whitespace-nowrap" style={{ color: "var(--color-hazard)" }}>
+                          UNRESTRICTED
+                        </span>
+                      )}
+                      <span className="mono text-xs text-muted whitespace-nowrap">
+                        {e.size_gb} GB · {e.components.length} {e.components.length === 1 ? "file" : "files"}
+                      </span>
+                      {e.installed ? (
+                        <span className="flex items-center gap-1 whitespace-nowrap">
+                          <span className="label" style={{ color: "var(--color-go)" }}>✓ INSTALLED</span>
+                          <button
+                            className="btn btn--crit"
+                            title="Delete this model's files from disk"
+                            onClick={() => {
+                              if (window.confirm(`Delete ${e.name} and its files? Re-download anytime.`)) uninstall(e.id);
+                            }}
+                          >
+                            DELETE
+                          </button>
+                        </span>
+                      ) : inFlight ? (
+                        <button
+                          className="btn btn--crit whitespace-nowrap"
+                          title="Cancel this model's queued/running downloads"
+                          onClick={() => cancelEntry(e.id)}
+                        >
+                          {runningNow ? "DOWNLOADING — CANCEL" : "QUEUED — CANCEL"}
+                        </button>
+                      ) : (
+                        <button
+                          className="btn whitespace-nowrap"
+                          title="Download every missing file this model needs"
+                          onClick={() => download(e.id)}
+                        >
+                          DOWNLOAD
+                        </button>
+                      )}
+                    </div>
+                    {/* Every file this entry needs to run, with per-file state. */}
+                    <div className="flex flex-col gap-0.5 pl-3">
+                      {e.components.map((c) => {
+                        const key = `${c.folder}/${c.filename}`;
+                        const cj =
+                          entryJobs.find((j) => j.label === key && (j.status === "queued" || j.status === "running")) ??
+                          entryJobs.find((j) => j.label === key);
+                        const st = c.installed ? "done" : cj?.status ?? "missing";
+                        const active = st === "queued" || st === "running";
+                        return (
+                          <div key={key} className="flex items-center gap-2">
+                            <Pip status={st} />
+                            <span className="mono flex-1 truncate text-xs" title={c.url}>{key}</span>
+                            <span className="mono text-xs text-muted whitespace-nowrap">{c.size_gb} GB</span>
+                            <span
+                              className="label whitespace-nowrap"
+                              style={{
+                                color:
+                                  c.installed ? "var(--color-go)" :
+                                  st === "error" ? "var(--color-critical)" :
+                                  active ? "var(--color-signal)" : "var(--color-muted)",
+                              }}
+                            >
+                              {c.installed
+                                ? "INSTALLED"
+                                : cj
+                                  ? `${cj.status.toUpperCase()}${active ? ` · ${cj.progress}%` : ""}`
+                                  : "MISSING"}
+                            </span>
+                          </div>
+                        );
+                      })}
+                    </div>
                   </div>
                 );
               })}

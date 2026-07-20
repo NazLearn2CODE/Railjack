@@ -64,7 +64,7 @@ modules:
 dock:
   title: LIVE
   url: http://localhost:7681
-  height: 220
+  height: 275  # 2026-07-20 Naz: +25% (was 220)
 
 # M6 cockpit — session telemetry, terminal buttons, catalog grouping.
 

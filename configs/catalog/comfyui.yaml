@@ -71,6 +71,11 @@ entries:
   # URLs range-GET verified (206/200) — Civitai's signed R2 URLs 403 on HEAD
   # but serve GET, so the downloader (curl -L) works. (CyberRealistic XL was
   # login-walled + stub-sized; epiCRealism XL subbed in as the 4th SDXL ckpt.)
+  #
+  # `unrestricted: true` marks uncensored/NSFW-capable CHECKPOINTS — the UI
+  # hides them unless the [UNRESTRICTED] toggle is on. Support files (VAE,
+  # utility LoRA) and the general-purpose video models are content-neutral
+  # and stay unflagged.
 
   - id: pony-v6-xl
     name: "Pony Diffusion V6 XL"
@@ -79,6 +84,7 @@ entries:
     variant: v6-xl
     vram_gb: 10
     proven: false
+    unrestricted: true
     components:
       - folder: checkpoints
         filename: ponyDiffusionV6XL_v6StartWithThisOne.safetensors
@@ -92,6 +98,7 @@ entries:
     variant: ragnarok
     vram_gb: 10
     proven: false
+    unrestricted: true
     components:
       - folder: checkpoints
         filename: juggernautXL_ragnarok.safetensors
@@ -105,6 +112,7 @@ entries:
     variant: v5-lightning-bakedvae
     vram_gb: 9
     proven: false
+    unrestricted: true
     components:
       - folder: checkpoints
         filename: realvisxlV50_v50LightningBakedvae.safetensors
@@ -118,6 +126,7 @@ entries:
     variant: pure-fix
     vram_gb: 10
     proven: false
+    unrestricted: true
     components:
       - folder: checkpoints
         filename: epicrealismXL_pureFix.safetensors

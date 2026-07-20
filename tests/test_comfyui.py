@@ -5,7 +5,6 @@ async cases wrap the call in ``asyncio.run`` (same shape as ``test_jobs.py``).
 """
 
 import asyncio
-import os
 
 import pytest
 from fastapi import HTTPException
@@ -80,9 +79,10 @@ def test_job_to_dict_shape_excludes_internals():
     j.logs.append("hi")
     j.output_paths = ["/o/a.png"]
     d = j.to_dict()
-    assert set(d) == {"id", "kind", "label", "status", "progress",
+    assert set(d) == {"id", "kind", "label", "entry_id", "status", "progress",
                       "output_paths", "error", "logs"}
     assert "proc" not in d and "prompt_id" not in d
+    assert d["entry_id"] is None  # generate jobs carry no catalog entry
     assert d["output_paths"] == ["/o/a.png"]
     assert d["logs"] == ["hi"]
     assert d["status"] == "queued" and d["progress"] == 0
@@ -245,6 +245,28 @@ def test_download_skips_installed_components(comfy_opts, monkeypatch):
     assert len(out["job_ids"]) == 1  # only the missing vae component
 
 
+def test_download_queues_all_missing_components_tagged_with_entry(comfy_opts, monkeypatch):
+    # nothing installed → EVERY component gets its own job, all tagged entry_id
+    entry = {"id": "multi", "components": [
+        {"folder": "checkpoints", "filename": "a.safetensors", "url": "http://u/a", "size_gb": 1},
+        {"folder": "text_encoders", "filename": "b.safetensors", "url": "http://u/b", "size_gb": 1},
+        {"folder": "vae", "filename": "c.safetensors", "url": "http://u/c", "size_gb": 1},
+    ]}
+    monkeypatch.setattr(comfyui, "_catalog", lambda: (entry,))
+
+    async def fake_run(job, _url, _folder, _name):
+        job.status = "queued"
+    monkeypatch.setattr(comfyui, "_run_download", fake_run)
+
+    out = asyncio.run(comfyui.download(comfyui.DownloadBody(entry_id="multi")))
+    assert len(out["job_ids"]) == 3
+    for jid in out["job_ids"]:
+        assert comfyui._JOBS[jid].entry_id == "multi"
+    labels = {comfyui._JOBS[jid].label for jid in out["job_ids"]}
+    assert labels == {"checkpoints/a.safetensors", "text_encoders/b.safetensors",
+                      "vae/c.safetensors"}
+
+
 def test_download_404_unknown_entry(comfy_opts, monkeypatch):
     monkeypatch.setattr(comfyui, "_catalog", lambda: ())
     with pytest.raises(HTTPException) as ex:
@@ -309,6 +331,60 @@ def test_catalog_endpoint_fit_and_installed(comfy_opts, monkeypatch):
     assert "verified" not in e["components"][0]   # verified is YAML-only
 
 
+def test_catalog_endpoint_hides_entries_that_dont_fit(comfy_opts, monkeypatch):
+    # machine vram is 24 → ok(8) stays; warn(25) and no(40) are dropped entirely.
+    def entry(i, vram):
+        return {"id": i, "name": i, "vram_gb": vram, "components": []}
+    monkeypatch.setattr(
+        comfyui, "_catalog",
+        lambda: (entry("fits", 8), entry("offload", 25), entry("too-big", 40)))
+    out = comfyui.catalog()
+    assert [e["id"] for e in out["entries"]] == ["fits"]
+    assert out["entries"][0]["fit"] == "ok"
+
+
+def test_entry_view_propagates_unrestricted_flag(comfy_opts):
+    md, mv = comfy_opts["models"], 24
+    spicy = {"id": "p", "vram_gb": 10, "unrestricted": True, "components": []}
+    plain = {"id": "s", "vram_gb": 10, "components": []}
+    assert comfyui._entry_view(spicy, md, mv)["unrestricted"] is True
+    assert comfyui._entry_view(plain, md, mv)["unrestricted"] is False  # default
+
+
+# ---------------------------------------------------------------- entry-level download cancel
+
+def test_cancel_download_cancels_only_that_entrys_live_jobs(comfy_opts):
+    comfyui._JOBS["q1"] = Job(id="q1", kind="download", label="checkpoints/a",
+                              entry_id="t", status="queued")
+    comfyui._JOBS["r1"] = Job(id="r1", kind="download", label="vae/b",
+                              entry_id="t", status="running")
+    comfyui._JOBS["d1"] = Job(id="d1", kind="download", label="loras/c",
+                              entry_id="t", status="done")       # finished — untouched
+    comfyui._JOBS["o1"] = Job(id="o1", kind="download", label="checkpoints/x",
+                              entry_id="other", status="running")  # other entry — untouched
+    comfyui._JOBS["g1"] = Job(id="g1", kind="generate", label="m", status="running")
+    out = asyncio.run(comfyui.cancel_download(comfyui.CancelDownloadBody(entry_id="t")))
+    assert sorted(out["cancelled"]) == ["q1", "r1"]
+    assert comfyui._JOBS["q1"].cancel and comfyui._JOBS["r1"].cancel
+    assert not comfyui._JOBS["d1"].cancel
+    assert not comfyui._JOBS["o1"].cancel
+    assert not comfyui._JOBS["g1"].cancel
+
+
+def test_cancel_download_idempotent_when_nothing_live(comfy_opts):
+    out = asyncio.run(comfyui.cancel_download(comfyui.CancelDownloadBody(entry_id="ghost")))
+    assert out == {"cancelled": []}
+
+
+def test_run_download_cancelled_while_queued_never_spawns(monkeypatch, tmp_path):
+    async def boom(*_a, **_k):  # spawning after cancel would be a bug
+        raise AssertionError("subprocess spawned for a cancelled job")
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", boom)
+    job = Job(id="c1", kind="download", label="c/x", entry_id="t", cancel=True)
+    asyncio.run(comfyui._run_download(job, "http://u", tmp_path, "x.safetensors"))
+    assert job.status == "cancelled"
+
+
 # ---------------------------------------------------------------- delete / uninstall
 
 def test_delete_removes_installed_component_files(comfy_opts, monkeypatch):
@@ -317,10 +393,14 @@ def test_delete_removes_installed_component_files(comfy_opts, monkeypatch):
         {"folder": "vae", "filename": "b.safetensors", "url": "http://u/b", "size_gb": 1},
     ]}
     monkeypatch.setattr(comfyui, "_catalog", lambda: (entry,))
-    ck = comfy_opts["models"] / "checkpoints"; ck.mkdir()
-    vae = comfy_opts["models"] / "vae"; vae.mkdir()
-    a = ck / "a.safetensors"; a.write_bytes(b"x")
-    b = vae / "b.safetensors"; b.write_bytes(b"y")
+    ck = comfy_opts["models"] / "checkpoints"
+    ck.mkdir()
+    vae = comfy_opts["models"] / "vae"
+    vae.mkdir()
+    a = ck / "a.safetensors"
+    a.write_bytes(b"x")
+    b = vae / "b.safetensors"
+    b.write_bytes(b"y")
     out = asyncio.run(comfyui.delete(comfyui.DeleteBody(entry_id="t")))
     assert not a.exists() and not b.exists()
     assert len(out["deleted"]) == 2
@@ -340,6 +420,7 @@ def test_delete_skips_missing_and_refuses_path_escape(comfy_opts, monkeypatch):
         {"folder": "../../etc", "filename": "passwd", "url": "http://u", "size_gb": 1},
     ]}
     monkeypatch.setattr(comfyui, "_catalog", lambda: (entry,))
-    ck = comfy_opts["models"] / "checkpoints"; ck.mkdir()
+    ck = comfy_opts["models"] / "checkpoints"
+    ck.mkdir()
     out = asyncio.run(comfyui.delete(comfyui.DeleteBody(entry_id="t")))
     assert out["deleted"] == []

@@ -10,6 +10,7 @@ racing the background task.
 import asyncio
 import json
 import signal
+import time
 
 import pytest
 from fastapi import HTTPException
@@ -94,7 +95,7 @@ def nblm_opts(monkeypatch, tmp_path):
     out.mkdir()
     monkeypatch.setattr(notebooklm, "_OPTS",
                         {"output_dir": str(out), "browse_root": str(tmp_path)})
-    monkeypatch.setattr(notebooklm, "_AVAILABLE", True)
+    monkeypatch.setattr(notebooklm, "_availability", lambda: (True, None))
     notebooklm._NB_CACHE = None
     notebooklm._AUTH_CACHE = None
     notebooklm._JOBS.clear()
@@ -129,11 +130,113 @@ def test_state_auth_error_means_not_authed(nblm_opts, monkeypatch):
 
 
 def test_state_unavailable_short_circuits(monkeypatch):
-    monkeypatch.setattr(notebooklm, "_AVAILABLE", False)
-    monkeypatch.setattr(notebooklm, "_AVAIL_REASON", "notebooklm CLI not on PATH")
+    monkeypatch.setattr(notebooklm, "_availability", lambda: (False, "notebooklm CLI not found"))
+
+    async def boom(*a, **k):
+        raise AssertionError("must not exec when unavailable")
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", boom)
     out = asyncio.run(notebooklm.state())
-    assert out == {"available": False, "reason": "notebooklm CLI not on PATH",
+    assert out == {"available": False, "reason": "notebooklm CLI not found",
                    "authed": False, "account": None}
+
+
+def test_state_availability_recomputed_per_request(monkeypatch):
+    """The boot-time answer must NOT stick: unavailable on one request can flip
+    to available on the next without a process restart."""
+    answers = iter([(False, "notebooklm CLI not found"), (True, None)])
+    monkeypatch.setattr(notebooklm, "_availability", lambda: next(answers))
+    notebooklm._AUTH_CACHE = None
+    _patch_exec(monkeypatch, _SyncProc(out=b'{"status":"ok"}'))
+    assert asyncio.run(notebooklm.state())["available"] is False
+    out = asyncio.run(notebooklm.state())
+    assert out["available"] is True and out["authed"] is True
+
+
+# ---------------------------------------------------------------- CLI resolution + probe
+
+
+def test_resolve_cli_prefers_which(monkeypatch):
+    monkeypatch.setattr(notebooklm.shutil, "which", lambda n: "/usr/bin/notebooklm")
+    assert notebooklm._resolve_cli() == "/usr/bin/notebooklm"
+
+
+def test_resolve_cli_falls_back_to_well_known_dir(monkeypatch, tmp_path):
+    # systemd boot PATH misses ~/.local/bin — which() fails, fallback must hit
+    monkeypatch.setattr(notebooklm.shutil, "which", lambda n: None)
+    cli = tmp_path / "notebooklm"
+    cli.write_text("#!/bin/sh\n")
+    cli.chmod(0o755)
+    monkeypatch.setattr(notebooklm, "_FALLBACK_CLI_DIRS", [tmp_path])
+    assert notebooklm._resolve_cli() == str(cli)
+
+
+def test_resolve_cli_ignores_non_executable_and_missing(monkeypatch, tmp_path):
+    monkeypatch.setattr(notebooklm.shutil, "which", lambda n: None)
+    plain = tmp_path / "notebooklm"
+    plain.write_text("data")
+    plain.chmod(0o644)  # exists but not executable → not the CLI
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    monkeypatch.setattr(notebooklm, "_FALLBACK_CLI_DIRS", [empty, tmp_path])
+    assert notebooklm._resolve_cli() is None
+
+
+def test_availability_refreshes_cli_argv0(monkeypatch, tmp_path):
+    monkeypatch.setattr(notebooklm, "CLI", notebooklm.CLI)  # auto-restore after test
+    monkeypatch.setattr(notebooklm, "_OPTS", {"output_dir": str(tmp_path)})
+    monkeypatch.setattr(notebooklm.shutil, "which", lambda n: None)
+    cli = tmp_path / "notebooklm"
+    cli.write_text("#!/bin/sh\n")
+    cli.chmod(0o755)
+    monkeypatch.setattr(notebooklm, "_FALLBACK_CLI_DIRS", [tmp_path])
+    assert notebooklm._availability() == (True, None)
+    assert notebooklm.CLI == str(cli)  # later argv[0]s use the resolved path
+
+
+def test_availability_reason_cli_missing(monkeypatch, tmp_path):
+    monkeypatch.setattr(notebooklm.shutil, "which", lambda n: None)
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    monkeypatch.setattr(notebooklm, "_FALLBACK_CLI_DIRS", [empty])
+    monkeypatch.setattr(notebooklm, "_OPTS", {"output_dir": str(tmp_path)})
+    ok, reason = notebooklm._availability()
+    assert ok is False and "not found" in reason and ".local/bin" in reason
+
+
+def test_availability_reason_not_registered(monkeypatch):
+    monkeypatch.setattr(notebooklm.shutil, "which", lambda n: "/usr/bin/notebooklm")
+    monkeypatch.setattr(notebooklm, "_OPTS", {})
+    ok, reason = notebooklm._availability()
+    assert ok is False and "not registered" in reason
+
+
+def test_probe_bypasses_auth_cache(nblm_opts, monkeypatch):
+    # poison the auth cache with "not authed" far in the future; probe must
+    # drop it and hit the CLI fresh
+    notebooklm._AUTH_CACHE = (time.monotonic() + 9999, (False, None))
+    calls = _patch_exec(monkeypatch, _SyncProc(out=b'{"status":"ok","account":"naz@x.com"}'))
+    out = asyncio.run(notebooklm.probe())
+    assert calls[0] == [notebooklm.CLI, "auth", "check", "--json"]
+    assert out == {"available": True, "reason": None, "authed": True, "account": "naz@x.com"}
+
+
+def test_probe_unavailable_reports_reason(monkeypatch):
+    monkeypatch.setattr(notebooklm, "_availability",
+                        lambda: (False, "notebooklm CLI not found — checked PATH and ~/.local/bin"))
+
+    async def boom(*a, **k):
+        raise AssertionError("must not exec when unavailable")
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", boom)
+    out = asyncio.run(notebooklm.probe())
+    assert out["available"] is False and "not found" in out["reason"]
+    assert out["authed"] is False and out["account"] is None
+
+
+def test_probe_auth_failure_plain_words(nblm_opts, monkeypatch):
+    _patch_exec(monkeypatch, _SyncProc(err=b"no token", rc=1))
+    out = asyncio.run(notebooklm.probe())
+    assert out["available"] is True and out["authed"] is False
+    assert "notebooklm login" in out["reason"]
 
 
 def test_notebooks_argv_and_alpha_sort(nblm_opts, monkeypatch):
