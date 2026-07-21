@@ -136,3 +136,20 @@ def select_config() -> MachineConfig:
 # ponytail: resolve at import so a missing/ambiguous config fails the uvicorn
 # boot loudly (the "clear startup error" requirement) rather than at first request.
 CONFIG = select_config()
+
+
+def reload_config() -> MachineConfig:
+    """Re-read this machine's YAML and refresh the in-memory ``CONFIG`` in place.
+
+    Other modules bind ``CONFIG`` by reference (``from .config import CONFIG``),
+    so we copy the fresh fields onto the existing object instead of rebinding the
+    global — every holder then sees the new values without a server restart.
+
+    The fresh config is built *first*: if the YAML is missing or invalid,
+    ``select_config()`` raises before any mutation, so the current ``CONFIG``
+    stays intact and usable rather than being left half-updated.
+    """
+    fresh = select_config()
+    for name in MachineConfig.model_fields:
+        setattr(CONFIG, name, getattr(fresh, name))
+    return CONFIG

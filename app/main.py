@@ -9,13 +9,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
 from .catalog import router as catalog_router
 from .comfyui import router as comfyui_router
-from .config import CONFIG, Module
+from .config import CONFIG, Module, reload_config
 from .ffmpeg_jobs import router as ffmpeg_router
 from .health import router as health_router
 from .manage import router as manage_router
@@ -60,8 +60,8 @@ def _sanitize(m: Module) -> dict:
     return out
 
 
-@app.get("/api/config")
-def get_config() -> dict:
+def _serialize_config() -> dict:
+    """Frontend-safe projection of the live CONFIG (shared by GET and reload)."""
     cfg = {
         "machine": CONFIG.machine,
         "modules": [_sanitize(m) for m in CONFIG.modules],
@@ -77,6 +77,23 @@ def get_config() -> dict:
             "height": CONFIG.dock.height,
         }
     return cfg
+
+
+@app.get("/api/config")
+def get_config() -> dict:
+    return _serialize_config()
+
+
+@app.post("/api/config/reload")
+def post_config_reload() -> dict:
+    """Re-read this machine's YAML without a server restart, then return the fresh
+    config so the cockpit (buttons/modules) updates live. A broken YAML leaves the
+    running config untouched and returns a 400 with the parse error."""
+    try:
+        reload_config()
+    except Exception as e:  # invalid/missing YAML — keep the old config, report why
+        raise HTTPException(status_code=400, detail=f"Config reload failed: {e}") from e
+    return _serialize_config()
 
 
 # Serve the built React dashboard when present; otherwise a placeholder.

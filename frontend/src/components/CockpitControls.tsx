@@ -1,6 +1,6 @@
 import { useState, type CSSProperties } from "react";
 import { fetchJSON, usePolling } from "../api";
-import { useStore } from "../store";
+import { useStore, type AppConfig } from "../store";
 
 /**
  * Cockpit catalog dropdowns + config buttons. Each only *types* a short string
@@ -73,6 +73,22 @@ export default function CockpitControls() {
       if (tmux) useStore.getState().setActive(tmux.id);
     } catch (e) {
       console.error("terminal insert failed", e);
+    }
+  };
+
+  // Re-read the machine YAML on the server (buttons/modules) and refresh the
+  // store live — no F5, no uvicorn restart. Unlike the buttons above, this one
+  // does NOT type into the terminal; it just reloads config.
+  const [reloading, setReloading] = useState(false);
+  const reloadConfig = async () => {
+    setReloading(true);
+    try {
+      const fresh = await fetchJSON<AppConfig>("/api/config/reload", { method: "POST" });
+      useStore.getState().setConfig(fresh);
+    } catch (e) {
+      console.error("config reload failed", e);
+    } finally {
+      setReloading(false);
     }
   };
 
@@ -149,6 +165,15 @@ export default function CockpitControls() {
           {b.label}
         </button>
       ))}
+
+      <button
+        className="btn btn--compact"
+        onClick={() => void reloadConfig()}
+        disabled={reloading}
+        title="Re-read the machine YAML (buttons/modules) — applies config edits without restarting the server"
+      >
+        {reloading ? "↻…" : "↻ CFG"}
+      </button>
     </div>
   );
 }
