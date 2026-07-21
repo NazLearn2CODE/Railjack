@@ -44,6 +44,10 @@ modules:
     options:
       output_dir: "~/Downloads/NotebookLM Outputs"
       browse_root: "~"
+  - id: newsroom
+    title: NEWSROOM
+    kind: panel          # TV writing pipeline Half-1 — thin HUD over the newsroom skill CLI
+    panel: newsroom      # shells out to ~/Cephalon/.../skills/newsroom/scripts/{queue,nl_append}.py
   - id: n8n
     title: N8N
     kind: iframe
