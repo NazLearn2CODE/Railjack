@@ -63,3 +63,19 @@ def test_api_escaping_path_returns_400(ffmpeg_opts):
         json={"op": "transcode_h264", "files": ["../" * 12 + "etc/passwd"]},
     )
     assert r.status_code == 400  # _validate raises before ffprobe is ever called
+
+
+def test_api_escaping_path_returns_400_scene_detect(ffmpeg_opts):
+    """Analysis ops take the same confinement path as builders — a traversal
+    input is rejected in _validate before ffprobe/the analyzer run."""
+    ffmpeg_jobs._JOBS.clear()
+    from fastapi.testclient import TestClient
+
+    from app.main import app
+
+    client = TestClient(app)
+    r = client.post(
+        "/api/ffmpeg/jobs",
+        json={"op": "scene_detect", "files": ["../" * 12 + "etc/passwd"]},
+    )
+    assert r.status_code == 400

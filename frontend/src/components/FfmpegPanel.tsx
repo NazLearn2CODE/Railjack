@@ -16,12 +16,13 @@ import type { ModuleConfig } from "../store";
 
 /**
  * Op catalog is backend-driven: /api/ffmpeg/ops is the single source of truth
- * (an import-time assert keeps it synced with BUILDERS). The menu is grouped
- * client-side by `cat`, so adding a no-param effect in the backend grows this
- * menu with zero frontend edit. FALLBACK_OPS only covers a fetch failure so the
+ * (an import-time assert keeps it synced with BUILDERS ∪ ANALYZERS). The menu is
+ * grouped client-side by `cat`, so adding a no-param effect in the backend grows
+ * this menu with zero frontend edit. `analysis` ops render a result block (JSON)
+ * instead of an output file. FALLBACK_OPS only covers a fetch failure so the
  * panel still renders.
  */
-interface Op { id: string; label: string; needs: "single" | "multi"; hint: string; cat: string }
+interface Op { id: string; label: string; needs: "single" | "multi"; hint: string; cat: string; analysis?: boolean }
 
 const FALLBACK_OPS: Op[] = [
   { id: "transcode_h264", label: "H.264 master", needs: "single", hint: "CRF 18 master", cat: "TRANSCODE" },
@@ -31,9 +32,25 @@ interface FileEntry { root: string; name: string; path: string }
 interface LutEntry { name: string; path: string }
 interface PanelCfg { browse_root: string; default_output: string; media_dirs: string[] }
 interface BrowseResp { path: string; root: string; parent: string | null; dirs: { name: string; path: string }[]; video_count: number }
+interface Scene { index: number; start_seconds: number; end_seconds: number; duration_seconds: number }
+interface EnergySecond { time_seconds: number; loudness_lufs: number; active: boolean }
+interface AnalysisResult {
+  op: string;
+  scene_count?: number;
+  cuts?: number[];
+  scenes?: Scene[];
+  analysis?: {
+    threshold_lufs: number; total_seconds: number; active_seconds: number;
+    quiet_intro_seconds: number; peak_loudness_at_seconds: number | null;
+    peak_loudness_lufs: number | null;
+  };
+  energy_profile?: EnergySecond[];
+  energy_profile_truncated?: boolean;
+}
 interface Job {
   id: string; op: string; status: string; progress: number;
   output_path: string | null; error: string | null; logs: string[];
+  result?: AnalysisResult | null;
 }
 
 const WS_KEY = "railjack.ffmpeg.workspace";
@@ -55,6 +72,17 @@ function saveLS(key: string, val: unknown): void {
   }
 }
 const baseName = (p: string) => p.replace(/\/+$/, "").split("/").pop() || p;
+
+/** seconds → m:ss.s (or h:mm:ss.s past an hour); "–" for non-finite. */
+function fmtTs(s: number): string {
+  if (!Number.isFinite(s) || s < 0) return "–";
+  const tenths = Math.floor((s * 10) % 10);
+  const ss = Math.floor(s % 60);
+  const mm = Math.floor(s / 60) % 60;
+  const hh = Math.floor(s / 3600);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return hh > 0 ? `${hh}:${pad(mm)}:${pad(ss)}.${tenths}` : `${mm}:${pad(ss)}.${tenths}`;
+}
 
 function Pip({ status }: { status: string }) {
   const cls =
@@ -143,6 +171,9 @@ export default function FfmpegPanel({ module: _module }: { module: ModuleConfig 
   const [fadeDur, setFadeDur] = useState(0.5);
   const [speedFac, setSpeedFac] = useState(2);
   const [gain, setGain] = useState(2);
+  const [sceneThr, setSceneThr] = useState(0.3);
+  const [minScene, setMinScene] = useState(1.0);
+  const [energyThr, setEnergyThr] = useState(-40);
   const [lutPath, setLutPath] = useState<string>("");
   const [runErr, setRunErr] = useState<string | null>(null);
   const [browser, setBrowser] = useState<"footage" | "output" | null>(null);
@@ -219,6 +250,8 @@ export default function FfmpegPanel({ module: _module }: { module: ModuleConfig 
     if (op === "fade") body.fade = fadeDur;
     if (op === "speed") body.speed = speedFac;
     if (op === "volume") body.gain = gain;
+    if (op === "scene_detect") { body.threshold = sceneThr; body.min_scene_len = minScene; }
+    if (op === "audio_energy") body.energy_threshold = energyThr;
     try {
       await fetchJSON<{ id: string }>("/api/ffmpeg/jobs", {
         method: "POST",
@@ -340,6 +373,29 @@ export default function FfmpegPanel({ module: _module }: { module: ModuleConfig 
           </label>
         )}
 
+        {op === "scene_detect" && (
+          <>
+            <label className="flex items-center gap-2">
+              <span className="label">THRESHOLD</span>
+              <input className="input w-24" type="number" min={0.05} max={0.95} step={0.05} value={sceneThr}
+                onChange={(e) => setSceneThr(Math.min(0.95, Math.max(0.05, Number(e.target.value) || 0.3)))} />
+            </label>
+            <label className="flex items-center gap-2">
+              <span className="label">MIN SCENE (s)</span>
+              <input className="input w-24" type="number" min={0} step={0.1} value={minScene}
+                onChange={(e) => setMinScene(Math.max(0, Number(e.target.value) || 1.0))} />
+            </label>
+          </>
+        )}
+
+        {op === "audio_energy" && (
+          <label className="flex items-center gap-2">
+            <span className="label">THRESHOLD (LUFS)</span>
+            <input className="input w-24" type="number" min={-120} max={0} step={1} value={energyThr}
+              onChange={(e) => setEnergyThr(Math.min(0, Math.max(-120, Number(e.target.value) || -40)))} />
+          </label>
+        )}
+
         <div className="flex items-center gap-2">
           <span className="flex-1" />
           <span className="label">{selected.length} SELECTED</span>
@@ -383,6 +439,9 @@ export default function FfmpegPanel({ module: _module }: { module: ModuleConfig 
         {jobs.map((j) => {
           const tail = j.logs.slice(-10);
           const pct = j.progress;
+          const isAnalysis = Boolean(catalog.find((o) => o.id === j.op)?.analysis);
+          const a = j.result?.analysis ?? null;
+          const prof = j.result?.energy_profile ?? [];
           const fill =
             j.status === "done" ? "var(--color-go)" :
             j.status === "error" ? "var(--color-critical)" :
@@ -393,7 +452,7 @@ export default function FfmpegPanel({ module: _module }: { module: ModuleConfig 
               <div className="flex items-center gap-2">
                 <Pip status={j.status} />
                 <span className="mono">{j.op}</span>
-                <span className="label">{j.status.toUpperCase()} · {pct}%</span>
+                <span className="label">{j.status.toUpperCase()}{!isAnalysis && ` · ${pct}%`}</span>
                 <span className="flex-1" />
                 {(j.status === "running" || j.status === "queued") && (
                   <button
@@ -404,12 +463,52 @@ export default function FfmpegPanel({ module: _module }: { module: ModuleConfig 
                   </button>
                 )}
               </div>
-              <div className="mt-1 h-1.5 w-full bg-edge-soft">
-                <div style={{ width: `${pct}%`, height: "100%", background: fill }} />
-              </div>
+              {!isAnalysis && (
+                <div className="mt-1 h-1.5 w-full bg-edge-soft">
+                  <div style={{ width: `${pct}%`, height: "100%", background: fill }} />
+                </div>
+              )}
               {j.error && <div className="mono mt-1 text-xs" style={{ color: "var(--color-critical)" }}>{j.error}</div>}
               {j.output_path && j.status === "done" && (
                 <div className="mono mt-1 truncate text-xs text-signal">{j.output_path}</div>
+              )}
+              {j.result && j.status === "done" && j.result.op === "scene_detect" && (
+                <div className="mt-1 border-t border-edge pt-1">
+                  <div className="label">{j.result.scene_count} SCENES — click a start time to copy</div>
+                  <div className="mono max-h-40 overflow-auto text-xs">
+                    {(j.result.scenes ?? []).map((sc) => (
+                      <div key={sc.index} className="row-in flex items-center gap-2 px-1 py-0.5">
+                        <span className="mono w-6 text-muted">{sc.index}</span>
+                        <button className="mono text-signal hover:underline"
+                          title="copy start seconds"
+                          onClick={() => navigator.clipboard.writeText(String(sc.start_seconds)).catch(() => {})}>
+                          {fmtTs(sc.start_seconds)}
+                        </button>
+                        <span className="mono text-muted">→ {fmtTs(sc.end_seconds)}</span>
+                        <span className="mono text-muted">({sc.duration_seconds}s)</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {j.result && j.status === "done" && j.result.op === "audio_energy" && a && (
+                <div className="mt-1 border-t border-edge pt-1">
+                  <div className="label">
+                    QUIET INTRO {a.quiet_intro_seconds}s · PEAK {a.peak_loudness_lufs} LUFS @ {a.peak_loudness_at_seconds}s · ACTIVE {a.active_seconds}/{a.total_seconds}s
+                    {j.result.energy_profile_truncated && " · profile truncated"}
+                  </div>
+                  <div className="mt-1 flex h-8 items-end gap-px overflow-hidden">
+                    {prof.slice(0, 600).map((e) => (
+                      <div key={e.time_seconds} title={`${e.time_seconds}s · ${e.loudness_lufs} LUFS`}
+                        style={{
+                          width: "2px",
+                          height: `${Math.max(4, Math.min(100, ((e.loudness_lufs + 60) / 60) * 100))}%`,
+                          background: e.active ? "var(--color-signal)" : "var(--color-edge)",
+                        }} />
+                    ))}
+                    {prof.length > 600 && <span className="label text-muted">+{prof.length - 600}s</span>}
+                  </div>
+                </div>
               )}
               {tail.length > 0 && (
                 <pre className="mono mt-1 max-h-32 overflow-auto whitespace-pre-wrap text-xs text-muted">{tail.join("\n")}</pre>

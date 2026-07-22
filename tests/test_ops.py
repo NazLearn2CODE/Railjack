@@ -34,18 +34,19 @@ def _fc(argv):
 # -- catalog / growth invariant -------------------------------------------
 
 def test_catalog_matches_builders():
-    """The UI catalog and the runner's BUILDERS must name the same ops."""
-    assert {c["id"] for c in ffmpeg_jobs._CATALOG} == set(ffmpeg_jobs.BUILDERS)
+    """The UI catalog and the runner's BUILDERS ∪ ANALYZERS must name the same ops."""
+    assert {c["id"] for c in ffmpeg_jobs._CATALOG} == set(ffmpeg_jobs.BUILDERS) | set(ffmpeg_jobs.ANALYZERS)
 
 
 def test_multi_and_audio_derive_from_catalog():
     assert ffmpeg_jobs._MULTI == {"concat", "xfade"}
-    assert ffmpeg_jobs.AUDIO_OPS == {"loudnorm", "volume"}
+    assert ffmpeg_jobs.AUDIO_OPS == {"loudnorm", "volume", "audio_energy"}
+    assert ffmpeg_jobs.ANALYSIS_OPS == {"scene_detect", "audio_energy"}
 
 
 def test_every_catalog_op_has_a_builder_and_metadata():
     for c in ffmpeg_jobs._CATALOG:
-        assert c["id"] in ffmpeg_jobs.BUILDERS
+        assert c["id"] in ffmpeg_jobs.BUILDERS or c["id"] in ffmpeg_jobs.ANALYZERS
         assert c["needs"] in ("single", "multi")
         assert {"id", "label", "cat", "needs", "hint"} <= set(c)
 

@@ -15,12 +15,17 @@ Progress comes from ffmpeg ``-progress pipe:1 -nostats``: stdout is parsed for
 ``out_time_us`` (microseconds, despite the legacy ``out_time_ms`` alias) and
 divided by the total output duration (ffprobe'd; xfade subtracts overlaps,
 concat sums the parts). UI polls 1 s — no websockets.
+
+ANALYZE ops (``ANALYZERS``) are read-only: one ff* run parsed in Python, a
+JSON-able ``result`` + ``<op>_<ts>.json`` sidecar (no rendered file, no
+incremental progress).
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import math
 import os
 import re
 import signal
@@ -388,6 +393,142 @@ def volume(inputs: list[Path], out: Path, p: dict) -> list[str]:
             "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", str(out)]
 
 
+# ------------------------------------------------------- analysis ops (ANALYZE)
+# Read-only: no rendered output. One ff* subprocess, parsed in Python, returns
+# a JSON-able dict. Stock documented filters — clean-room, no AGPL code.
+
+def _lavfi_escape(path: str) -> str:
+    """Escape a filename for movie= inside -f lavfi (2 parser levels:
+    option parser \\ ' : then filtergraph parser \\ ' , ; [ ])."""
+    l1 = re.sub(r"([\\':])", r"\\\1", path)
+    return re.sub(r"([\\',;\[\]])", r"\\\1", l1)
+
+def _scene_argv(inp: Path, threshold: float) -> list[str]:
+    graph = f"movie={_lavfi_escape(str(inp))},select=gt(scene\\,{threshold})"
+    return ["ffprobe", "-v", "quiet", "-show_entries", "frame=pts_time",
+            "-of", "json", "-f", "lavfi", graph]
+
+def _energy_argv(inp: Path) -> list[str]:
+    return ["ffmpeg", "-hide_banner", "-nostats", "-i", str(inp),
+            "-vn", "-af", "ebur128", "-f", "null", "-"]
+
+def _parse_scene_frames(stdout_json: str) -> list[float]:
+    data = json.loads(stdout_json or "{}")
+    out = []
+    for fr in data.get("frames", []):
+        try: out.append(float(fr["pts_time"]))
+        except (KeyError, TypeError, ValueError): continue
+    return sorted(out)
+
+def _build_scenes(cut_times, duration, min_len) -> dict:
+    bounds = [0.0]
+    for t in cut_times:
+        if t - bounds[-1] >= min_len and t < duration:
+            bounds.append(t)
+    if duration > bounds[-1]:
+        bounds.append(duration)
+    scenes = [{"index": i, "start_seconds": round(bounds[i], 3),
+               "end_seconds": round(bounds[i+1], 3),
+               "duration_seconds": round(bounds[i+1] - bounds[i], 3)}
+              for i in range(len(bounds) - 1)]
+    return {"cuts": [round(b, 3) for b in bounds[1:-1]], "scenes": scenes}
+
+_EBUR_LINE = re.compile(r"t:\s*([\d.]+)\s+.*?M:\s*(-?[\d.]+|-inf)", re.IGNORECASE)
+_SILENCE_LUFS = -120.0
+
+def _parse_ebur128(stderr: str) -> list[tuple[float, float]]:
+    out = []
+    for ln in stderr.splitlines():
+        m = _EBUR_LINE.search(ln)
+        if m:
+            lufs = _SILENCE_LUFS if m.group(2).lower() == "-inf" else float(m.group(2))
+            out.append((float(m.group(1)), max(_SILENCE_LUFS, lufs)))
+    return out
+
+def _energy_profile(samples, threshold) -> dict:
+    """Per-second averages of ~10/s momentary LUFS + summary; empty → zeroed shape.
+
+    Fixed per-second buckets (floor(max t)+1) — resolution enough for a
+    loudness strip and bounded memory; finer bins would need a downsample step.
+    """
+    if not samples:
+        return {"analysis": {"threshold_lufs": threshold, "total_seconds": 0,
+                             "active_seconds": 0, "quiet_intro_seconds": 0,
+                             "peak_loudness_at_seconds": None,
+                             "peak_loudness_lufs": None},
+                "energy_profile": []}
+    total = math.floor(max(t for t, _ in samples)) + 1
+    sums: dict[int, float] = {}
+    counts: dict[int, int] = {}
+    for t, lufs in samples:
+        b = math.floor(t)            # pts_time >= 0 → bucket = whole second
+        sums[b] = sums.get(b, 0.0) + lufs
+        counts[b] = counts.get(b, 0) + 1
+    profile: list[dict] = []
+    peak_lufs = None
+    peak_at: int | None = None
+    active = 0
+    quiet_intro = 0
+    leading = True
+    for s in range(total):
+        avg = sums[s] / counts[s] if counts.get(s) else _SILENCE_LUFS
+        is_active = avg > threshold
+        if is_active:
+            active += 1
+            leading = False
+        elif leading:
+            quiet_intro += 1
+        if peak_lufs is None or avg > peak_lufs:
+            peak_lufs, peak_at = avg, s
+        profile.append({"time_seconds": s, "loudness_lufs": round(avg, 1), "active": is_active})
+    return {"analysis": {"threshold_lufs": threshold, "total_seconds": total,
+                         "active_seconds": active, "quiet_intro_seconds": quiet_intro,
+                         "peak_loudness_at_seconds": peak_at,
+                         "peak_loudness_lufs": round(peak_lufs, 1)},
+            "energy_profile": profile}
+
+async def _run_capture(job: "Job", argv: list[str]) -> tuple[int, str, str]:
+    try:
+        proc = await asyncio.create_subprocess_exec(*argv,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+    except FileNotFoundError:
+        raise RuntimeError(f"{argv[0]} binary not found on PATH")
+    job.proc = proc
+    out_b, err_b = await proc.communicate()
+    job.proc = None
+    return (proc.returncode or 0, out_b.decode(errors="replace"),
+            err_b.decode(errors="replace"))
+
+async def analyze_scene_detect(inputs, p, job) -> dict:
+    rc, stdout, stderr = await _run_capture(job, _scene_argv(inputs[0], p["threshold"]))
+    if rc != 0:
+        for ln in stderr.splitlines()[-20:]: job.logs.append(ln)
+        raise RuntimeError(f"ffprobe exited {rc}")
+    built = _build_scenes(_parse_scene_frames(stdout), p["durations"][0], p["min_scene_len"])
+    job.logs.append(f"scene_detect: {len(built['cuts'])} cut(s), {len(built['scenes'])} scene(s)")
+    return {"op": "scene_detect", "input": str(inputs[0]), "threshold": p["threshold"],
+            "min_scene_length_seconds": p["min_scene_len"],
+            "duration_seconds": round(p["durations"][0], 3),
+            "scene_count": len(built["scenes"]), **built}
+
+async def analyze_audio_energy(inputs, p, job) -> dict:
+    rc, _out, stderr = await _run_capture(job, _energy_argv(inputs[0]))
+    if rc != 0:
+        for ln in stderr.splitlines()[-20:]: job.logs.append(ln)
+        raise RuntimeError(f"ffmpeg exited {rc}")
+    samples = _parse_ebur128(stderr)
+    if not samples:
+        raise RuntimeError("no ebur128 samples parsed from ffmpeg output")
+    prof = _energy_profile(samples, p["energy_threshold"])
+    a = prof["analysis"]
+    job.logs.append(f"audio_energy: {a['active_seconds']}/{a['total_seconds']}s active, "
+                    f"peak {a['peak_loudness_lufs']} LUFS")
+    return {"op": "audio_energy", "input": str(inputs[0]),
+            "audio_duration_seconds": round(p["durations"][0], 3), **prof}
+
+ANALYZERS = {"scene_detect": analyze_scene_detect, "audio_energy": analyze_audio_energy}
+
+
 BUILDERS = {
     "transcode_h264": transcode_h264,
     "concat": concat,
@@ -469,13 +610,19 @@ _CATALOG: list[dict] = [
     {"id": "volume",         "label": "Volume/gain",        "cat": "AUDIO",     "needs": "single", "audio": True, "hint": "×2 gain"},
     {"id": "transcode_h264", "label": "H.264 master",       "cat": "TRANSCODE", "needs": "single", "hint": "CRF 18 master"},
     {"id": "transcode_dnxhr","label": "DNxHR (Resolve)",    "cat": "TRANSCODE", "needs": "single", "hint": "edit intermediate"},
+    {"id": "scene_detect",  "label": "Scene detect",        "cat": "ANALYZE",    "needs": "single", "analysis": True, "hint": "cut list → JSON, no render"},
+    {"id": "audio_energy",  "label": "Audio energy",         "cat": "ANALYZE",    "needs": "single", "analysis": True, "audio": True, "hint": "loudness profile → JSON"},
 ]
-assert {c["id"] for c in _CATALOG} == set(BUILDERS), "BUILDERS and _CATALOG drifted — sync them"
+assert not set(BUILDERS) & set(ANALYZERS), "an op cannot be both builder and analyzer"
+assert {c["id"] for c in _CATALOG} == set(BUILDERS) | set(ANALYZERS), \
+    "BUILDERS ∪ ANALYZERS and _CATALOG drifted — sync them"
 
 # ops that take exactly one clip vs. ops that need >= 2 (ordered)
 _MULTI = {c["id"] for c in _CATALOG if c["needs"] == "multi"}
 # ops that require an audio stream — guarded in create_job after ffprobe
 AUDIO_OPS = {c["id"] for c in _CATALOG if c.get("audio")}
+ANALYSIS_OPS = {c["id"] for c in _CATALOG if c.get("analysis")}
+assert ANALYSIS_OPS == set(ANALYZERS), "analysis flag and ANALYZERS drifted"
 
 
 def _total_duration(op: str, probes: list[tuple[float, bool]], p: dict) -> float:
@@ -502,6 +649,7 @@ class Job:
     error: str | None = None
     proc: asyncio.subprocess.Process | None = field(default=None, repr=False)
     cancel: bool = False
+    result: dict | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -512,6 +660,7 @@ class Job:
             "output_path": self.output_path,
             "error": self.error,
             "logs": list(self.logs),
+            "result": self.result,
         }
 
 
@@ -571,11 +720,41 @@ async def _execute(job: Job, argv: list[str], total_us: int) -> None:
             job.status, job.error = "error", f"ffmpeg exited {rc}"
 
 
+async def _execute_analysis(job: Job, op: str, inputs: list[Path],
+                            params: dict, out: Path) -> None:
+    """Analysis twin of _execute: same lock + lifecycle; dict result + JSON
+    sidecar instead of a rendered file; no incremental progress."""
+    async with _LOCK:
+        if job.cancel:
+            job.status = "cancelled"; return
+        job.status = "running"
+        try:
+            result = await ANALYZERS[op](inputs, params, job)
+        except RuntimeError as e:
+            if job.cancel: job.status = "cancelled"
+            else: job.status, job.error = "error", str(e)
+            return
+        if job.cancel:
+            job.status = "cancelled"; return
+        try:
+            out.write_text(json.dumps(result, indent=2))
+        except OSError as e:
+            job.logs.append(f"sidecar write failed: {e}"); job.output_path = None
+        # inline copy capped so the 1s poll doesn't ship megabytes (sidecar keeps all)
+        slim = dict(result)
+        prof = slim.get("energy_profile")
+        if isinstance(prof, list) and len(prof) > 3600:
+            slim["energy_profile"] = prof[:3600]
+            slim["energy_profile_truncated"] = True
+        job.result = slim
+        job.status, job.progress = "done", 100
+
+
 # ---------------------------------------------------------------- output naming
 
 
 def _output_path(op: str, out_dir: Path) -> Path:
-    ext = ".mov" if op == "transcode_dnxhr" else ".mp4"
+    ext = ".json" if op in ANALYSIS_OPS else (".mov" if op == "transcode_dnxhr" else ".mp4")
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")
     return out_dir / f"{op}_{ts}{ext}"
 
@@ -602,6 +781,9 @@ class JobBody(BaseModel):
     fade: float | None = None              # fade in/out duration (s)
     speed: float | None = None             # speed factor (2.0 = 2× fast)
     gain: float | None = None              # audio gain factor (2.0 = 2×)
+    threshold: float | None = None         # scene_detect scene score 0..1
+    min_scene_len: float | None = None     # scene_detect min scene length (s)
+    energy_threshold: float | None = None  # audio_energy active threshold (LUFS)
     output_dir: str | None = None  # UI-picked render folder; None → default
 
 
@@ -700,8 +882,8 @@ def list_ops() -> dict:
 
 def _validate(op: str, body: JobBody) -> tuple[list[Path], Path, dict]:
     """Resolve + confine paths, check op arity, collect op params. No ffprobe."""
-    if op not in BUILDERS:
-        raise HTTPException(400, f"unknown op {op!r}; want one of {sorted(BUILDERS)}")
+    if op not in BUILDERS and op not in ANALYZERS:
+        raise HTTPException(400, f"unknown op {op!r}; want one of {sorted(set(BUILDERS) | set(ANALYZERS))}")
 
     try:
         inputs = [_safe_input(p) for p in body.files]
@@ -734,6 +916,13 @@ def _validate(op: str, body: JobBody) -> tuple[list[Path], Path, dict]:
         params["speed"] = min(16.0, max(0.25, body.speed)) if body.speed else 2.0
     if op == "volume":
         params["gain"] = body.gain if body.gain and body.gain > 0 else 2.0
+    if op == "scene_detect":
+        t = body.threshold if body.threshold is not None else 0.3
+        params["threshold"] = min(1.0, max(0.0, t))
+        m = body.min_scene_len if body.min_scene_len is not None else 1.0
+        params["min_scene_len"] = max(0.0, m)
+    if op == "audio_energy":
+        params["energy_threshold"] = body.energy_threshold if body.energy_threshold is not None else -40.0
     out_dir = _resolve_output_dir(body.output_dir)
     return inputs, _output_path(op, out_dir), params
 
@@ -760,13 +949,20 @@ async def create_job(body: JobBody) -> dict:
     if op in AUDIO_OPS and not params["audio"]:
         raise HTTPException(400, f"{op} needs an audio stream; this clip has none")
 
+    jid = uuid4().hex[:8]          # shared by both paths
+    if op in ANALYSIS_OPS:
+        job = Job(id=jid, op=op, output_path=str(out))
+        _JOBS[jid] = job
+        task = asyncio.create_task(_execute_analysis(job, op, inputs, params, out))
+        _BG.add(task); task.add_done_callback(_BG.discard)
+        return {"id": jid}
+
     argv = BUILDERS[op](inputs, out, params)
     # global flags the progress pump depends on: machine-readable key=value
     # progress on stdout, human stats (which would corrupt it) off
     argv[1:1] = ["-progress", "pipe:1", "-nostats"]
     total_us = int(_total_duration(op, probes, params) * 1_000_000)
 
-    jid = uuid4().hex[:8]
     job = Job(id=jid, op=op, output_path=str(out))
     _JOBS[jid] = job
     task = asyncio.create_task(_execute(job, argv, total_us))
