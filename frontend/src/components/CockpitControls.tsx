@@ -60,7 +60,7 @@ export default function CockpitControls() {
   const [mktSel, setMktSel] = useState("");
   const [mcpSel, setMcpSel] = useState("");
 
-  const { data: catalog } = usePolling<Catalog>("/api/catalog", 60_000);
+  const { data: catalog, refetch: refetchCatalog } = usePolling<Catalog>("/api/catalog", 60_000);
 
   const insert = async (text: string) => {
     try {
@@ -76,15 +76,19 @@ export default function CockpitControls() {
     }
   };
 
-  // Re-read the machine YAML on the server (buttons/modules) and refresh the
-  // store live — no F5, no uvicorn restart. Unlike the buttons above, this one
-  // does NOT type into the terminal; it just reloads config.
+  // Re-read the machine YAML on the server (buttons/modules) AND rescan the
+  // catalog (skills / marketplace / MCP) — no F5, no uvicorn restart. Unlike the
+  // buttons above, this one does NOT type into the terminal; it just reloads.
+  // The catalog reload busts the server-side 60 s cache so a skill/plugin/MCP
+  // added since startup appears in the dropdowns right away.
   const [reloading, setReloading] = useState(false);
   const reloadConfig = async () => {
     setReloading(true);
     try {
       const fresh = await fetchJSON<AppConfig>("/api/config/reload", { method: "POST" });
       useStore.getState().setConfig(fresh);
+      await fetchJSON<Catalog>("/api/catalog/reload", { method: "POST" });
+      await refetchCatalog();
     } catch (e) {
       console.error("config reload failed", e);
     } finally {
@@ -170,7 +174,7 @@ export default function CockpitControls() {
         className="btn btn--compact"
         onClick={() => void reloadConfig()}
         disabled={reloading}
-        title="Re-read the machine YAML (buttons/modules) — applies config edits without restarting the server"
+        title="Re-read the machine YAML (buttons/modules) and rescan skills / marketplace / MCP — applies edits and surfaces newly added skills without restarting the server"
       >
         {reloading ? "↻…" : "↻ CFG"}
       </button>

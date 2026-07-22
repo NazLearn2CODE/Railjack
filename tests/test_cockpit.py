@@ -505,3 +505,23 @@ def test_catalog_mcp_dedup_template_grouping(monkeypatch, tmp_path):
     assert by_name["web-search-prime"]["group"] == "RESEARCH"  # 'search'
     assert by_name["davinci-resolve"]["group"] == "MEDIA"  # 'davinci'/'resolve'
     assert by_name["zai-mcp-server"]["group"] == "OTHER"  # no rule matches
+
+
+def test_catalog_reload_busts_cache(monkeypatch, tmp_path):
+    """POST /api/catalog/reload rescans the filesystem even inside the 60 s cache
+    window — the mechanism behind the ↻ CFG button surfacing a just-added skill."""
+    _catalog_env(monkeypatch, tmp_path)
+    app = FastAPI()
+    app.include_router(catalog.router)
+    c = TestClient(app)
+
+    # Prime the cache with a GET, then add a skill on disk. A second GET still
+    # serves the stale cache (this is exactly the bug the reload fixes).
+    assert "brand-new" not in [s["name"] for s in c.get("/api/catalog").json()["skills"]]
+    (catalog.SKILLS_DIR / "brand-new").mkdir()
+    assert "brand-new" not in [s["name"] for s in c.get("/api/catalog").json()["skills"]]
+
+    # Reload busts the cache → the new skill appears, and stays cached for GETs.
+    reloaded = c.post("/api/catalog/reload").json()
+    assert "brand-new" in [s["name"] for s in reloaded["skills"]]
+    assert "brand-new" in [s["name"] for s in c.get("/api/catalog").json()["skills"]]

@@ -183,3 +183,14 @@ def catalog() -> dict:
     data = _build()
     _cache = (now, data)
     return data
+
+
+@router.post("/api/catalog/reload")
+def catalog_reload() -> dict:
+    """Force a fresh scan of skills / marketplace plugins / MCP servers, bypassing
+    the ``_CACHE_TTL`` cache. The ↻ CFG button calls this so a skill/plugin/MCP
+    added since the hub started shows up immediately — no cache wait, no restart."""
+    global _cache
+    data = _build()
+    _cache = (time.monotonic(), data)
+    return data
