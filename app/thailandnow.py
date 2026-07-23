@@ -7,18 +7,21 @@ Two halves share one desk-driven create/attach engine:
 
 Desks (Paul/Teerin/TIAN) are config rows in configs/tawhan.yaml → options.desks,
 so adding/changing a writer is a YAML edit, not code. REST-only via httpx — no
-google-api-python-client, no py-trello. See docs/thailandnow-plan.md.
+google-api-python-client, no py-trello. LLM calls route through app/zai.py (the
+one place we call z.ai). See docs/thailandnow-plan.md.
 """
 
 from __future__ import annotations
 
 import re
 import urllib.parse
+from pathlib import Path
 
 import httpx
-from fastapi import APIRouter, Body
+from fastapi import APIRouter, Body, HTTPException
 
 from .config import CONFIG
+from .zai import zai_message
 
 router = APIRouter()
 
@@ -35,6 +38,9 @@ def _opts() -> dict:
         if m.kind == "panel" and m.panel == "thailandnow":
             return m.options or {}
     return {}
+
+
+# --- WRITERS / shared engine (slices 1-4) ---
 
 
 @router.get("/api/thailandnow/desks")
@@ -132,8 +138,60 @@ async def scout_events(payload: dict = Body(default={})):
     return {"events": list(events.values()), "count": len(events), "errors": errors}
 
 
+def _gem_path() -> Path:
+    """Resolve the publicity gem path (relative paths anchor at the repo root)."""
+    p = Path(_opts().get("gem_path", "app/gems/event-publicity.md"))
+    if not p.is_absolute():
+        p = Path(__file__).resolve().parent.parent / p
+    return p
+
+
+def _load_gem(path: Path) -> str:
+    """Read the publicity gem and extract just the prompt body. The module-local
+    file mirrors the vault canonical (frontmatter + intro + notes); the prompt
+    proper runs from '## Role & Purpose' to the trailing '---' separator."""
+    text = path.read_text(encoding="utf-8")
+    start = text.find("## Role & Purpose")
+    body = text[start:] if start != -1 else text
+    cut = body.find("\n---\n")
+    if cut != -1:
+        body = body[:cut]
+    return body.strip()
+
+
+@router.post("/api/thailandnow/events/publicize")
+async def publicize_event(payload: dict = Body(default={})):
+    """Generate the 5-part publicity bundle for an event. Jina-fetches each URL,
+    concatenates as raw info, then calls the publicity LLM with the gem prompt as
+    the system role. Returns the plain-text bundle (FB / X / IG / Meta / Long-form)
+    — shown editable in the UI before any doc is created (nothing auto-committed)."""
+    body = payload or {}
+    event = body.get("event") or {}
+    urls = body.get("urls") or ([event["url"]] if event.get("url") else [])
+    if not urls:
+        raise HTTPException(400, "no event urls provided")
+    chunks: list[str] = []
+    for u in urls:
+        try:
+            chunks.append(await _jina_read(u))
+        except Exception as e:
+            chunks.append(f"[fetch failed for {u}: {e}]")
+    raw = "\n\n---\n\n".join(chunks)
+    system = _load_gem(_gem_path())
+    model = (_opts().get("publicity_llm") or {}).get("model") or "glm-5"
+    user = (
+        f"Event title: {event.get('title', '(unknown)')}\n"
+        f"Source URL(s): {', '.join(urls)}\n\n"
+        f"Raw event information (Thai or English, any form):\n{raw[:20000]}"
+    )
+    bundle = await zai_message(
+        user, max_tokens=8192, system=system, model=model, timeout=180
+    )
+    return {"bundle": bundle, "event": event, "urls": urls, "model": model}
+
+
 if __name__ == "__main__":
-    # Self-check the non-trivial parser logic on a captured snippet (no network).
+    # Self-check the non-trivial parser + gem-extraction logic (no network).
     sample = (
         "[![Image 17](https://www.thailandnow.in.th/wp-content/uploads/2026/07/x.jpeg)\n"
         "[Thailand-China Cooperation Expo 2026](https://www.thailandnow.in.th/event/thailand-china-cooperation-expo/)\n"
@@ -149,4 +207,8 @@ if __name__ == "__main__":
         "## [All Conference Alert](https://duckduckgo.com/l/?uddg=https%3A%2F%2Fallconferencealert.net%2Fx)"
     )
     assert ddg and ddg[0]["url"] == "https://allconferencealert.net/x", ddg
+    gem = _load_gem(_gem_path())
+    assert "## Role & Purpose" in gem and "Output Layout" in gem, "gem extraction wrong"
+    assert not gem.startswith("---"), "frontmatter not stripped"
     print("OK parsers — tn:", titles, "| ddg:", [d["url"] for d in ddg])
+    print("OK gem:", len(gem), "chars, starts:", repr(gem[:40]))

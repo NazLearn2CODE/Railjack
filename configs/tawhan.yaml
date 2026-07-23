@@ -55,10 +55,8 @@ modules:
     options:
       google_token_path: ~/.config/railjack/google_token.json   # minted once: documents + drive scopes
       trello_board_short: VTMuHmEj                              # board short link (thailand-now-25-26)
-      publicity_llm:                                            # drives the EVENTS publicity bundle (slice 6)
-        base_url: "${ANTHROPIC_BASE_URL}"                       # reuse the home z.ai/OmniRoute gateway in .env
-        model: glm-5                                            # swap to gemini-* by retargeting base_url + key
-        api_key_env: ANTHROPIC_API_KEY
+      publicity_llm:
+        model: glm-5      # /events/publicize; the call routes through app/zai.py (ZAI_API_KEY + z.ai Anthropic endpoint)
       gem_path: app/gems/event-publicity.md                     # read fresh each /events/publicize call
       desks:
         - {id: paul,   kind: article, drive_folder_id: 1w8ESeKzvW-Er36qjMjgfLU7fMwa8KSu6, trello_list_name: "To draft (Paul)",   doc_name: "[{yyyymm}] [CAT] #{nn}",               card_name: "Article | {mon} #{nn}", count: 12}
