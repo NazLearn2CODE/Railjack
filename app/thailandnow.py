@@ -13,8 +13,11 @@ one place we call z.ai). See docs/thailandnow-plan.md.
 
 from __future__ import annotations
 
+import json
+import os
 import re
 import urllib.parse
+from datetime import datetime
 from pathlib import Path
 
 import httpx
@@ -53,6 +56,189 @@ def get_desks() -> dict:
         "trello_board_short": opts.get("trello_board_short", ""),
         "ready": bool(opts.get("desks")),
     }
+
+
+# --- name-token resolution + {nn} dedup (pure; self-checked) ---
+
+
+def _yyyymm_mon(when: datetime | None = None) -> tuple[str, str]:
+    d = when or datetime.now()
+    return d.strftime("%Y%m"), d.strftime("%b").upper()  # "202607", "JUL"
+
+
+def _resolve_name(template: str, yyyymm: str, mon: str, nn: int, title: str | None) -> str:
+    """Substitute every token in a doc/card name template. {nn} is zero-padded to
+    2 (monthly counts stay <100). [CAT] is left literal — Ben fills it."""
+    return (
+        template.replace("{yyyymm}", yyyymm)
+        .replace("{mon}", mon)
+        .replace("{nn}", f"{nn:02d}")
+        .replace("{title}", title or "")
+    )
+
+
+def _nn_regex(template: str, yyyymm: str, mon: str, title: str | None) -> re.Pattern:
+    """Regex matching names equal to ``template`` with {nn} = some digits."""
+    s = template.replace("{yyyymm}", yyyymm).replace("{mon}", mon).replace("{title}", title or "")
+    parts = s.split("{nn}")
+    if len(parts) != 2:
+        return re.compile(r"\A\Z")  # no {nn} → matches nothing
+    return re.compile(re.escape(parts[0]) + r"(\d+)" + re.escape(parts[1]) + r"\Z")
+
+
+def _next_nn(template: str, yyyymm: str, mon: str, title: str | None, names: list[str]) -> int:
+    """Max existing #NN for this template+month, +1 (min 1). Re-running mid-month
+    never re-creates #01 — it continues from the highest seen."""
+    rx = _nn_regex(template, yyyymm, mon, title)
+    mx = 0
+    for n in names:
+        m = rx.match(n)
+        if m:
+            mx = max(mx, int(m.group(1)))
+    return mx + 1
+
+
+# --- Google (documents + drive scopes) ---
+
+
+def _google_token_path() -> Path:
+    return Path(os.path.expanduser(_opts().get("google_token_path", "~/.config/railjack/google_token.json")))
+
+
+async def _google_token() -> str:
+    """Load + refresh the Google OAuth token. Minted once via ``python3 -m
+    app.tn_auth`` → options.google_token_path. HTTPException(503) until minted."""
+    path = _google_token_path()
+    if not path.exists():
+        raise HTTPException(
+            503, "Google token not minted — run `python3 -m app.tn_auth` once "
+            "(needs the OAuth client_id/secret for documents+drive scopes)",
+        )
+    d = json.loads(path.read_text())
+    data = urllib.parse.urlencode({
+        "client_id": d["client_id"], "client_secret": d["client_secret"],
+        "refresh_token": d["refresh_token"], "grant_type": "refresh_token",
+    })
+    async with httpx.AsyncClient(timeout=20) as c:
+        r = await c.post(d["token_uri"], content=data,
+                         headers={"content-type": "application/x-www-form-urlencoded"})
+        if r.status_code != 200:
+            raise HTTPException(502, f"Google token refresh failed: {r.text[:200]}")
+        return r.json()["access_token"]
+
+
+async def _google_create_doc(token: str, folder_id: str, name: str, body: str) -> str:
+    """Create a Doc in ``folder_id``, make it link-shareable, optionally write
+    ``body`` (Articles/Blogs pass none → blank). Returns the Doc's webViewLink."""
+    hdr = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    async with httpx.AsyncClient(timeout=30) as c:
+        r = await c.post(
+            "https://www.googleapis.com/drive/v3/files", headers=hdr,
+            json={"name": name, "parents": [folder_id],
+                  "mimeType": "application/vnd.google-apps.document"},
+        )
+        r.raise_for_status()
+        doc_id = r.json()["id"]
+        await c.post(
+            f"https://www.googleapis.com/drive/v3/files/{doc_id}/permissions",
+            headers=hdr, params={"sendNotificationEmail": "false"},
+            json={"role": "reader", "type": "anyone"},
+        )
+        if body:
+            await c.post(
+                f"https://docs.googleapis.com/v1/documents/{doc_id}:batchUpdate",
+                headers=hdr,
+                json={"requests": [{"insertText": {"location": {"index": 1}, "text": body}}]},
+            )
+        meta = await c.get(
+            f"https://www.googleapis.com/drive/v3/files/{doc_id}",
+            headers=hdr, params={"fields": "webViewLink"},
+        )
+        return meta.json().get("webViewLink") or f"https://docs.google.com/document/d/{doc_id}/edit"
+
+
+# --- Trello (key+token as query params) ---
+
+
+def _trello_creds() -> tuple[str, str]:
+    key = os.environ.get("TRELLO_KEY", "")
+    tok = os.environ.get("TRELLO_TOKEN", "")
+    if not key or not tok:
+        raise HTTPException(503, "TRELLO_KEY/TRELLO_TOKEN not in the service env")
+    return key, tok
+
+
+async def _trello(method: str, path: str, params: dict | None = None, body: dict | None = None):
+    key, tok = _trello_creds()
+    q = {"key": key, "token": tok, **(params or {})}
+    async with httpx.AsyncClient(timeout=20) as c:
+        r = await c.request(method, f"https://api.trello.com/1{path}", params=q, json=body)
+        if r.status_code >= 400:
+            raise HTTPException(502, f"Trello {method} {path}: {r.status_code} {r.text[:200]}")
+        return r.json() if r.content else {}
+
+
+async def _trello_list_id(board_short: str, list_name: str) -> str:
+    """Resolve a list name → id. Case-insensitive + trimmed: the board's list
+    names are ALL-CAPS ('To draft (PAUL)') while the config is mixed-case."""
+    lists = await _trello("GET", f"/boards/{board_short}/lists", {"fields": "name,id"})
+    want = list_name.strip().lower()
+    for l in lists:
+        if l["name"].strip().lower() == want:
+            return l["id"]
+    raise HTTPException(
+        400, f"no Trello list matching {list_name!r}; have {[l['name'] for l in lists]}"
+    )
+
+
+@router.post("/api/thailandnow/provision")
+async def provision(payload: dict = Body(default={})):
+    """The shared create/attach engine. For each of N items on a desk: resolve the
+    next #NN (scanning existing cards in the desk's list), create a Google Doc in
+    the desk's Drive folder (blank unless ``body`` is given), make it
+    link-shareable, create a Trello card in the desk's list, and attach the Doc to
+    the card. Returns each {doc,card} pair.
+
+    The Google step 503s until the token is minted (``python3 -m app.tn_auth``);
+    Trello + dedup resolution happen first, so the gate message reports the next
+    #NN it *would* create."""
+    body = payload or {}
+    desk_id = body.get("desk_id")
+    opts = _opts()
+    desk = next((d for d in opts.get("desks", []) if d["id"] == desk_id), None)
+    if not desk:
+        raise HTTPException(400, f"unknown desk_id {desk_id!r}")
+    board = opts.get("trello_board_short", "")
+    count = int(body.get("count") or desk.get("count") or 1)
+    yyyymm, mon = _yyyymm_mon()
+    title = body.get("title")
+    doc_body = body.get("body") or ""
+    card_desc = body.get("card_desc") or ""
+
+    list_id = await _trello_list_id(board, desk["trello_list_name"])
+    cards = await _trello("GET", f"/lists/{list_id}/cards", {"fields": "name"})
+    nn = _next_nn(desk["card_name"], yyyymm, mon, title, [c["name"] for c in cards])
+
+    if not _google_token_path().exists():
+        raise HTTPException(
+            503, f"resolved next #{nn:02d} for {desk_id} ({count}×, list "
+            f"{desk['trello_list_name']!r}), but the Google token isn't minted — "
+            "run `python3 -m app.tn_auth`, then retry.",
+        )
+    token = await _google_token()
+
+    out = []
+    for i in range(count):
+        cur = nn + i
+        doc_name = _resolve_name(desk["doc_name"], yyyymm, mon, cur, title)
+        card_name = _resolve_name(desk["card_name"], yyyymm, mon, cur, title)
+        doc_url = await _google_create_doc(token, desk["drive_folder_id"], doc_name, doc_body)
+        card = await _trello("POST", "/cards", {"idList": list_id, "name": card_name, "desc": card_desc})
+        await _trello("POST", f"/cards/{card['id']}/attachments",
+                      body={"url": doc_url, "name": doc_name})
+        out.append({"nn": cur, "doc_name": doc_name, "doc_url": doc_url,
+                    "card_name": card_name, "card_url": card.get("url", "")})
+    return {"desk_id": desk_id, "count": count, "yyyymm": yyyymm, "items": out}
 
 
 # --- EVENTS radar (slices 5-8) — keyless Jina Reader first ---
@@ -243,8 +429,30 @@ async def event_images(payload: dict = Body(default={})):
     }
 
 
+@router.post("/api/thailandnow/events/create")
+async def create_event_doc(payload: dict = Body(default={})):
+    """Create the TIAN Doc+card for a scouted event. The Doc body is the (edited)
+    publicity bundle; the card desc carries the event URL(s) + chosen image links.
+    Just a tian-desk provision with a non-empty body — same engine as WRITERS."""
+    body = payload or {}
+    event = body.get("event") or {}
+    image_urls = body.get("image_urls") or []
+    urls = body.get("urls") or ([event["url"]] if event.get("url") else [])
+    desc_lines = []
+    if urls:
+        desc_lines.append("Source: " + " ".join(urls))
+    if image_urls:
+        desc_lines.append("Images: " + " ".join(image_urls))
+    return await provision({
+        "desk_id": "tian",
+        "title": event.get("title", "Untitled Event"),
+        "body": body.get("bundle_text") or "",
+        "card_desc": "\n".join(desc_lines),
+    })
+
+
 if __name__ == "__main__":
-    # Self-check the non-trivial parser + gem-extraction + image logic (no network).
+    # Self-check the non-trivial pure logic (no network, no creds).
     sample = (
         "[![Image 17](https://www.thailandnow.in.th/wp-content/uploads/2026/07/x.jpeg)\n"
         "[Thailand-China Cooperation Expo 2026](https://www.thailandnow.in.th/event/thailand-china-cooperation-expo/)\n"
@@ -271,6 +479,13 @@ if __name__ == "__main__":
     )
     assert len(imgs) == 2, imgs  # svg not matched; logo skipped; 2 raster kept
     assert imgs[0]["url"].endswith("run-1024x682.jpg"), imgs[0]  # largest crop ranks first
+    # name resolution + #NN dedup
+    assert _resolve_name("[{yyyymm}] [CAT] #{nn}", "202607", "JUL", 3, None) == "[202607] [CAT] #03"
+    assert _resolve_name("Article | {mon} #{nn}", "202607", "JUL", 12, None) == "Article | JUL #12"
+    assert _next_nn("[{yyyymm}] [CAT] #{nn}", "202607", "JUL", None,
+                    ["[202607] [CAT] #01", "[202607] [CAT] #07", "[202605] [CAT] #09"]) == 8
+    assert _next_nn("[{yyyymm}] [CAT] #{nn}", "202607", "JUL", None, []) == 1
+    ym, mon = _yyyymm_mon()
     print("OK parsers — tn:", titles, "| ddg:", [d["url"] for d in ddg])
-    print("OK gem:", len(gem), "chars, starts:", repr(gem[:40]))
-    print("OK images:", [i["url"].split("/")[-1] for i in imgs])
+    print("OK gem:", len(gem), "chars | images:", [i["url"].split("/")[-1] for i in imgs])
+    print("OK names + dedup (yyyymm", ym, mon, ")")
