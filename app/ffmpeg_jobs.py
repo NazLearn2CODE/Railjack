@@ -381,6 +381,21 @@ sharpen_strong = _vf_op("unsharp=7:7:2.5:7:7:0.0")   # heavier 7×7 amt 2.5
 denoise_heavy = _vf_op("hqdn3d=8:6:12:9")            # 2× the standard denoise
 
 
+# 2026-07-23 — FRAME blur-fill. split/gblur/overlay probed against the
+# installed ffmpeg 8.1.2 (`ffmpeg -h filter=<name>`) before landing, per the
+# 2026-07-20 batch convention.
+def fit_aspect(inputs: list[Path], out: Path, _p: dict) -> list[str]:
+    """FRAME: blur-fill fit to the 16:9 bench — blurred cover background,
+    aspect-fit foreground centered on top. Fixed constants (SIZE, sigma 20)
+    per the zero-frontend-edit growth invariant."""
+    filt = ("[0:v]split=2[bg][fg];"
+            f"[bg]scale={SIZE}:force_original_aspect_ratio=increase,crop={SIZE},gblur=sigma=20[bg];"
+            f"[fg]scale={SIZE}:force_original_aspect_ratio=decrease[fg];"
+            "[bg][fg]overlay=(W-w)/2:(H-h)/2,format=yuv420p[v]")
+    return ["ffmpeg", "-y", "-i", str(inputs[0]), "-filter_complex", filt,
+            "-map", "[v]", "-map", "0:a?", *_master(), str(out)]
+
+
 def loudnorm(inputs: list[Path], out: Path, _p: dict) -> list[str]:
     """§7: EBU R128 loudness normalize. Audio filtered, video copied (no re-encode)."""
     return ["ffmpeg", "-y", "-i", str(inputs[0]), "-af", "loudnorm=I=-16:TP=-1.5:LRA=11",
@@ -565,6 +580,8 @@ BUILDERS = {
     "deflicker": deflicker,
     "sharpen_strong": sharpen_strong,
     "denoise_heavy": denoise_heavy,
+    # FRAME (single clip):
+    "fit_aspect": fit_aspect,
     # AUDIO (single clip):
     "loudnorm": loudnorm,
     "volume": volume,
@@ -606,6 +623,7 @@ _CATALOG: list[dict] = [
     {"id": "deflicker",      "label": "Deflicker",          "cat": "EFFECTS",   "needs": "single", "hint": "even out flicker"},
     {"id": "sharpen_strong", "label": "Sharpen strong",     "cat": "EFFECTS",   "needs": "single", "hint": "unsharp 7×7 ×2.5"},
     {"id": "denoise_heavy",  "label": "Denoise heavy",      "cat": "EFFECTS",   "needs": "single", "hint": "hqdn3d ×2"},
+    {"id": "fit_aspect",     "label": "Fit aspect (blur)",  "cat": "FRAME",     "needs": "single", "hint": "9:16 → 16:9 blur-fill"},
     {"id": "loudnorm",       "label": "Loudness normalize", "cat": "AUDIO",     "needs": "single", "audio": True, "hint": "EBU R128 −16 LUFS"},
     {"id": "volume",         "label": "Volume/gain",        "cat": "AUDIO",     "needs": "single", "audio": True, "hint": "×2 gain"},
     {"id": "transcode_h264", "label": "H.264 master",       "cat": "TRANSCODE", "needs": "single", "hint": "CRF 18 master"},

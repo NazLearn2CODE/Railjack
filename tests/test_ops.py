@@ -170,6 +170,30 @@ def test_new_ops_are_single_clip_and_paramless():
         assert op not in ffmpeg_jobs.AUDIO_OPS
 
 
+# -- fit_aspect (FRAME, blur-fill) ----------------------------------------
+
+def test_fit_aspect_filtergraph_and_maps():
+    argv = ffmpeg_jobs.fit_aspect(IN, OUT, _p())
+    assert "-filter_complex" in argv
+    fc = _fc(argv)
+    assert "split=2" in fc
+    assert "gblur=sigma=20" in fc
+    assert "overlay=(W-w)/2:(H-h)/2" in fc
+    assert "scale=1920:1080:force_original_aspect_ratio=increase" in fc  # bg cover, SIZE wired
+    assert "force_original_aspect_ratio=decrease" in fc   # fg fit
+    assert "[v]" in argv and "0:a?" in argv               # video + optional audio
+    assert "-crf" in argv and argv[argv.index("-crf") + 1] == "18"  # master block
+    assert argv[-1] == str(OUT)                           # ends on the output path
+
+
+def test_fit_aspect_catalog_row():
+    rows = {c["id"]: c for c in ffmpeg_jobs._CATALOG}
+    assert rows["fit_aspect"]["cat"] == "FRAME"
+    assert rows["fit_aspect"]["needs"] == "single"
+    assert not rows["fit_aspect"].get("audio")
+    assert not rows["fit_aspect"].get("analysis")
+
+
 # -- audio ops -------------------------------------------------------------
 
 def test_loudnorm_copies_video_and_filters_audio():
