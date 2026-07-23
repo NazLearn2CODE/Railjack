@@ -24,6 +24,7 @@ from .notebooklm import router as notebooklm_router
 from .n8n_proxy import router as n8n_proxy_router
 from .session_stats import router as session_router
 from .terminal_input import router as terminal_router
+from .thailandnow import router as thailandnow_router
 
 app = FastAPI(title="Railjack")
 app.include_router(health_router)
@@ -35,6 +36,7 @@ app.include_router(newsroom_router)
 app.include_router(catalog_router)
 app.include_router(session_router)
 app.include_router(terminal_router)
+app.include_router(thailandnow_router)
 # Phase E: same-origin reverse proxy for the n8n editor (mounted before the
 # catch-all static mount below so /n8n/* wins over frontend/dist).
 app.include_router(n8n_proxy_router)

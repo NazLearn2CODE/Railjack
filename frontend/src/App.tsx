@@ -8,6 +8,7 @@ import FfmpegPanel from "./components/FfmpegPanel";
 import ComfyPanel from "./components/ComfyPanel";
 import NotebookPanel from "./components/NotebookPanel";
 import NewsroomPanel from "./components/NewsroomPanel";
+import ThailandNowPanel from "./components/ThailandNowPanel";
 
 // kind:"panel" modules render their panel component from this map.
 const PANELS: Record<string, FC<{ module: ModuleConfig }>> = {
@@ -15,6 +16,7 @@ const PANELS: Record<string, FC<{ module: ModuleConfig }>> = {
   comfyui: ComfyPanel,
   notebooklm: NotebookPanel,
   newsroom: NewsroomPanel,
+  thailandnow: ThailandNowPanel,
 };
 
 // Phase F: always-visible bottom terminal dock. Memoized so the frequent health
