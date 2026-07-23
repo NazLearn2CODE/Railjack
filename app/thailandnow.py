@@ -190,8 +190,61 @@ async def publicize_event(payload: dict = Body(default={})):
     return {"bundle": bundle, "event": event, "urls": urls, "model": model}
 
 
+# --- image lookup (slice 7) — event-page scrape first; stock fallback deferred ---
+
+_IMG_RE = re.compile(r"!\[([^\]]*)\]\((https://[^)\s]+\.(?:jpe?g|png|webp|avif))\)", re.I)
+_IMG_SKIP = re.compile(
+    r"icon|logo|hamburger|spinner|placeholder|blank|sprite|blur|thumb|avatar|favicon", re.I
+)
+
+
+def _parse_images(md: str, limit: int = 12) -> list[dict]:
+    """Extract content images from an event page's Jina markdown. Skip nav/
+    branding art and rank larger crops higher (WP/etc. URLs carry a ``-WxH`` hint
+    like ``-1024x682``)."""
+    seen: dict[str, dict] = {}
+    for alt, url in _IMG_RE.findall(md):
+        if _IMG_SKIP.search(url) or _IMG_SKIP.search(alt):
+            continue
+        url = url.split("?")[0]
+        if url in seen:
+            continue
+        m = re.search(r"-(\d+)x(\d+)\.", url)
+        rank = int(m.group(1)) * int(m.group(2)) if m else 0
+        seen[url] = {"url": url, "alt": alt.strip()[:120], "rank": rank}
+    ranked = sorted(seen.values(), key=lambda d: d["rank"], reverse=True)
+    for d in ranked:
+        d.pop("rank", None)
+    return ranked[:limit]
+
+
+@router.post("/api/thailandnow/events/images")
+async def event_images(payload: dict = Body(default={})):
+    """Find related images for an event. Primary source: scrape the event's own
+    page via Jina for embedded content images (highest signal — they depict the
+    event). The Pexels/Pixabay stock fallback is deferred until their keys land
+    in the service env; the event's own images are the better source anyway."""
+    body = payload or {}
+    event = body.get("event") or {}
+    url = body.get("url") or event.get("url")
+    images: list[dict] = []
+    errors: list[str] = []
+    if url:
+        try:
+            md = await _jina_read(url)
+            images = _parse_images(md)
+        except Exception as e:
+            errors.append(f"scrape {url}: {e}")
+    return {
+        "images": images,
+        "count": len(images),
+        "errors": errors,
+        "note": "event-page scrape only; add PEXELS/PIXABAY keys for a stock fallback",
+    }
+
+
 if __name__ == "__main__":
-    # Self-check the non-trivial parser + gem-extraction logic (no network).
+    # Self-check the non-trivial parser + gem-extraction + image logic (no network).
     sample = (
         "[![Image 17](https://www.thailandnow.in.th/wp-content/uploads/2026/07/x.jpeg)\n"
         "[Thailand-China Cooperation Expo 2026](https://www.thailandnow.in.th/event/thailand-china-cooperation-expo/)\n"
@@ -210,5 +263,14 @@ if __name__ == "__main__":
     gem = _load_gem(_gem_path())
     assert "## Role & Purpose" in gem and "Output Layout" in gem, "gem extraction wrong"
     assert not gem.startswith("---"), "frontmatter not stripped"
+    imgs = _parse_images(
+        "![hero](https://x/wp-content/uploads/2026/07/run-1024x682.jpg)"
+        " ![icon](https://x/icon-hamburger.svg)"
+        " ![logo](https://x/logo-150x150.png)"
+        " ![gallery](https://x/run-300x200.webp)"
+    )
+    assert len(imgs) == 2, imgs  # svg not matched; logo skipped; 2 raster kept
+    assert imgs[0]["url"].endswith("run-1024x682.jpg"), imgs[0]  # largest crop ranks first
     print("OK parsers — tn:", titles, "| ddg:", [d["url"] for d in ddg])
     print("OK gem:", len(gem), "chars, starts:", repr(gem[:40]))
+    print("OK images:", [i["url"].split("/")[-1] for i in imgs])
