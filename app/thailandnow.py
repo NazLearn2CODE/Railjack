@@ -13,6 +13,7 @@ one place we call z.ai). See docs/thailandnow-plan.md.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
@@ -340,28 +341,67 @@ async def _jina_read(url: str, timeout: float = 30.0) -> str:
         return r.text
 
 
-# Event links on Naz's own site follow /event/<slug>/ — clean [Title](url) pairs.
-_TN_EVENT_RE = re.compile(
-    r"\[([^\]]+)\]\((https://www\.thailandnow\.in\.th/event/[^)\s#]+)\)"
-)
+# --- LLM → structured JSON (R5): zai returns text; parse it defensively ---
 
 
-def _parse_tn_events(md: str) -> list[dict]:
-    """Extract {title,url} entries from the thailandnow.in.th/events listing.
+def _parse_json_lenient(text: str):
+    """Parse JSON from an LLM string, tolerating ```json fences and surrounding prose.
+    Returns the parsed object (usually a list) or None."""
+    if not text:
+        return None
+    s = text.strip()
+    if s.startswith("```"):
+        s = re.sub(r"^```[a-zA-Z]*\n?", "", s).strip()
+        s = re.sub(r"\n?```$", "", s).strip()
+    try:
+        return json.loads(s)
+    except json.JSONDecodeError:
+        pass
+    for opener, closer in (("[", "]"), ("{", "}")):
+        i, j = s.find(opener), s.rfind(closer)
+        if i != -1 and j > i:
+            try:
+                return json.loads(s[i:j + 1])
+            except json.JSONDecodeError:
+                continue
+    return None
 
-    Jina truncates the image-wrapping markdown (no closing paren) so those links
-    don't match — only the clean ``[Title](event-url)`` pairs do. Dedupe by URL."""
-    out: dict[str, dict] = {}
-    for title, url in _TN_EVENT_RE.findall(md):
-        title = title.strip()
-        if not title or title.lower().startswith("image"):
-            continue
-        url = url.split("#")[0].rstrip("/")
-        out.setdefault(
-            url,
-            {"title": title, "url": url, "date": "", "location": "", "source": "thailandnow"},
-        )
-    return list(out.values())
+
+async def _llm_json(prompt: str, system: str | None = None, model: str | None = None):
+    """Ask the LLM for JSON and parse it (lenient). None on any failure."""
+    raw = await zai_message(prompt, max_tokens=4096, system=system, model=model, timeout=120)
+    return _parse_json_lenient(raw)
+
+
+def _iso_date(s) -> str | None:
+    """Coerce a date-ish string to YYYY-MM-DD, or None."""
+    if not s:
+        return None
+    try:
+        return datetime.strptime(str(s).strip()[:10], "%Y-%m-%d").strftime("%Y-%m-%d")
+    except ValueError:
+        return None
+
+
+def _normalize_event(ev, today_iso: str, window_end_iso: str, source: str = "scout"):
+    """Validate + clip one LLM-extracted event. Returns None if it has no usable start
+    date or falls outside the [today, window_end] window — the hard future filter (R5)."""
+    if not isinstance(ev, dict):
+        return None
+    start = _iso_date(ev.get("start_date"))
+    if not start or start < today_iso or start > window_end_iso:
+        return None
+    return {
+        "title": (ev.get("title") or "").strip()[:200] or "Untitled",
+        "url": (ev.get("url") or "").strip(),
+        "start_date": start,
+        "end_date": _iso_date(ev.get("end_date")) or "",
+        "signup_deadline": _iso_date(ev.get("signup_deadline")) or "",
+        "location": (ev.get("location") or "").strip()[:120],
+        "language": (ev.get("language") or "en").strip()[:4] or "en",
+        "summary": (ev.get("summary") or "").strip()[:300],
+        "source": source,
+    }
 
 
 # DuckDuckGo HTML hides the real URL in the urlencoded uddg= query param.
@@ -380,35 +420,94 @@ def _parse_ddg(md: str) -> list[dict]:
     return out
 
 
+# Default scout sources (R5). Override per-machine via options.event_listings /
+# options.event_queries in configs/<machine>.yaml. Keyless — TAT + aggregators + broad DDG.
+_DEFAULT_LISTINGS = [
+    "https://www.tourismthailand.vn/Events",
+    "https://www.tourismthailand.org/Events",
+    "https://allconferencealert.net/country/thailand/",
+    "https://10times.com/thailand",
+]
+_EXTRACT_SYS = (
+    "You extract structured event data from web pages as JSON. Return ONLY a JSON array — "
+    "no prose, no code fence. Each element has keys title, url, start_date, end_date, "
+    "signup_deadline (all dates YYYY-MM-DD or null), location, language (en/th), summary. "
+    "Skip anything without a real start date. Dates are absolute, never relative."
+)
+
+
+async def _extract_events_from(url: str, today_iso: str, window_end_iso: str, category: str,
+                               source: str) -> tuple[list[dict], str | None]:
+    """Jina-fetch one page, ask the LLM for a JSON array of dated events, then normalize +
+    window-filter each. Returns (events, error_or_none)."""
+    try:
+        md = await _jina_read(url, timeout=30.0)
+    except Exception as e:
+        return [], f"fetch {url}: {e}"
+    cat = f" Focus area: {category}." if category else ""
+    user = (
+        f"Today is {today_iso}. List upcoming events on this page whose start date is within "
+        f"{today_iso} to {window_end_iso}.{cat}\n"
+        f"Page ({url}):\n{md[:9000]}"
+    )
+    arr = await _llm_json(user, system=_EXTRACT_SYS)
+    if not isinstance(arr, list):
+        return [], None
+    out = [_normalize_event(ev, today_iso, window_end_iso, source) for ev in arr]
+    return [e for e in out if e], None
+
+
 @router.post("/api/thailandnow/events/scout")
 async def scout_events(payload: dict = Body(default={})):
-    """Events radar. Primary source is Naz's own site events archive (clean,
-    high-signal — exactly TIAN's beat). A free-text ``query`` adds a DuckDuckGo
-    pass via Jina for broader coverage. No API keys needed.
+    """Events radar (R5) — future Thailand events only, multi-source, dated + filtered.
 
-    The listing carries no per-event dates, so ``weeks`` only shapes the DDG
-    query phrasing — precise date filtering happens at the detail-fetch step
-    (``/events/publicize``) once an event is picked."""
+    Tier 1 / keyless: direct event-listing pages (TAT, allconferencealert, 10times) +
+    DuckDuckGo broad queries (catches news mentions), each fetched via Jina with the LLM
+    extracting a dated JSON array per page. Results are window-filtered (start_date within
+    today → today+weeks), deduped, and sorted by start_date. ``weeks`` is 1..52 (default 4).
+    No API keys required. (Tier 2 / NotebookLM deep research lives at /events/deep.)
+    """
     body = payload or {}
-    query = (body.get("query") or "").strip()
-    weeks = body.get("weeks") or 4
-    events: dict[str, dict] = {}
+    category = (body.get("query") or "").strip()
+    weeks = max(1, min(52, int(body.get("weeks") or 4)))
+    opts = _opts()
+    today = datetime.now()
+    window_end = today + timedelta(weeks=weeks)
+    today_iso, window_end_iso = today.strftime("%Y-%m-%d"), window_end.strftime("%Y-%m-%d")
+    span = today.strftime("%B %Y")
+
+    # candidate URLs: direct listings + DuckDuckGo broad results
+    candidates: dict[str, None] = {}
+    for u in (opts.get("event_listings") or _DEFAULT_LISTINGS):
+        candidates.setdefault(u, None)
     errors: list[str] = []
-    try:
-        md = await _jina_read("https://www.thailandnow.in.th/events")
-        for ev in _parse_tn_events(md):
-            events[ev["url"]] = ev
-    except Exception as e:  # network/parse failure — keep going, report it
-        errors.append(f"thailandnow events: {e}")
-    if query:
+    cat_q = f" {category}" if category else ""
+    queries = opts.get("event_queries") or [
+        f"Thailand events{cat_q} {span} conference festival exhibition",
+        f"upcoming Thailand events{cat_q} {span} seminar expo Bangkok",
+    ]
+    for q in queries:
         try:
-            q = f"Thailand {query} next {weeks} weeks conference seminar culture festival"
             md = await _jina_read(f"https://duckduckgo.com/html/?q={urllib.parse.quote(q)}")
             for ev in _parse_ddg(md):
-                events.setdefault(ev["url"], ev)
+                candidates.setdefault(ev["url"], None)
         except Exception as e:
-            errors.append(f"duckduckgo: {e}")
-    return {"events": list(events.values()), "count": len(events), "errors": errors}
+            errors.append(f"ddg {q!r}: {e}")
+
+    urls = list(candidates)[:8]
+    results = await asyncio.gather(*[
+        _extract_events_from(u, today_iso, window_end_iso, category, "scout") for u in urls
+    ])
+    events: dict[str, dict] = {}
+    for evs, err in results:
+        if err:
+            errors.append(err)
+            continue
+        for ev in evs:
+            events.setdefault(ev["url"] or ev["title"], ev)
+    ordered = sorted(events.values(), key=lambda e: e.get("start_date") or "9999")
+    return {"events": ordered, "count": len(ordered), "errors": errors,
+            "window": {"from": today_iso, "to": window_end_iso, "weeks": weeks}}
 
 
 def _gem_path() -> Path:
@@ -550,17 +649,16 @@ async def create_event_doc(payload: dict = Body(default={})):
 
 if __name__ == "__main__":
     # Self-check the non-trivial pure logic (no network, no creds).
-    sample = (
-        "[![Image 17](https://www.thailandnow.in.th/wp-content/uploads/2026/07/x.jpeg)\n"
-        "[Thailand-China Cooperation Expo 2026](https://www.thailandnow.in.th/event/thailand-china-cooperation-expo/)\n"
-        "[ULTRAMAN HERO RUN 2026](https://www.thailandnow.in.th/event/ultraman-hero-run/)\n"
-        "[Thailand-China Cooperation Expo 2026](https://www.thailandnow.in.th/event/thailand-china-cooperation-expo/)\n"
-    )
-    ev = _parse_tn_events(sample)
-    titles = [e["title"] for e in ev]
-    assert len(ev) == 2, f"dedupe failed: got {len(ev)}"
-    assert "ULTRAMAN HERO RUN 2026" in titles, titles
-    assert all(e["url"].startswith("https://www.thailandnow.in.th/event/") for e in ev)
+    # R5: LLM-JSON parsing + date normalization / window filtering.
+    assert _parse_json_lenient('```json\n[{"a": 1}]\n```') == [{"a": 1}], "fenced json"
+    assert _parse_json_lenient('sure! [{"a": 1}] here') == [{"a": 1}], "json in prose"
+    assert _parse_json_lenient("no json here") is None, "non-json -> None"
+    assert _iso_date("2026-08-15") == "2026-08-15" and _iso_date("2026-08-15T10:00:00Z") == "2026-08-15"
+    assert _iso_date("not a date") is None and _iso_date(None) is None
+    nev = _normalize_event({"title": "X", "start_date": "2026-08-10"}, "2026-08-01", "2026-08-31")
+    assert nev and nev["start_date"] == "2026-08-10", nev
+    assert _normalize_event({"title": "X", "start_date": "2025-01-01"}, "2026-08-01", "2026-08-31") is None, "past filtered"
+    assert _normalize_event({"title": "X"}, "2026-08-01", "2026-08-31") is None, "no date filtered"
     ddg = _parse_ddg(
         "## [All Conference Alert](https://duckduckgo.com/l/?uddg=https%3A%2F%2Fallconferencealert.net%2Fx)"
     )
@@ -591,6 +689,6 @@ if __name__ == "__main__":
     assert _date_rule("2026-08-25", None, "2026-08-20") == ("2026-08-18T00:00:00.000Z", "2026-08-25T00:00:00.000Z"), "signup → start=due−7"
     assert _date_rule(None, None, None) == (None, None), "no dates → nothing"
     ym, mon = _yyyymm_mon()
-    print("OK parsers — tn:", titles, "| ddg:", [d["url"] for d in ddg])
+    print("OK parsers — ddg:", [d["url"] for d in ddg], "| json+date normalize OK")
     print("OK gem:", len(gem), "chars | images:", [i["url"].split("/")[-1] for i in imgs])
     print("OK names + dedup (yyyymm", ym, mon, ")")
