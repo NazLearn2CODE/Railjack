@@ -58,10 +58,11 @@ modules:
       publicity_llm:
         model: glm-5      # /events/publicize; the call routes through app/zai.py (ZAI_API_KEY + z.ai Anthropic endpoint)
       gem_path: app/gems/event-publicity.md                     # read fresh each /events/publicize call
+      notebooklm_notebook_id: ""                                # R6: DEEP RESEARCH notebook (created + cached on first use)
       desks:
-        - {id: paul,   kind: article, drive_folder_id: 1w8ESeKzvW-Er36qjMjgfLU7fMwa8KSu6, trello_list_name: "To draft (Paul)",   doc_name: "[{yyyymm}] [CAT] #{nn}",               card_name: "Article | {mon} #{nn}", count: 12}
-        - {id: teerin, kind: blog,    drive_folder_id: 1jUTZ5qchpViAioBWfUpIdu5PQCwdSWSq, trello_list_name: "To draft (Teerin)", doc_name: "[{yyyymm}] [CAT] Working Title #{nn}", card_name: "Blog | #{nn}",            count: 5}
-        - {id: tian,   kind: event,   drive_folder_id: 1_gJui6atpHTjaZWnkBNG6BwEgiZ2ZtUm, trello_list_name: "To draft (TIAN)",   doc_name: '[{yyyymm}] [EN] "{title}"',            card_name: 'Event | {title}',         count: 1}
+        - {id: paul,   kind: article, drive_folder_id: 1w8ESeKzvW-Er36qjMjgfLU7fMwa8KSu6, trello_list_name: "To draft (Paul)",   doc_name: "[{yyyymm}] [CAT] #{nn}",               card_name: "Article | {mon} #{nn}", count: 12, labels: ["Quota", "Happening NOW"]}
+        - {id: teerin, kind: blog,    drive_folder_id: 1jUTZ5qchpViAioBWfUpIdu5PQCwdSWSq, trello_list_name: "To draft (Teerin)", doc_name: "[{yyyymm}] [CAT] Working Title #{nn}", card_name: "Blog | #{nn}",            count: 5, labels: ["Quota", "Happening NOW"]}
+        - {id: tian,   kind: event,   drive_folder_id: 1_gJui6atpHTjaZWnkBNG6BwEgiZ2ZtUm, trello_list_name: "To draft (TIAN)",   doc_name: "[{yyyymm}] Empty Event Document #{nn}", card_name: "Event | Empty #{nn}",     count: 1, labels: ["Quota", "Events NOW"]}
   - id: n8n
     title: N8N
     kind: iframe

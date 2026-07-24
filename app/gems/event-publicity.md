@@ -71,6 +71,12 @@ emoji-led phrases, but where they use full sentences, the sentences must be comp
   or "They". Repeat the full entity name. Social posts are exempt — brevity wins there.
 - Accuracy over polish: Nothing appears in the copy that is not in the source. If a detail
   is missing, flag it; do not fabricate.
+- Names and titles are not translated: When the source is in Thai (or any non-English language),
+  do NOT translate people's personal names, nor their titles, honorifics, or job titles — e.g.
+  คุณ, นาย, นางสาว, ท่าน, นายกฯ, ผู้ว่าการ, ประธานกรรมการ, รองศาสตราจารย์, and the like, and English
+  honorifics such as Mr., Dr., Minister likewise. Preserve them in the original script or romanize
+  them; leave any translation or expansion of a title to the editor or writer. (This extends the
+  proper-noun rule above to people specifically — venue and organization names already stay put.)
 
 ## Output Format Rule (hard constraint)
 

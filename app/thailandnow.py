@@ -17,7 +17,7 @@ import json
 import os
 import re
 import urllib.parse
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import httpx
@@ -66,6 +66,15 @@ def _yyyymm_mon(when: datetime | None = None) -> tuple[str, str]:
     return d.strftime("%Y%m"), d.strftime("%b").upper()  # "202607", "JUL"
 
 
+def _mon_for(yyyymm: str) -> str | None:
+    """3-letter month for a YYYYMM override, or None if it isn't a real month. Lets Naz pin
+    the doc month instead of always using the current one (R1)."""
+    try:
+        return datetime.strptime(yyyymm, "%Y%m").strftime("%b").upper()
+    except (ValueError, TypeError):
+        return None
+
+
 def _resolve_name(template: str, yyyymm: str, mon: str, nn: int, title: str | None) -> str:
     """Substitute every token in a doc/card name template. {nn} is zero-padded to
     2 (monthly counts stay <100). [CAT] is left literal — Ben fills it."""
@@ -96,6 +105,37 @@ def _next_nn(template: str, yyyymm: str, mon: str, title: str | None, names: lis
         if m:
             mx = max(mx, int(m.group(1)))
     return mx + 1
+
+
+def _date_rule(start: str | None, end: str | None, signup: str | None) -> tuple[str | None, str | None]:
+    """Trello card (start, due) ISO datetimes from raw event dates (R3). Pure + self-checked.
+
+    due  = end_date, else start_date.
+    start = due − 7 days when a signup deadline exists (Naz: start prep a week out);
+            elif the event spans >1 day → the event start;
+            else None (single-day, no signup → due only).
+    Returns (None, None) when no date is parseable at all.
+    """
+
+    def _iso(d: str | None) -> str | None:
+        if not d:
+            return None
+        try:
+            return datetime.strptime(str(d)[:10], "%Y-%m-%d").strftime("%Y-%m-%dT00:00:00.000Z")
+        except ValueError:
+            return None
+
+    due_iso = _iso(end) or _iso(start)
+    if not due_iso:
+        return (None, None)
+    due_day = datetime.strptime(due_iso[:10], "%Y-%m-%d")
+    if signup:
+        start_iso = (due_day - timedelta(days=7)).strftime("%Y-%m-%dT00:00:00.000Z")
+    elif end and start and end[:10] != start[:10]:
+        start_iso = _iso(start)
+    else:
+        start_iso = None
+    return (start_iso, due_iso)
 
 
 # --- Google (documents + drive scopes) ---
@@ -191,6 +231,30 @@ async def _trello_list_id(board_short: str, list_name: str) -> str:
     )
 
 
+async def _trello_label_ids(board_short: str, names: list[str]) -> list[str]:
+    """Resolve label names → ids, case-insensitively (R3). The board already holds the target
+    labels (Quota / Happening NOW / Events NOW); a typo raises naming what's available rather
+    than silently creating a stray label."""
+    if not names:
+        return []
+    labels = await _trello("GET", f"/boards/{board_short}/labels", {"fields": "name,id"})
+    by = {l["name"].strip().lower(): l["id"] for l in labels}
+    ids: list[str] = []
+    missing: list[str] = []
+    for n in names:
+        nid = by.get(n.strip().lower())
+        if nid:
+            ids.append(nid)
+        else:
+            missing.append(n)
+    if missing:
+        raise HTTPException(
+            400, f"labels not on board {board_short!r}: {missing}; "
+            f"have {[l['name'] for l in labels]}"
+        )
+    return ids
+
+
 @router.post("/api/thailandnow/provision")
 async def provision(payload: dict = Body(default={})):
     """The shared create/attach engine. For each of N items on a desk: resolve the
@@ -210,14 +274,31 @@ async def provision(payload: dict = Body(default={})):
         raise HTTPException(400, f"unknown desk_id {desk_id!r}")
     board = opts.get("trello_board_short", "")
     count = int(body.get("count") or desk.get("count") or 1)
-    yyyymm, mon = _yyyymm_mon()
+    # R1: Naz can pin the doc month (defaults to current). {nn} dedup keys off this, so an
+    # overridden month continues that month's sequence instead of the live one.
+    yyyymm_in = (body.get("yyyymm") or "").strip()
+    if yyyymm_in:
+        mon = _mon_for(yyyymm_in)
+        if not mon:
+            raise HTTPException(400, f"bad yyyymm {yyyymm_in!r}; use YYYYMM e.g. 202608")
+        yyyymm = yyyymm_in
+    else:
+        yyyymm, mon = _yyyymm_mon()
     title = body.get("title")
     doc_body = body.get("body") or ""
     card_desc = body.get("card_desc") or ""
+    # R2: callers (the EVENTS flow) may override the name templates so a titled doc can coexist
+    # with the desk's blank-friendly default.
+    doc_name_tpl = body.get("doc_name") or desk["doc_name"]
+    card_name_tpl = body.get("card_name") or desk["card_name"]
+    # R3: optional card dates (ISO) + per-desk labels (resolved by name).
+    due = body.get("due")
+    start = body.get("start")
 
     list_id = await _trello_list_id(board, desk["trello_list_name"])
+    label_ids = await _trello_label_ids(board, desk.get("labels", []))
     cards = await _trello("GET", f"/lists/{list_id}/cards", {"fields": "name"})
-    nn = _next_nn(desk["card_name"], yyyymm, mon, title, [c["name"] for c in cards])
+    nn = _next_nn(card_name_tpl, yyyymm, mon, title, [c["name"] for c in cards])
 
     if not _google_token_path().exists():
         raise HTTPException(
@@ -230,10 +311,16 @@ async def provision(payload: dict = Body(default={})):
     out = []
     for i in range(count):
         cur = nn + i
-        doc_name = _resolve_name(desk["doc_name"], yyyymm, mon, cur, title)
-        card_name = _resolve_name(desk["card_name"], yyyymm, mon, cur, title)
+        doc_name = _resolve_name(doc_name_tpl, yyyymm, mon, cur, title)
+        card_name = _resolve_name(card_name_tpl, yyyymm, mon, cur, title)
         doc_url = await _google_create_doc(token, desk["drive_folder_id"], doc_name, doc_body)
-        card = await _trello("POST", "/cards", {"idList": list_id, "name": card_name, "desc": card_desc})
+        card_params = {"idList": list_id, "name": card_name, "desc": card_desc,
+                       "idLabels": ",".join(label_ids)}
+        if due:
+            card_params["due"] = due
+        if start:
+            card_params["start"] = start
+        card = await _trello("POST", "/cards", card_params)
         await _trello("POST", f"/cards/{card['id']}/attachments",
                       body={"url": doc_url, "name": doc_name})
         out.append({"nn": cur, "doc_name": doc_name, "doc_url": doc_url,
@@ -432,22 +519,32 @@ async def event_images(payload: dict = Body(default={})):
 @router.post("/api/thailandnow/events/create")
 async def create_event_doc(payload: dict = Body(default={})):
     """Create the TIAN Doc+card for a scouted event. The Doc body is the (edited)
-    publicity bundle; the card desc carries the event URL(s) + chosen image links.
-    Just a tian-desk provision with a non-empty body — same engine as WRITERS."""
+    publicity bundle; the card desc carries the event URL(s) + image links, and the card
+    gets start/due dates per ``_date_rule``. The titled name templates are passed as
+    overrides so the desk's default (blank "Empty Event Document") stays for WRITERS."""
     body = payload or {}
     event = body.get("event") or {}
     image_urls = body.get("image_urls") or []
     urls = body.get("urls") or ([event["url"]] if event.get("url") else [])
+    title = event.get("title", "Untitled Event")
     desc_lines = []
     if urls:
         desc_lines.append("Source: " + " ".join(urls))
     if image_urls:
         desc_lines.append("Images: " + " ".join(image_urls))
+    # _date_rule → (start, due); the thick-box date inputs can override either.
+    start_iso, due_iso = _date_rule(
+        event.get("start_date"), event.get("end_date"), event.get("signup_deadline")
+    )
     return await provision({
         "desk_id": "tian",
-        "title": event.get("title", "Untitled Event"),
+        "title": title,
         "body": body.get("bundle_text") or "",
         "card_desc": "\n".join(desc_lines),
+        "doc_name": '[{yyyymm}] [EN] "{title}"',
+        "card_name": "Event | {title}",
+        "due": body.get("due") or due_iso,
+        "start": body.get("start") or start_iso,
     })
 
 
@@ -485,6 +582,14 @@ if __name__ == "__main__":
     assert _next_nn("[{yyyymm}] [CAT] #{nn}", "202607", "JUL", None,
                     ["[202607] [CAT] #01", "[202607] [CAT] #07", "[202605] [CAT] #09"]) == 8
     assert _next_nn("[{yyyymm}] [CAT] #{nn}", "202607", "JUL", None, []) == 1
+    # R1: month override
+    assert _mon_for("202608") == "AUG"
+    assert _mon_for("202613") is None and _mon_for("garbage") is None
+    # R3: card date rule (start, due)
+    assert _date_rule("2026-08-10", "2026-08-12", None) == ("2026-08-10T00:00:00.000Z", "2026-08-12T00:00:00.000Z"), "multi-day → start+due"
+    assert _date_rule("2026-08-10", None, None) == (None, "2026-08-10T00:00:00.000Z"), "single-day → due only"
+    assert _date_rule("2026-08-25", None, "2026-08-20") == ("2026-08-18T00:00:00.000Z", "2026-08-25T00:00:00.000Z"), "signup → start=due−7"
+    assert _date_rule(None, None, None) == (None, None), "no dates → nothing"
     ym, mon = _yyyymm_mon()
     print("OK parsers — tn:", titles, "| ddg:", [d["url"] for d in ddg])
     print("OK gem:", len(gem), "chars | images:", [i["url"].split("/")[-1] for i in imgs])
