@@ -420,6 +420,44 @@ def _parse_ddg(md: str) -> list[dict]:
     return out
 
 
+async def _brave_urls(query: str, limit: int = 6) -> list[str]:
+    """Brave Search result URLs — only when BRAVE_API_KEY is in the service env (R7 booster)."""
+    key = os.environ.get("BRAVE_API_KEY")
+    if not key:
+        return []
+    try:
+        async with httpx.AsyncClient(timeout=20) as c:
+            r = await c.get(
+                "https://api.search.brave.com/res/v1/web/search",
+                headers={"Accept": "application/json", "X-Subscription-Token": key},
+                params={"q": query, "count": limit},
+            )
+            r.raise_for_status()
+            data = r.json()
+        return [w["url"] for w in (data.get("web") or {}).get("results", [])
+                if isinstance(w, dict) and w.get("url")]
+    except Exception:
+        return []
+
+
+async def _gnews_urls(query: str, limit: int = 6) -> list[str]:
+    """GNews article URLs — only when GNEWS_KEY is in the env (R7 booster)."""
+    key = os.environ.get("GNEWS_KEY")
+    if not key:
+        return []
+    try:
+        async with httpx.AsyncClient(timeout=20) as c:
+            r = await c.get(
+                "https://gnews.io/api/v4/search",
+                params={"q": query, "max": limit, "lang": "en", "apikey": key},
+            )
+            r.raise_for_status()
+            data = r.json()
+        return [a["url"] for a in data.get("articles", []) if isinstance(a, dict) and a.get("url")]
+    except Exception:
+        return []
+
+
 # Default scout sources (R5). Override per-machine via options.event_listings /
 # options.event_queries in configs/<machine>.yaml. Keyless — TAT + aggregators + broad DDG.
 _DEFAULT_LISTINGS = [
@@ -494,6 +532,12 @@ async def scout_events(payload: dict = Body(default={})):
         except Exception as e:
             errors.append(f"ddg {q!r}: {e}")
 
+    # R7: optional env-gated boosters (no-op without BRAVE_API_KEY / GNEWS_KEY)
+    boost_q = f"Thailand{cat_q} {span} events"
+    brave, gnews = await asyncio.gather(_brave_urls(boost_q), _gnews_urls(boost_q))
+    for u in [*brave, *gnews]:
+        candidates.setdefault(u, None)
+
     urls = list(candidates)[:8]
     results = await asyncio.gather(*[
         _extract_events_from(u, today_iso, window_end_iso, category, "scout") for u in urls
@@ -510,7 +554,100 @@ async def scout_events(payload: dict = Body(default={})):
             "window": {"from": today_iso, "to": window_end_iso, "weeks": weeks}}
 
 
-def _gem_path() -> Path:
+# --- EVENTS radar Tier 2 (R6): NotebookLM deep web research ---
+
+
+def _nlm_notebook_id_path() -> Path:
+    """Sidecar holding the dedicated notebook id (persists across restarts without mutating
+    the version-controlled YAML)."""
+    return Path(os.path.expanduser("~/.config/railjack/thailandnow_notebook.id"))
+
+
+async def _nlm_run(args: list[str], timeout: float = 200.0) -> str:
+    """Run the notebooklm CLI (authed once via `notebooklm login`), return stdout. Every call
+    passes --notebook so we never touch the shared context.json (the race the skill warns of)."""
+    proc = await asyncio.create_subprocess_exec(
+        "notebooklm", *args,
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except asyncio.TimeoutError:
+        proc.kill()
+        raise HTTPException(504, f"notebooklm {' '.join(args[:2])} timed out ({timeout:.0f}s)")
+    out = stdout.decode(errors="replace")
+    if proc.returncode != 0:
+        err = stderr.decode(errors="replace")
+        if "auth" in err.lower() or "login" in err.lower() or "cookie" in err.lower():
+            raise HTTPException(501, "NotebookLM not authed — run `notebooklm login`, then retry")
+        raise HTTPException(502, f"notebooklm exit {proc.returncode}: {err[:200]}")
+    return out
+
+
+async def _nlm_ensure_notebook() -> str:
+    """Return the dedicated notebook id, creating it once on first use."""
+    p = _nlm_notebook_id_path()
+    if p.exists():
+        nid = p.read_text().strip()
+        if nid:
+            return nid
+    data = _parse_json_lenient(await _nlm_run(["create", "Thailand NOW Events Radar", "--json"])) or {}
+    nid = data.get("id") or (data.get("notebook") or {}).get("id")  # CLI nests under "notebook"
+    if not nid:
+        raise HTTPException(502, "notebooklm create returned no id — check `notebooklm list`")
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(nid)
+    return nid
+
+
+@router.post("/api/thailandnow/events/deep")
+async def deep_events(payload: dict = Body(default={})):
+    """Events radar Tier 2 (R6) — NotebookLM deep web research. Runs a fast research pass on
+    the query+window in a dedicated notebook, then asks for a dated JSON event list. Slow
+    (1-2 min). Returns events in the same shape as /events/scout, window-filtered + sorted.
+    """
+    body = payload or {}
+    category = (body.get("query") or "").strip()
+    weeks = max(1, min(52, int(body.get("weeks") or 4)))
+    today = datetime.now()
+    window_end = today + timedelta(weeks=weeks)
+    today_iso, window_end_iso = today.strftime("%Y-%m-%d"), window_end.strftime("%Y-%m-%d")
+    span = today.strftime("%B %Y")
+    topic = re.sub(r"\s+", " ", f"Thailand {category} events {span} conference festival exhibition seminar").strip()
+
+    nid = await _nlm_ensure_notebook()
+    window = {"from": today_iso, "to": window_end_iso, "weeks": weeks}
+    errors: list[str] = []
+    # 1. fast web research into the notebook (blocking; imports found sources)
+    try:
+        await _nlm_run(["source", "add-research", topic, "--notebook", nid,
+                        "--mode", "fast", "--import-all"], timeout=200)
+    except HTTPException as e:
+        return {"events": [], "count": 0, "errors": [str(e.detail)], "window": window, "notebook": nid}
+    # 2. ask for a dated JSON list (continues the notebook's conversation — fine for a
+    #    dedicated research corpus; --new isn't in CLI 0.3.3)
+    ask = (
+        f"List upcoming Thailand events whose start date is within {today_iso} to {window_end_iso}. "
+        "Return ONLY a JSON array; each element: title, url, start_date (YYYY-MM-DD), end_date, "
+        "signup_deadline (null if none), location, language (en/th), summary. "
+        "Only events with a real start date in that window; skip anything undated."
+    )
+    try:
+        out = await _nlm_run(["ask", ask, "--notebook", nid, "--json"], timeout=120)
+    except HTTPException as e:
+        return {"events": [], "count": 0, "errors": [str(e.detail)], "window": window, "notebook": nid}
+    parsed = _parse_json_lenient(out)
+    answer = parsed.get("answer") if isinstance(parsed, dict) else None
+    arr = _parse_json_lenient(answer) if isinstance(answer, str) else None
+    events: dict[str, dict] = {}
+    if isinstance(arr, list):
+        for ev in arr:
+            n = _normalize_event(ev, today_iso, window_end_iso, "notebooklm")
+            if n:
+                events.setdefault(n["url"] or n["title"], n)
+    ordered = sorted(events.values(), key=lambda e: e.get("start_date") or "9999")
+    return {"events": ordered, "count": len(ordered), "errors": errors,
+            "window": window, "notebook": nid}
     """Resolve the publicity gem path (relative paths anchor at the repo root)."""
     p = Path(_opts().get("gem_path", "app/gems/event-publicity.md"))
     if not p.is_absolute():
