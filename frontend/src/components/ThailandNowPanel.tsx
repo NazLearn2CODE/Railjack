@@ -7,9 +7,7 @@ import type { ModuleConfig } from "../store";
  *   WRITERS — bulk-create blank Docs + Trello cards per writer (Paul/Teerin/TIAN).
  *   EVENTS  — scout upcoming events → publicity bundle → Doc+card.
  *
- * The EVENTS scout→bundle→images flow is live. The GENERATE / CREATE DOC+CARD
- * actions create Google Docs + Trello cards via /provision, which is pending the
- * Google OAuth client (documents+drive) — they're disabled with a reason until then.
+ * The whole flow is live: scout → bundle → images → create (Doc + Trello card).
  */
 
 interface Desk {
@@ -43,10 +41,21 @@ interface ImagesResp {
   errors: string[];
   note: string;
 }
+interface ProvisionItem {
+  nn: number;
+  doc_name: string;
+  doc_url: string;
+  card_name: string;
+  card_url: string;
+}
+interface ProvisionResp {
+  desk_id: string;
+  count: number;
+  yyyymm: string;
+  items: ProvisionItem[];
+}
 
 const CT = { "content-type": "application/json" } as const;
-const CREATION_HELD =
-  "doc/card creation is pending the Google OAuth client (documents+drive) and the /provision endpoint — paste the fast-reactor client and it goes live.";
 
 async function post<T>(url: string, body: unknown): Promise<{ ok: boolean; data?: T; error?: string }> {
   const res = await fetch(url, { method: "POST", headers: CT, body: JSON.stringify(body) });
@@ -100,7 +109,22 @@ function WritersTab({
   error: string | null;
 }) {
   const [deskId, setDeskId] = useState("");
+  const [count, setCount] = useState(0);
   const desk = desks.find((d) => d.id === deskId) ?? desks[0];
+  const n = count || desk?.count || 1;
+  const [busy, setBusy] = useState(false);
+  const [items, setItems] = useState<ProvisionItem[]>([]);
+  const [err, setErr] = useState<string | null>(null);
+
+  const generate = useCallback(async () => {
+    if (!desk) return;
+    setBusy(true);
+    setErr(null);
+    const r = await post<ProvisionResp>("/api/thailandnow/provision", { desk_id: desk.id, count: n });
+    setBusy(false);
+    if (r.ok && r.data) setItems(r.data.items);
+    else setErr(r.error ?? "provision failed");
+  }, [desk, n]);
 
   return (
     <>
@@ -141,7 +165,10 @@ function WritersTab({
               className="input"
               style={{ width: "auto" }}
               value={desk.id}
-              onChange={(e) => setDeskId(e.target.value)}
+              onChange={(e) => {
+                setDeskId(e.target.value);
+                setCount(0);
+              }}
             >
               {desks.map((d) => (
                 <option key={d.id} value={d.id}>
@@ -149,22 +176,47 @@ function WritersTab({
                 </option>
               ))}
             </select>
-            <span className="mono" style={{ color: "var(--color-muted)" }}>
-              count ×{desk.count}
-            </span>
+            <label className="label">COUNT</label>
+            <input
+              className="input"
+              type="number"
+              min={1}
+              max={99}
+              style={{ width: 72 }}
+              value={n}
+              onChange={(e) => setCount(Math.max(1, Math.min(99, Number(e.target.value) || 1)))}
+            />
+            <button className="btn btn--signal" disabled={busy} onClick={generate}>
+              {busy ? "GENERATING…" : "GENERATE"}
+            </button>
           </div>
           <div className="flex flex-col gap-1">
             <Row label="DOC" value={desk.doc_name} />
             <Row label="CARD" value={desk.card_name} />
             <Row label="LIST" value={desk.trello_list_name} />
           </div>
-          <div className="mt-2">
-            <button className="btn btn--signal" disabled title={CREATION_HELD}>
-              GENERATE
-            </button>
-            <div className="mono mt-1" style={{ color: "var(--color-hazard)" }}>
-              ⧖ {CREATION_HELD}
-            </div>
+          {err && <div className="mt-2"><ErrLine msg={err} /></div>}
+        </section>
+      )}
+
+      {items.length > 0 && (
+        <section className="hud hud--bracket reveal reveal-3 p-3">
+          <div className="label mb-2">CREATED · {items.length}</div>
+          <div className="flex flex-col gap-1">
+            {items.map((it) => (
+              <div key={it.nn} className="row-in flex items-center gap-2">
+                <span className="pip pip--go" />
+                <a className="mono" href={it.doc_url} target="_blank" rel="noreferrer" style={{ color: "var(--color-signal)" }}>
+                  {it.doc_name}
+                </a>
+                <span className="mono" style={{ color: "var(--color-muted)" }}>
+                  →
+                </span>
+                <a className="mono" href={it.card_url} target="_blank" rel="noreferrer" style={{ color: "var(--color-phosphor-dim)" }}>
+                  {it.card_name}
+                </a>
+              </div>
+            ))}
           </div>
         </section>
       )}
@@ -268,6 +320,9 @@ function ThickBox({ event, onBack }: { event: TnEvent; onBack: () => void }) {
   const [imgNote, setImgNote] = useState("");
   const [finding, setFinding] = useState(false);
   const [imgErr, setImgErr] = useState<string | null>(null);
+  const [creating, setCreating] = useState(false);
+  const [created, setCreated] = useState<ProvisionItem | null>(null);
+  const [createErr, setCreateErr] = useState<string | null>(null);
 
   const genBundle = useCallback(async () => {
     setWriting(true);
@@ -291,6 +346,19 @@ function ThickBox({ event, onBack }: { event: TnEvent; onBack: () => void }) {
       setImgNote(r.data.note);
     } else setImgErr(r.error ?? "images failed");
   }, [event.url]);
+
+  const create = useCallback(async () => {
+    setCreating(true);
+    setCreateErr(null);
+    const r = await post<ProvisionResp>("/api/thailandnow/events/create", {
+      event,
+      urls: useUrl ? [event.url] : [],
+      bundle_text: bundle,
+    });
+    setCreating(false);
+    if (r.ok && r.data && r.data.items[0]) setCreated(r.data.items[0]);
+    else setCreateErr(r.error ?? "create failed");
+  }, [event, useUrl, bundle]);
 
   return (
     <>
@@ -364,12 +432,32 @@ function ThickBox({ event, onBack }: { event: TnEvent; onBack: () => void }) {
       </section>
 
       <section className="hud hud--bracket reveal reveal-4 p-3">
-        <button className="btn btn--signal" disabled title={CREATION_HELD}>
-          CREATE DOC + CARD
-        </button>
-        <div className="mono mt-1" style={{ color: "var(--color-hazard)" }}>
-          ⧖ {CREATION_HELD}
+        <div className="mb-2 flex items-center justify-between">
+          <span className="label">CREATE</span>
+          <button className="btn btn--signal" disabled={creating || !bundle.trim()} onClick={create}>
+            {creating ? "CREATING…" : "CREATE DOC + CARD"}
+          </button>
         </div>
+        {createErr && <ErrLine msg={createErr} />}
+        {created && (
+          <div className="row-in flex flex-wrap items-center gap-2">
+            <span className="pip pip--go" />
+            <a className="mono" href={created.doc_url} target="_blank" rel="noreferrer" style={{ color: "var(--color-signal)" }}>
+              {created.doc_name}
+            </a>
+            <span className="mono" style={{ color: "var(--color-muted)" }}>
+              +
+            </span>
+            <a className="mono" href={created.card_url} target="_blank" rel="noreferrer" style={{ color: "var(--color-phosphor-dim)" }}>
+              {created.card_name}
+            </a>
+          </div>
+        )}
+        {!created && !createErr && (
+          <div className="mono" style={{ color: "var(--color-muted)" }}>
+            the bundle above becomes the Doc body; the event URL(s) go in the card description
+          </div>
+        )}
       </section>
     </>
   );
