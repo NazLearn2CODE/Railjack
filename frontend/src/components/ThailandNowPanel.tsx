@@ -1,13 +1,12 @@
-import { useCallback, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { usePolling } from "../api";
 import type { ModuleConfig } from "../store";
 
 /**
  * THAILAND NOW — monthly content pipeline. Two tabs sharing a desk-driven engine:
  *   WRITERS — bulk-create blank Docs + Trello cards per writer (Paul/Teerin/TIAN).
- *   EVENTS  — scout upcoming events → publicity bundle → Doc+card.
- *
- * The whole flow is live: scout → bundle → images → create (Doc + Trello card).
+ *   EVENTS  — two-tier radar: SCOUT (instant keyless) + DEEP RESEARCH (NotebookLM),
+ *             → publicity bundle → images → Doc + card with start/due dates.
  */
 
 interface Desk {
@@ -17,6 +16,7 @@ interface Desk {
   doc_name: string;
   card_name: string;
   trello_list_name: string;
+  labels: string[];
 }
 interface DesksResp {
   desks: Desk[];
@@ -26,14 +26,19 @@ interface DesksResp {
 interface TnEvent {
   title: string;
   url: string;
-  date?: string;
+  start_date?: string;
+  end_date?: string;
+  signup_deadline?: string;
   location?: string;
+  language?: string;
+  summary?: string;
   source?: string;
 }
 interface ScoutResp {
   events: TnEvent[];
   count: number;
   errors: string[];
+  window?: { from: string; to: string; weeks: number };
 }
 interface ImagesResp {
   images: { url: string; alt: string }[];
@@ -64,6 +69,20 @@ async function post<T>(url: string, body: unknown): Promise<{ ok: boolean; data?
     return { ok: false, error: typeof d.detail === "string" ? d.detail : JSON.stringify(d.detail) };
   }
   return { ok: true, data: (await res.json()) as T };
+}
+
+/** Current month as the <input type="month"> value (YYYY-MM) and as YYYYMM for the API. */
+function nowMonth(): string {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+}
+const toYyyyMm = (yyyyMm: string) => yyyyMm.replace("-", "");
+
+/** Human label for the weeks slider: "4 weeks" under 8, else "≈N months". */
+function weeksLabel(n: number): string {
+  if (n < 8) return `${n} week${n === 1 ? "" : "s"}`;
+  const m = Math.max(1, Math.round(n / 4.33));
+  return `≈${m} month${m === 1 ? "" : "s"}`;
 }
 
 export default function ThailandNowPanel({ module: _module }: { module: ModuleConfig }) {
@@ -110,6 +129,7 @@ function WritersTab({
 }) {
   const [deskId, setDeskId] = useState("");
   const [count, setCount] = useState(0);
+  const [month, setMonth] = useState(nowMonth);
   const desk = desks.find((d) => d.id === deskId) ?? desks[0];
   const n = count || desk?.count || 1;
   const [busy, setBusy] = useState(false);
@@ -120,11 +140,15 @@ function WritersTab({
     if (!desk) return;
     setBusy(true);
     setErr(null);
-    const r = await post<ProvisionResp>("/api/thailandnow/provision", { desk_id: desk.id, count: n });
+    const r = await post<ProvisionResp>("/api/thailandnow/provision", {
+      desk_id: desk.id,
+      count: n,
+      yyyymm: toYyyyMm(month),
+    });
     setBusy(false);
     if (r.ok && r.data) setItems(r.data.items);
     else setErr(r.error ?? "provision failed");
-  }, [desk, n]);
+  }, [desk, n, month]);
 
   return (
     <>
@@ -143,13 +167,18 @@ function WritersTab({
         ) : (
           <div className="flex flex-col gap-1">
             {desks.map((d) => (
-              <div key={d.id} className="row-in flex items-center gap-2">
+              <div key={d.id} className="row-in flex flex-wrap items-center gap-2">
                 <span className="pip pip--signal" />
                 <span className="mono">{d.id.toUpperCase()}</span>
-                <span className="label">{d.kind}</span>
+                <span className="label">{d.kind === "event" ? "empty event" : d.kind}</span>
                 <span className="mono" style={{ color: "var(--color-muted)" }}>
                   ×{d.count}
                 </span>
+                {(d.labels ?? []).map((l) => (
+                  <span key={l} className="pip pip--signal">
+                    {l}
+                  </span>
+                ))}
               </div>
             ))}
           </div>
@@ -172,10 +201,12 @@ function WritersTab({
             >
               {desks.map((d) => (
                 <option key={d.id} value={d.id}>
-                  {d.id} ({d.kind})
+                  {d.id} ({d.kind === "event" ? "empty event" : d.kind})
                 </option>
               ))}
             </select>
+            <label className="label">MONTH</label>
+            <input className="input" type="month" value={month} onChange={(e) => setMonth(e.target.value)} />
             <label className="label">COUNT</label>
             <input
               className="input"
@@ -195,7 +226,11 @@ function WritersTab({
             <Row label="CARD" value={desk.card_name} />
             <Row label="LIST" value={desk.trello_list_name} />
           </div>
-          {err && <div className="mt-2"><ErrLine msg={err} /></div>}
+          {err && (
+            <div className="mt-2">
+              <ErrLine msg={err} />
+            </div>
+          )}
         </section>
       )}
 
@@ -241,26 +276,75 @@ function Row({ label, value }: { label: string; value: string }) {
 
 function EventsTab() {
   const [query, setQuery] = useState("");
-  const [scouting, setScouting] = useState(false);
+  const [weeks, setWeeks] = useState(4);
   const [events, setEvents] = useState<TnEvent[]>([]);
-  const [scoutErr, setScoutErr] = useState<string | null>(null);
-  const [picked, setPicked] = useState<TnEvent | null>(null);
+  const [fetching, setFetching] = useState(false);
+  const [busyLabel, setBusyLabel] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [pickedKey, setPickedKey] = useState<string | null>(null);
 
-  const scout = useCallback(async () => {
-    setScouting(true);
-    setScoutErr(null);
-    const r = await post<ScoutResp>("/api/thailandnow/events/scout", { query });
-    setScouting(false);
-    if (r.ok && r.data) setEvents(r.data.events);
-    else setScoutErr(r.error ?? "scout failed");
-  }, [query]);
+  // dedup key + ascending-by-start-date view (stable for events sharing a date)
+  const keyOf = (e: TnEvent) => e.url || e.title;
+  const sorted = useMemo(
+    () =>
+      [...events].sort((a, b) => {
+        const sa = a.start_date ?? "";
+        const sb = b.start_date ?? "";
+        return sa < sb ? -1 : sa > sb ? 1 : 0;
+      }),
+    [events],
+  );
 
-  if (picked) return <ThickBox event={picked} onBack={() => setPicked(null)} />;
+  const run = useCallback(
+    async (endpoint: "/api/thailandnow/events/scout" | "/api/thailandnow/events/deep") => {
+      setFetching(true);
+      setErr(null);
+      setBusyLabel(endpoint === "/api/thailandnow/events/deep" ? "DEEP RESEARCH via NotebookLM… 1-2 min" : null);
+      const r = await post<ScoutResp>(endpoint, { query, weeks });
+      setFetching(false);
+      setBusyLabel(null);
+      if (r.ok && r.data) {
+        setEvents((prev) => {
+          const map = new Map(prev.map((e) => [keyOf(e), e]));
+          for (const e of r.data!.events) map.set(keyOf(e), e);
+          return [...map.values()];
+        });
+      } else {
+        setErr(r.error ?? (endpoint === "/api/thailandnow/events/deep" ? "DEEP RESEARCH failed" : "SCOUT failed"));
+      }
+    },
+    [query, weeks],
+  );
+
+  const picked = pickedKey ? events.find((e) => keyOf(e) === pickedKey) ?? null : null;
+  if (picked) {
+    return (
+      <ThickBox
+        key={pickedKey! /* remount per event so editable-date state reseeds */}
+        event={picked}
+        onBack={() => setPickedKey(null)}
+      />
+    );
+  }
 
   return (
     <>
       <section className="hud hud--bracket reveal reveal-1 p-3">
         <div className="label mb-2">SCOUT</div>
+        <div className="mb-2 flex items-center gap-3">
+          <input
+            type="range"
+            min={1}
+            max={52}
+            step={1}
+            value={weeks}
+            onChange={(e) => setWeeks(Number(e.target.value))}
+            style={{ width: 180 }}
+          />
+          <span className="mono" style={{ color: "var(--color-signal)" }}>
+            {weeksLabel(weeks)}
+          </span>
+        </div>
         <div className="flex flex-wrap items-center gap-2">
           <input
             className="input"
@@ -269,39 +353,51 @@ function EventsTab() {
             value={query}
             onChange={(e) => setQuery(e.target.value)}
           />
-          <button className="btn btn--signal" disabled={scouting} onClick={scout}>
-            {scouting ? "SCANNING…" : "SCOUT"}
+          <button className="btn btn--signal" disabled={fetching} onClick={() => run("/api/thailandnow/events/scout")}>
+            {fetching && !busyLabel ? "SCANNING…" : "SCOUT"}
+          </button>
+          <button className="btn" disabled={fetching} onClick={() => run("/api/thailandnow/events/deep")}>
+            DEEP RESEARCH
           </button>
         </div>
         <div className="mono mt-1" style={{ color: "var(--color-muted)" }}>
-          primary source: thailandnow.in.th/events — Naz's own site (TIAN's beat)
+          SCOUT is instant keyless; DEEP RESEARCH runs NotebookLM (1-2 min). Both append here.
         </div>
       </section>
 
       <section className="hud hud--bracket reveal reveal-2 p-3">
-        <div className="label mb-2">RESULTS{events.length ? ` · ${events.length}` : ""}</div>
-        {scouting ? (
+        <div className="label mb-2">RESULTS{sorted.length ? ` · ${sorted.length}` : ""}</div>
+        {busyLabel ? (
+          <div className="mono caret" style={{ color: "var(--color-signal)" }}>
+            {busyLabel}
+          </div>
+        ) : fetching ? (
           <div className="mono caret" style={{ color: "var(--color-signal)" }}>
             SCANNING
           </div>
-        ) : scoutErr ? (
-          <ErrLine msg={scoutErr} />
-        ) : events.length === 0 ? (
+        ) : err ? (
+          <ErrLine msg={err} />
+        ) : sorted.length === 0 ? (
           <div className="mono" style={{ color: "var(--color-muted)" }}>
             run SCOUT to list upcoming events — click one to draft its publicity bundle
           </div>
         ) : (
           <div className="flex flex-col gap-1">
-            {events.map((e) => (
+            {sorted.map((e, i) => (
               <button
-                key={e.url}
+                key={keyOf(e) || i}
                 className="row-in flex items-center gap-2"
                 style={{ textAlign: "left", background: "transparent", border: 0, cursor: "pointer" }}
-                onClick={() => setPicked(e)}
+                onClick={() => setPickedKey(keyOf(e))}
               >
                 <span className="pip pip--signal" />
+                {e.start_date && (
+                  <span className="mono" style={{ color: "var(--color-muted)", minWidth: 84 }}>
+                    {e.start_date}
+                  </span>
+                )}
                 <span className="mono">{e.title}</span>
-                {e.source === "duckduckgo" && <span className="label">ddg</span>}
+                {e.source && <span className="label">{e.source}</span>}
               </button>
             ))}
           </div>
@@ -324,17 +420,33 @@ function ThickBox({ event, onBack }: { event: TnEvent; onBack: () => void }) {
   const [created, setCreated] = useState<ProvisionItem | null>(null);
   const [createErr, setCreateErr] = useState<string | null>(null);
 
+  // editable dates — seed from the scouted event; the backend derives the card start/due
+  const [startD, setStartD] = useState(event.start_date ?? "");
+  const [endD, setEndD] = useState(event.end_date ?? "");
+  const [signupD, setSignupD] = useState(event.signup_deadline ?? "");
+
+  const merged = useCallback(
+    (): TnEvent => ({
+      ...event,
+      start_date: startD || undefined,
+      end_date: endD || undefined,
+      signup_deadline: signupD || undefined,
+    }),
+    [event, startD, endD, signupD],
+  );
+
   const genBundle = useCallback(async () => {
     setWriting(true);
     setPubErr(null);
+    const ev = merged();
     const r = await post<{ bundle: string }>("/api/thailandnow/events/publicize", {
-      event,
-      urls: useUrl ? [event.url] : [],
+      event: ev,
+      urls: useUrl && ev.url ? [ev.url] : [],
     });
     setWriting(false);
     if (r.ok && r.data) setBundle(r.data.bundle);
     else setPubErr(r.error ?? "bundle failed");
-  }, [event, useUrl]);
+  }, [merged, useUrl]);
 
   const findImages = useCallback(async () => {
     setFinding(true);
@@ -350,15 +462,16 @@ function ThickBox({ event, onBack }: { event: TnEvent; onBack: () => void }) {
   const create = useCallback(async () => {
     setCreating(true);
     setCreateErr(null);
+    const ev = merged();
     const r = await post<ProvisionResp>("/api/thailandnow/events/create", {
-      event,
-      urls: useUrl ? [event.url] : [],
+      event: ev,
+      urls: useUrl && ev.url ? [ev.url] : [],
       bundle_text: bundle,
     });
     setCreating(false);
     if (r.ok && r.data && r.data.items[0]) setCreated(r.data.items[0]);
     else setCreateErr(r.error ?? "create failed");
-  }, [event, useUrl, bundle]);
+  }, [merged, useUrl, bundle]);
 
   return (
     <>
@@ -375,9 +488,19 @@ function ThickBox({ event, onBack }: { event: TnEvent; onBack: () => void }) {
         {event.location && (
           <div className="mono" style={{ color: "var(--color-muted)" }}>
             {event.location}
-            {event.date ? ` · ${event.date}` : ""}
           </div>
         )}
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          <label className="label">START</label>
+          <input className="input" type="date" value={startD} onChange={(e) => setStartD(e.target.value)} />
+          <label className="label">END</label>
+          <input className="input" type="date" value={endD} onChange={(e) => setEndD(e.target.value)} />
+          <label className="label">SIGNUP</label>
+          <input className="input" type="date" value={signupD} onChange={(e) => setSignupD(e.target.value)} />
+        </div>
+        <div className="mono mt-1" style={{ color: "var(--color-muted)" }}>
+          card start/due are set from these (signup deadline → start = due − 7 days)
+        </div>
         <label className="mt-2 flex items-center gap-2">
           <input type="checkbox" checked={useUrl} onChange={(e) => setUseUrl(e.target.checked)} />
           <span className="mono" style={{ color: "var(--color-phosphor-dim)" }}>
@@ -389,7 +512,7 @@ function ThickBox({ event, onBack }: { event: TnEvent; onBack: () => void }) {
       <section className="hud hud--bracket reveal reveal-2 p-3">
         <div className="mb-2 flex items-center justify-between">
           <span className="label">PUBLICITY BUNDLE</span>
-          <button className="btn btn--signal" disabled={writing || !useUrl} onClick={genBundle}>
+          <button className="btn btn--signal" disabled={writing} onClick={genBundle}>
             {writing ? "WRITING…" : "GENERATE BUNDLE"}
           </button>
         </div>
