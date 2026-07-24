@@ -295,3 +295,52 @@ EVENTS next") so the office side knows the home build's state.
 - **Direct Trello REST** (not the office n8n webhook) so the module is self-contained and Somatic
   doesn't depend on Orokin's n8n.
 - Board `VTMuHmEj` and the three list IDs aren't cached anywhere — resolved once via `/setup`.
+
+---
+
+## v2 refinement (2026-07-24) — month input · empty-event label · EVENTS radar · card labels · translation rule
+
+Naz used the shipped module and asked for five refinements. Backend (R1–R7) + frontend (R8)
+done by the host; R9 ships. Commit trail on `feat/thailandnow`:
+
+- `15d9041` **R1–R4** — month input (`yyyymm` override + `_mon_for`); TIAN = "Empty Event
+  Document" (name-template override hook; `/events/create` keeps the titled `[EN] "{title}"`);
+  Trello card `start`/`due` via `_date_rule(start,end,signup)` (signup → start=due−7; single-day
+  → due only) + per-desk labels resolved by name (`Quota`+`Happening NOW` for paul/teerin;
+  `Quota`+`Events NOW` for tian) via `idLabels`; publicity gem House-Style rule — never translate
+  personal names/titles.
+- `73c467b` **R5** — dropped `thailandnow.in.th`; keyless multi-source scout (TAT + aggregators +
+  DDG broad) with `_llm_json` date extraction + hard future-window filter + sort.
+- `6d893ef` **R6+R7** — `/events/deep` (NotebookLM deep web research via the `/notebooklm` CLI:
+  dedicated sidecar-persisted notebook, `add-research` fast → `ask --json`, `--notebook` on every
+  call to dodge the context.json race) + env-gated Brave/GNews boosters in `/events/scout`.
+- `376cd1a` **R8** — frontend: MONTH input, label pips, TIAN "empty event" kind; EVENTS weeks
+  slider (1–52, live label) + SCOUT + DEEP RESEARCH appending into one deduped date-sorted list;
+  thick-box editable START/END/SIGNUP date inputs. tsc+vite clean.
+
+**Live verification (2026-07-24):**
+- `/desks` → labels resolve (paul/teerin Quota+Happening NOW; tian Quota+Events NOW). ✓
+- `/provision` Paul, `yyyymm=202607` → doc `[202607] [CAT] #13`, card `Article | JUL #13` (month
+  override + dedup both work); card GET confirms `idLabels`=Quota+Happening NOW **and** native
+  `start`+`due` fields land (the date params Trello accepts). ✓
+- `scout_events()` direct → 2 in-window events; `deep_events()` direct → **24** in-window events
+  (NotebookLM is the depth workhorse). ✓
+- Service `/events/scout` returned 502 only because z.ai **429**'d from this session's heavy LLM
+  testing — not a code bug (surfaces cleanly as an error line); single clicks in normal use won't trip it.
+
+**Decisions flagged (Naz approved):** NotebookLM = the DEEP RESEARCH button (not instant SCOUT;
+fast-mode 30s–2min, dedicated notebook); signup-deadline rule = card `start` forced to `due − 7d`;
+labels resolve-only from the board's existing labels (no auto-create); `[CAT]` stays literal.
+
+**Delegation note:** R8 was delegated to the local model (Ornith 35B) per Naz's "delegate what
+you can"; it produced a structurally-aware but **broken** draft (Rules-of-Hooks violation before
+`useState`, a `mergeDates` syntax error, an uncontrolled weeks slider never sent to the API, an
+index/sort mismatch on click, and the backend `HTTP 500: XML syntax error` mid-task). Rewrote
+clean by the host — confirming the local model is not yet fit for nuanced async UI. Per Naz's own
+"prioritize quality / skip if it doesn't fit," backend stayed host-built throughout.
+
+**Setup applied (home):** `BRAVE_API_KEY` appended to `~/.config/railjack/env` (mode 600); unit
+restarted; NotebookLM already authed (dedicated notebook `a4bd8246…` created + cached to
+`~/.config/railjack/thailandnow_notebook.id`). Optional: add `GNEWS_KEY`/`NEWSDATA_KEY` for the
+news-API booster (no-op without). `↻ CFG` picks up the new config rows.
+
