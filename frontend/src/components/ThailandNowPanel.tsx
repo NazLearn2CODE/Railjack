@@ -71,12 +71,14 @@ async function post<T>(url: string, body: unknown): Promise<{ ok: boolean; data?
   return { ok: true, data: (await res.json()) as T };
 }
 
-/** Current month as the <input type="month"> value (YYYY-MM) and as YYYYMM for the API. */
-function nowMonth(): string {
+/** Current month as YYYYMM (e.g. 202607) — the doc-naming format; recomputed each mount so it
+ *  tracks the current month automatically across reloads. */
+function currentYyyyMm(): string {
   const d = new Date();
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+  return `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, "0")}`;
 }
-const toYyyyMm = (yyyyMm: string) => yyyyMm.replace("-", "");
+/** Desk kind shown in the UI, uppercased (TIAN → "EMPTY EVENT", else the kind in caps). */
+const kindLabel = (d: Desk) => (d.kind === "event" ? "EMPTY EVENT" : d.kind.toUpperCase());
 
 /** Human label for the weeks slider: "4 weeks" under 8, else "≈N months". */
 function weeksLabel(n: number): string {
@@ -129,7 +131,7 @@ function WritersTab({
 }) {
   const [deskId, setDeskId] = useState("");
   const [count, setCount] = useState(0);
-  const [month, setMonth] = useState(nowMonth);
+  const [yyyymm, setYyyymm] = useState(currentYyyyMm);
   const desk = desks.find((d) => d.id === deskId) ?? desks[0];
   const n = count || desk?.count || 1;
   const [busy, setBusy] = useState(false);
@@ -143,12 +145,12 @@ function WritersTab({
     const r = await post<ProvisionResp>("/api/thailandnow/provision", {
       desk_id: desk.id,
       count: n,
-      yyyymm: toYyyyMm(month),
+      yyyymm: yyyymm.length === 6 ? yyyymm : currentYyyyMm(),
     });
     setBusy(false);
     if (r.ok && r.data) setItems(r.data.items);
     else setErr(r.error ?? "provision failed");
-  }, [desk, n, month]);
+  }, [desk, n, yyyymm]);
 
   return (
     <>
@@ -167,18 +169,13 @@ function WritersTab({
         ) : (
           <div className="flex flex-col gap-1">
             {desks.map((d) => (
-              <div key={d.id} className="row-in flex flex-wrap items-center gap-2">
+              <div key={d.id} className="row-in flex items-center gap-2">
                 <span className="pip pip--signal" />
                 <span className="mono">{d.id.toUpperCase()}</span>
-                <span className="label">{d.kind === "event" ? "empty event" : d.kind}</span>
+                <span className="label">{kindLabel(d)}</span>
                 <span className="mono" style={{ color: "var(--color-muted)" }}>
                   ×{d.count}
                 </span>
-                {(d.labels ?? []).map((l) => (
-                  <span key={l} className="pip pip--signal">
-                    {l}
-                  </span>
-                ))}
               </div>
             ))}
           </div>
@@ -201,12 +198,20 @@ function WritersTab({
             >
               {desks.map((d) => (
                 <option key={d.id} value={d.id}>
-                  {d.id} ({d.kind === "event" ? "empty event" : d.kind})
+                  {d.id.toUpperCase()} ({kindLabel(d)})
                 </option>
               ))}
             </select>
             <label className="label">MONTH</label>
-            <input className="input" type="month" value={month} onChange={(e) => setMonth(e.target.value)} />
+            <input
+              className="input"
+              type="text"
+              inputMode="numeric"
+              maxLength={6}
+              style={{ width: 96 }}
+              value={yyyymm}
+              onChange={(e) => setYyyymm(e.target.value.replace(/\D/g, "").slice(0, 6))}
+            />
             <label className="label">COUNT</label>
             <input
               className="input"
