@@ -26,11 +26,6 @@ import os
 import sys
 from pathlib import Path
 
-# Keep this dir off the front of sys.path so a local `queue.py`/etc. can't shadow
-# stdlib that google-auth-oauthlib pulls in (same trap nl_auth.py sidesteps).
-_here = Path(__file__).resolve().parent
-sys.path[:] = [p for p in sys.path if Path(p or os.getcwd()).resolve() != _here] + [str(_here)]
-
 try:
     from google_auth_oauthlib.flow import InstalledAppFlow
 except ImportError:
