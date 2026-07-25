@@ -25,6 +25,7 @@ scripts/screenshots/
 # Env / secrets
 .env
 .env.*
+!.env.example
 .mcp.json
 
 # OS

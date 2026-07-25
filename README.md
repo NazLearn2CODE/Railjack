@@ -15,23 +15,50 @@ Formerly **Orbiter**, a locally-hosted Agentic OS; that purpose was retired
 - **Python** — FastAPI + httpx + PyYAML; module registry, health fan-out,
   service management (`systemctl --user` / commands), ffmpeg job runner
 - **React 19** + Vite + Tailwind v4 + Zustand — dashboard, reusing the
-  mission-control design system in `web/src/index.css` verbatim
+  mission-control design system in `frontend/src/index.css` verbatim
 
 ## Per-machine modules
 
-Modules are declared in `config/<machine>.yaml`, selected by hostname
+Modules are declared in `configs/<machine>.yaml`, selected at boot by hostname
 (`hostnames:` list) or the `RAILJACK_CONFIG` env override. This machine
-("Tawhan", hostname `bazzite`): tmux terminal (ttyd :7681) · ComfyUI (:8188) ·
-ffmpeg Video Lab. Adding an iframe module = one YAML block, zero core code.
+("Tawhan", hostname `bazzite`): TERMINAL (ttyd) · ComfyUI · VIDEO LAB · RESEARCH
+(NotebookLM) · NEWSROOM · THAILAND NOW · N8N. An iframe module is one YAML
+block, zero core code; a panel module adds a React component + optional API
+router (see `docs/module-authoring-guide.md`).
 
-## Run
+## Install
 
 ```bash
-python -m venv .venv && .venv/bin/pip install -e ".[dev]"
-cd web && npm install && npm run build && cd ..
-.venv/bin/uvicorn app.main:app --port 8700
-# open http://localhost:8700
+git clone https://github.com/NazLearn2CODE/Railjack.git
+cd Railjack
+uv sync                                       # python deps from uv.lock → .venv
+cd frontend && npm install && npm run build && cd ..
+cp .env.example ~/.config/railjack/env        # then edit: fill in the keys you need
+mkdir -p ~/.config/systemd/user
+cp assets/railjack.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now railjack         # hub up on http://localhost:8700
 ```
+
+Config selection: the hub picks `configs/<hostname>.yaml` via each file's
+`hostnames:` list, or `RAILJACK_CONFIG=<stem>` to force one. A miss fails fast
+at boot with the available config names.
+
+Creds prerequisites (only for the features you'll use — the hub boots without
+them, serving 200):
+- **LLM features** (NEWSROOM REWRITE, THAILAND NOW publicize, ComfyUI expand,
+  NotebookLM polish) — `OMNIROUTE_API_KEY` in the env file, or the gateway key
+  in `~/.config/omniroute/.env` (`app/zai.py` reads it as fallback). z.ai is
+  never a hard dependency; calls ride the OmniRoute free-first cascade.
+- **THAILAND NOW** — Google token via `python3 app/tn_auth.py` once; Trello
+  key+token + Brave key in the env file (see `.env.example`).
+- **NEWSROOM SEND TO NL** — optional: `python3 ~/Cephalon/10-knowledge/skills/newsroom/scripts/nl_auth.py`
+  for a newsroom-owned Google token (else it reuses the google-workspace MCP
+  creds, which already work).
+- **NotebookLM** — `notebooklm login` once.
+
+Hot-reload config after YAML edits (no restart):
+`curl -X POST http://localhost:8700/api/config/reload`.
 
 ## Vault
 
