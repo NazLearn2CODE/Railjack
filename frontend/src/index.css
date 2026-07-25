@@ -217,6 +217,13 @@
   background: var(--color-critical);
   box-shadow: 0 0 8px 1px color-mix(in srgb, var(--color-critical) 70%, transparent);
 }
+/* Auto-on / hub-internal module (no explicit service to start): a steady soft
+   white glow = "alive, nothing to do." Distinct from --go (an explicit service
+   you started that's up) and --crit (an explicit service that's down). */
+.pip--on {
+  background: var(--color-phosphor);
+  box-shadow: 0 0 6px 1px color-mix(in srgb, var(--color-phosphor) 55%, transparent);
+}
 @keyframes pulse-signal {
   0%, 100% { opacity: 1; transform: scale(1); }
   50% { opacity: 0.45; transform: scale(0.82); }
@@ -292,6 +299,13 @@
   font-size: 11px;
   padding: 3px 8px;
   letter-spacing: 0.1em;
+}
+/* Module-rail button label: sized so the longest title (THAILAND NOW) stays on
+   one line in the w-44 rail. nowrap guarantees it never wraps. */
+.module-label {
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  white-space: nowrap;
 }
 .btn--hazard:hover:not(:disabled) {
   border-color: var(--color-hazard);

@@ -66,15 +66,22 @@ export default function ModuleRail() {
       <span className="label mb-1 px-1">MODULES</span>
       {modules.map((m) => {
         const active = m.id === activeId;
-        const status = pipStatus(healthMap[m.id], starting[m.id], Date.now());
+        // Modules WITH a health spec are explicit services (green up / red down /
+        // amber starting). Modules WITHOUT one are hub-internal + always on → a
+        // steady white glow ("alive, nothing to do").
+        const status = m.health
+          ? pipStatus(healthMap[m.id], starting[m.id], Date.now())
+          : "auto";
         const pip =
-          status === "ok"
-            ? "pip pip--go"
-            : status === "starting"
-              ? "pip pip--hazard"
-              : status === "down"
-                ? "pip pip--crit"
-                : "pip";
+          status === "auto"
+            ? "pip pip--on"
+            : status === "ok"
+              ? "pip pip--go"
+              : status === "starting"
+                ? "pip pip--hazard"
+                : status === "down"
+                  ? "pip pip--crit"
+                  : "pip";
         return (
           <button
             key={m.id}
@@ -82,7 +89,7 @@ export default function ModuleRail() {
             className={`btn hud--bracket relative flex items-center gap-2 ${active ? "btn--signal" : ""}`}
           >
             <span className={pip} aria-hidden />
-            <span className="text-left">{m.title}</span>
+            <span className="module-label text-left">{m.title}</span>
           </button>
         );
       })}
