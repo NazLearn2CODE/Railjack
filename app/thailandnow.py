@@ -1421,18 +1421,29 @@ def _archive_is_presence(question: str) -> bool:
 
 def _archive_is_detail(question: str) -> bool:
     """Synthesis/detail intent — wants specific info about an event (when/where/
-    how much). Stage 1 has no LLM, so these 501 until Stage 2 wires the path."""
+    how much). Stage 2 answers these via LLM synthesis over the top docs."""
     return bool(_ARCHIVE_DETAIL.search(question.lower()))
+
+
+def _archive_gem_path() -> Path:
+    """Resolve the ARCHIVE Q&A gem path (relative paths anchor at the repo root).
+    Mirrors _gem_path()."""
+    p = Path(_opts().get("archive_gem_path", "app/gems/event-archive-qa.md"))
+    if not p.is_absolute():
+        p = Path(__file__).resolve().parent.parent / p
+    return p
 
 
 @router.post("/api/thailandnow/archive/ask")
 async def archive_ask(payload: dict = Body(default={})):
-    r"""ARCHIVE tab (Stage 1) — chat Q&A over the Event Drive. DIRECT answers only:
+    r"""ARCHIVE tab — chat Q&A over the Event Drive. Three paths:
 
     presence/listing → all names + links (cap 30, newest first);
     title search → tokenize + score doc names (year-filtered on a \b20\d{2}\b in
-    the question), matches as "• name — link", else 3 closest titles + folder link;
-    detail/synthesis → 501 (Stage 2 wires z.ai). No LLM call here at all."""
+    the question); matches as "• name — link", else 3 closest titles + folder link;
+    detail/synthesis → top-K docs by title score, bodies fed to the Q&A LLM
+    (source-only gem), graceful-degrade to a fixed message + sources if the gateway
+    is down (NEVER HTTP 500)."""
     question = (payload.get("question") or "").strip()
     if not question:
         raise HTTPException(400, "question required")
@@ -1445,12 +1456,7 @@ async def archive_ask(payload: dict = Body(default={})):
         return {"answer": "No event docs in the Event Drive yet.",
                 "sources": [], "mode": "direct"}
 
-    # 1) detail / synthesis → Stage 2 (no LLM in Stage 1). Checked FIRST so a
-    #    question like "when is the next event?" 501s instead of list-all.
-    if _archive_is_detail(question):
-        raise HTTPException(501, "synthesis path not yet wired (Stage 2)")
-
-    # 2) general listing (no specific event named) → all names + links
+    # general listing (no specific event named) → all names + links
     if _archive_is_presence(question):
         top = docs[:30]
         return {
@@ -1459,7 +1465,10 @@ async def archive_ask(payload: dict = Body(default={})):
             "mode": "direct",
         }
 
-    # 3) specific lookup → title search the content tokens (year-filtered)
+    # specific lookup → title-search the content tokens (year-filtered). The scored
+    # pool feeds BOTH the direct-match return and the synthesis branch, so the
+    # scoring runs once. Detail questions (when/where/how much) go to synthesis;
+    # plain name lookups return the matched titles directly (no LLM cost).
     content = _archive_content_tokens(question)
     year_m = re.search(r"\b(20\d{2})\b", question)
     pool = docs
@@ -1471,19 +1480,63 @@ async def archive_ask(payload: dict = Body(default={})):
         key=lambda x: x[0], reverse=True,
     )
     matches = [d for s, d in scored if s > 0]
-    if matches:
+
+    if not _archive_is_detail(question):
+        if matches:
+            return {
+                "answer": "\n".join(f"• {d['name']} — {d['webViewLink']}" for d in matches),
+                "sources": [{"name": d["name"], "url": d["webViewLink"]} for d in matches],
+                "mode": "direct",
+            }
+        # no title match → 3 closest titles + folder link
+        sugg = [d["name"] for _, d in scored[:3]]
+        answer = f"No events matching `{question}` in the Event Drive."
+        if sugg:
+            answer += "\n\nClosest titles:\n" + "\n".join(f"• {n}" for n in sugg)
+        answer += f"\n\nBrowse the Event Drive: {folder_link}"
+        return {"answer": answer, "sources": [], "mode": "direct"}
+
+    # --- detail / synthesis (Stage 2): feed the top docs' bodies to the Q&A LLM ---
+    # Top-5 by title score. With real matches the LLM answers from their bodies; with
+    # zero score>0 it gets the 5 closest anyway so it can honestly say "does not list".
+    matched_docs = matches[:5] if matches else [d for _, d in scored[:5]]
+    bodies: list[str] = []
+    for d in matched_docs[:5]:
+        body = await _drive_read_doc(token, d["id"])
+        if len(body) > 8000:
+            body = body[:8000] + "\n[...truncated]"
+        bodies.append(body)
+    top = matched_docs[:5]
+    system = _load_gem(_archive_gem_path())
+    model = (_opts().get("archive_llm") or {}).get("model") or "glm-5"
+    prompt = (
+        "Question: " + question + "\n\nEvent docs:\n"
+        + "\n\n".join("=== DOC: " + d["name"] + " ===\n" + b for d, b in zip(top, bodies))
+    )
+    try:
+        answer = await zai_message(
+            prompt, max_tokens=4096, system=system, model=model, timeout=180
+        )
         return {
-            "answer": "\n".join(f"• {d['name']} — {d['webViewLink']}" for d in matches),
-            "sources": [{"name": d["name"], "url": d["webViewLink"]} for d in matches],
-            "mode": "direct",
+            "answer": answer,
+            "sources": [
+                {"name": d["name"], "url": d["webViewLink"],
+                 "snippet": bodies[i][:160] if i < len(bodies) else ""}
+                for i, d in enumerate(top)
+            ],
+            "mode": "synthesized",
         }
-    # no match → 3 closest titles + folder link
-    sugg = [d["name"] for _, d in scored[:3]]
-    answer = f"No events matching `{question}` in the Event Drive."
-    if sugg:
-        answer += "\n\nClosest titles:\n" + "\n".join(f"• {n}" for n in sugg)
-    answer += f"\n\nBrowse the Event Drive: {folder_link}"
-    return {"answer": answer, "sources": [], "mode": "direct"}
+    except HTTPException as e:
+        # Gateway 503/502 → degrade to a fixed message + the candidate sources.
+        # NEVER let a gateway failure surface as HTTP 500.
+        return {
+            "answer": "Found " + str(len(matched_docs)) + " candidate event doc(s) in "
+                      "the Event Drive; Q&A synthesis is unavailable right now (the LLM "
+                      "gateway is down). See the sources below.",
+            "sources": [{"name": d["name"], "url": d["webViewLink"]} for d in matched_docs],
+            "mode": "degraded",
+            "note": "gateway: " + str(e.detail),
+        }
 
 
 if __name__ == "__main__":
@@ -1505,6 +1558,11 @@ if __name__ == "__main__":
     gem = _load_gem(_gem_path())
     assert "## Role & Purpose" in gem and "Output Layout" in gem, "gem extraction wrong"
     assert not gem.startswith("---"), "frontmatter not stripped"
+    # ARCHIVE Stage 2: Q&A gem loads + extracts the source-only rules.
+    agem = _load_gem(_archive_gem_path())
+    assert agem.startswith("## Role & Purpose"), "archive gem extraction wrong"
+    assert "does not list" in agem.replace("\n", " "), "archive gem missing no-fabricate line"
+    assert "per <doc name>" in agem, "archive gem missing citation rule"
     imgs = _parse_images(
         "![hero](https://x/wp-content/uploads/2026/07/run-1024x682.jpg)"
         " ![icon](https://x/icon-hamburger.svg)"
