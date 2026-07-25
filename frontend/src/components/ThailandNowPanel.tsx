@@ -1,5 +1,5 @@
-import { useCallback, useMemo, useState } from "react";
-import { usePolling } from "../api";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { fetchJSON, usePolling } from "../api";
 import type { ModuleConfig } from "../store";
 
 /**
@@ -40,6 +40,23 @@ interface ScoutResp {
   errors: string[];
   window?: { from: string; to: string; weeks: number };
 }
+interface TnJob {
+  id: string;
+  kind: string; // "deep-search"
+  label: string;
+  status: string; // queued | running | done | error | cancelled
+  progress: number;
+  events: TnEvent[];
+  source_urls: string[];
+  window: { from: string; to: string; weeks: number } | null;
+  notebook: string | null;
+  notebook_title: string | null;
+  error: string | null;
+  logs: string[];
+}
+interface NbResp {
+  notebooks: { id: string; title: string; created_at?: string }[];
+}
 interface ImagesResp {
   images: { url: string; alt: string }[];
   count: number;
@@ -52,6 +69,9 @@ interface ProvisionItem {
   doc_url: string;
   card_name: string;
   card_url: string;
+}
+interface SourcesResp {
+  sources: { id: string; title: string; url: string; status: string }[];
 }
 interface ProvisionResp {
   desk_id: string;
@@ -85,6 +105,29 @@ function weeksLabel(n: number): string {
   if (n < 8) return `${n} week${n === 1 ? "" : "s"}`;
   const m = Math.max(1, Math.round(n / 4.33));
   return `≈${m} month${m === 1 ? "" : "s"}`;
+}
+
+/** localStorage-backed state — survives module switches + reloads so the user
+ *  can walk away and come back to the search results. 8-line helper, used for
+ *  events/query/weeks/mode; no external dep (matches the inline pattern in
+ *  ComfyPanel/FfmpegPanel, just deduped across N fields). */
+function usePersistentState<T>(key: string, initial: T) {
+  const [state, setState] = useState<T>(() => {
+    try {
+      const raw = localStorage.getItem(key);
+      return raw != null ? (JSON.parse(raw) as T) : initial;
+    } catch {
+      return initial;
+    }
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem(key, JSON.stringify(state));
+    } catch {
+      /* quota / private mode — degrade to in-memory only */
+    }
+  }, [key, state]);
+  return [state, setState] as const;
 }
 
 export default function ThailandNowPanel({ module: _module }: { module: ModuleConfig }) {
@@ -280,13 +323,62 @@ function Row({ label, value }: { label: string; value: string }) {
 /* --------------------------------- EVENTS --------------------------------- */
 
 function EventsTab() {
-  const [query, setQuery] = useState("");
-  const [weeks, setWeeks] = useState(4);
-  const [events, setEvents] = useState<TnEvent[]>([]);
+  // persisted: walk away, come back — results + the form that produced them survive
+  const [mode, setMode] = usePersistentState<"scout" | "deep">("tn.mode", "scout");
+  const [query, setQuery] = usePersistentState("tn.query", "");
+  const [weeks, setWeeks] = usePersistentState("tn.weeks", 4);
+  const [events, setEvents] = usePersistentState<TnEvent[]>("tn.events", []);
   const [fetching, setFetching] = useState(false);
   const [busyLabel, setBusyLabel] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [pickedKey, setPickedKey] = useState<string | null>(null);
+  const [selNb, setSelNb] = useState<string | null>(null);
+  const [seeding, setSeeding] = useState(false);
+  const [notifyPerm, setNotifyPerm] = useState<NotificationPermission>(
+    typeof Notification !== "undefined" ? Notification.permission : "denied",
+  );
+
+  // DEEP: poll jobs + this mode's notebooks
+  const { data: jobsData, refetch: refetchJobs } = usePolling<{ jobs: TnJob[] }>(
+    "/api/thailandnow/jobs", 1500,
+  );
+  const { data: nbData, refetch: refetchNbs } = usePolling<NbResp>(
+    "/api/thailandnow/deep/notebooks", 15000,
+  );
+  const jobs = jobsData?.jobs ?? [];
+  const notebooks = nbData?.notebooks ?? [];
+  const searchJob = jobs.find((j) => j.kind === "deep-search") ?? null;
+  const searching = !!searchJob && (searchJob.status === "queued" || searchJob.status === "running");
+  const extracting = fetching && mode === "deep";
+
+  // default-select the newest notebook (first in the sorted list) when none chosen
+  useEffect(() => {
+    if (mode === "deep" && !selNb && notebooks.length) setSelNb(notebooks[0].id);
+  }, [mode, selNb, notebooks]);
+
+  // ask for notification permission once when entering DEEP mode
+  useEffect(() => {
+    if (mode === "deep" && typeof Notification !== "undefined" && Notification.permission === "default") {
+      Notification.requestPermission().then(setNotifyPerm);
+    }
+  }, [mode]);
+
+  // browser-notify when a deep-search job flips to done (and refresh the notebook list)
+  const prevDone = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    const doneIds = new Set(jobs.filter((j) => j.status === "done").map((j) => j.id));
+    const newly = jobs.filter((j) => doneIds.has(j.id) && !prevDone.current.has(j.id));
+    prevDone.current = doneIds;
+    for (const j of newly) {
+      if (j.kind !== "deep-search") continue;
+      refetchNbs();
+      if (notifyPerm === "granted" && typeof Notification !== "undefined") {
+        new Notification("Thailand NOW research done", {
+          body: `${j.source_urls.length} sources ready — press EXTRACT to pull events.`,
+        });
+      }
+    }
+  }, [jobs, notifyPerm, refetchNbs]);
 
   // dedup key + ascending-by-start-date view (stable for events sharing a date)
   const keyOf = (e: TnEvent) => e.url || e.title;
@@ -300,26 +392,76 @@ function EventsTab() {
     [events],
   );
 
-  const run = useCallback(
-    async (endpoint: "/api/thailandnow/events/scout" | "/api/thailandnow/events/deep") => {
-      setFetching(true);
-      setErr(null);
-      setBusyLabel(endpoint === "/api/thailandnow/events/deep" ? "DEEP RESEARCH via NotebookLM… 1-2 min" : null);
-      const r = await post<ScoutResp>(endpoint, { query, weeks });
-      setFetching(false);
-      setBusyLabel(null);
-      if (r.ok && r.data) {
-        setEvents((prev) => {
-          const map = new Map(prev.map((e) => [keyOf(e), e]));
-          for (const e of r.data!.events) map.set(keyOf(e), e);
-          return [...map.values()];
-        });
-      } else {
-        setErr(r.error ?? (endpoint === "/api/thailandnow/events/deep" ? "DEEP RESEARCH failed" : "SCOUT failed"));
-      }
-    },
-    [query, weeks],
-  );
+  // SCOUT (instant, sync)
+  const runScout = useCallback(async () => {
+    setFetching(true);
+    setErr(null);
+    setBusyLabel(null);
+    const r = await post<ScoutResp>("/api/thailandnow/events/scout", { query, weeks });
+    setFetching(false);
+    if (r.ok && r.data) {
+      setEvents((prev) => {
+        const map = new Map(prev.map((e) => [keyOf(e), e]));
+        for (const e of r.data!.events) map.set(keyOf(e), e);
+        return [...map.values()];
+      });
+    } else {
+      setErr(r.error ?? "SCOUT failed");
+    }
+  }, [query, weeks]);
+
+  // DEEP SEARCH — fire-and-forget (returns job id); browser-notifies on done
+  const startDeep = useCallback(async () => {
+    setErr(null);
+    const r = await post<{ id: string }>("/api/thailandnow/deep/search", { query, weeks });
+    if (!r.ok) {
+      setErr(r.error ?? "DEEP SEARCH failed to start");
+      return;
+    }
+    await refetchJobs();
+  }, [query, weeks, refetchJobs]);
+
+  // DEEP EXTRACT — sync regex extraction on the selected notebook's sources
+  const extractDeep = useCallback(async () => {
+    if (!selNb) return;
+    setFetching(true);
+    setErr(null);
+    setBusyLabel("EXTRACTING via free regex…");
+    const r = await post<ScoutResp>("/api/thailandnow/deep/extract", {
+      notebook_id: selNb, query, weeks,
+    });
+    setFetching(false);
+    setBusyLabel(null);
+    if (r.ok && r.data) {
+      setEvents((prev) => {
+        const map = new Map(prev.map((e) => [keyOf(e), e]));
+        for (const e of r.data!.events) map.set(keyOf(e), e);
+        return [...map.values()];
+      });
+      if (!r.data.events.length) setErr("no events extracted (sources may be undated or JS-rendered)");
+    } else {
+      setErr(r.error ?? "DEEP EXTRACT failed");
+    }
+  }, [selNb, query, weeks]);
+
+  // DEEP seed: tick one source URL → seed a ThickBox event (jina+regex) → open detail
+  const pickFromUrl = useCallback(async (url: string) => {
+    setSeeding(true);
+    setErr(null);
+    const r = await post<{ event: TnEvent }>("/api/thailandnow/deep/seed", { url });
+    setSeeding(false);
+    if (r.ok && r.data?.event) {
+      const ev = r.data.event;
+      setEvents((prev) => {
+        const map = new Map(prev.map((e) => [keyOf(e), e]));
+        map.set(keyOf(ev), ev);  // add/replace so the ThickBox lookup finds it
+        return [...map.values()];
+      });
+      setPickedKey(keyOf(ev));  // opens ThickBox
+    } else {
+      setErr(r.error ?? "seed failed — could not read that URL");
+    }
+  }, []);
 
   const picked = pickedKey ? events.find((e) => keyOf(e) === pickedKey) ?? null : null;
   if (picked) {
@@ -334,8 +476,26 @@ function EventsTab() {
 
   return (
     <>
+      {/* mode toggle */}
+      <div className="flex items-center gap-2 mb-2">
+        {(["scout", "deep"] as const).map((m) => (
+          <button
+            key={m}
+            className={`btn ${mode === m ? "btn--signal" : ""}`}
+            onClick={() => setMode(m)}
+          >
+            {m === "scout" ? "SCOUT" : "DEEP"}
+          </button>
+        ))}
+        <span className="mono" style={{ color: "var(--color-muted)" }}>
+          {mode === "scout"
+            ? "instant keyless search"
+            : "NotebookLM research + on-demand extract"}
+        </span>
+      </div>
+
       <section className="hud hud--bracket reveal reveal-1 p-3">
-        <div className="label mb-2">SCOUT</div>
+        <div className="label mb-2">{mode === "scout" ? "SCOUT" : "DEEP"}</div>
         <div className="mb-2 flex items-center gap-3">
           <input
             type="range"
@@ -358,20 +518,91 @@ function EventsTab() {
             value={query}
             onChange={(e) => setQuery(e.target.value)}
           />
-          <button className="btn btn--signal" disabled={fetching} onClick={() => run("/api/thailandnow/events/scout")}>
-            {fetching && !busyLabel ? "SCANNING…" : "SCOUT"}
-          </button>
-          <button className="btn" disabled={fetching} onClick={() => run("/api/thailandnow/events/deep")}>
-            DEEP RESEARCH
-          </button>
+          {mode === "scout" ? (
+            <button className="btn btn--signal" disabled={fetching} onClick={runScout}>
+              {fetching && !busyLabel ? "SCANNING…" : "SCOUT"}
+            </button>
+          ) : (
+            <>
+              <button className="btn btn--signal" disabled={searching} onClick={startDeep}>
+                {searching ? "SEARCHING…" : "SEARCH"}
+              </button>
+              <button
+                className="btn"
+                disabled={extracting || !selNb}
+                onClick={extractDeep}
+              >
+                {extracting ? "EXTRACTING…" : "EXTRACT"}
+              </button>
+            </>
+          )}
         </div>
-        <div className="mono mt-1" style={{ color: "var(--color-muted)" }}>
-          SCOUT is instant keyless; DEEP RESEARCH runs NotebookLM (1-2 min). Both append here.
-        </div>
+
+        {mode === "deep" && (
+          <div className="mt-2 flex flex-col gap-2">
+            {/* notebook browser list */}
+            <NbListView notebooks={notebooks} selNb={selNb} setSelNb={setSelNb} onPickUrl={pickFromUrl} busy={seeding} />
+            {/* SEARCH job status line */}
+            {searchJob && (
+              <div className="flex items-center gap-2">
+                <span
+                  className="pip"
+                  style={{
+                    background:
+                      searchJob.status === "error" ? "var(--color-critical)"
+                      : searchJob.status === "done" ? "var(--color-go)"
+                      : "var(--color-signal)",
+                  }}
+                />
+                <span className="mono" style={{ minWidth: 110 }}>
+                  {searchJob.status.toUpperCase()} · {searchJob.progress}%
+                </span>
+                {searchJob.status === "done" && (
+                  <span className="mono" style={{ color: "var(--color-go)" }}>
+                    {searchJob.source_urls.length} sources ready
+                  </span>
+                )}
+                {searching && (
+                  <button
+                    className="btn btn--crit"
+                    onClick={() =>
+                      fetchJSON(`/api/thailandnow/jobs/${searchJob.id}/cancel`, { method: "POST" }).catch(() => {})
+                    }
+                  >
+                    CANCEL
+                  </button>
+                )}
+              </div>
+            )}
+            {/* notification hint */}
+            <div className="mono" style={{ color: "var(--color-muted)" }}>
+              SEARCH runs NotebookLM in the background
+              {notifyPerm === "granted"
+                ? " — you'll get a browser notification when done."
+                : notifyPerm === "denied"
+                ? " — notifications blocked; stay on this tab to see status."
+                : " — grant notification permission to be pinged when done."}
+              {" "}Then EXTRACT pulls dated events from the notebook (free, no LLM).
+            </div>
+          </div>
+        )}
+
+        {mode === "scout" && (
+          <div className="mono mt-1" style={{ color: "var(--color-muted)" }}>
+            instant keyless search (Jina + regex, no LLM). Switch to DEEP for NotebookLM research.
+          </div>
+        )}
       </section>
 
       <section className="hud hud--bracket reveal reveal-2 p-3">
-        <div className="label mb-2">RESULTS{sorted.length ? ` · ${sorted.length}` : ""}</div>
+        <div className="mb-2 flex items-center justify-between">
+          <span className="label">RESULTS{sorted.length ? ` · ${sorted.length}` : ""}</span>
+          {sorted.length > 0 && (
+            <button className="btn btn--compact btn--crit" onClick={() => setEvents([])}>
+              CLEAR
+            </button>
+          )}
+        </div>
         {busyLabel ? (
           <div className="mono caret" style={{ color: "var(--color-signal)" }}>
             {busyLabel}
@@ -402,6 +633,18 @@ function EventsTab() {
                   </span>
                 )}
                 <span className="mono">{e.title}</span>
+                {e.url && (
+                  <a
+                    href={e.url}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="mono text-sm"
+                    style={{ color: "var(--color-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 150 }}
+                    onClick={(ev) => ev.stopPropagation()}
+                  >
+                    ({new URL(e.url).hostname.replace("www.", "")})
+                  </a>
+                )}
                 {e.source && <span className="label">{e.source}</span>}
               </button>
             ))}
@@ -509,7 +752,7 @@ function ThickBox({ event, onBack }: { event: TnEvent; onBack: () => void }) {
         <label className="mt-2 flex items-center gap-2">
           <input type="checkbox" checked={useUrl} onChange={(e) => setUseUrl(e.target.checked)} />
           <span className="mono" style={{ color: "var(--color-phosphor-dim)" }}>
-            use source URL: {event.url}
+            use source URL: <a href={event.url} target="_blank" rel="noreferrer" style={{ color: "var(--color-muted)", textDecoration: "underline" }}>{event.url}</a>
           </span>
         </label>
       </section>
@@ -518,14 +761,14 @@ function ThickBox({ event, onBack }: { event: TnEvent; onBack: () => void }) {
         <div className="mb-2 flex items-center justify-between">
           <span className="label">PUBLICITY BUNDLE</span>
           <button className="btn btn--signal" disabled={writing} onClick={genBundle}>
-            {writing ? "WRITING…" : "GENERATE BUNDLE"}
+            {writing ? "DRAFTING…" : "DRAFT COPY"}
           </button>
         </div>
         {pubErr && <ErrLine msg={pubErr} />}
         <textarea
           className="input"
           rows={16}
-          placeholder="generate a bundle (or paste your own) — review before creating the doc"
+          placeholder="draft copy (or paste your own) — review before creating the doc"
           value={bundle}
           onChange={(e) => setBundle(e.target.value)}
           style={{ resize: "vertical", fontFamily: "var(--font-mono)" }}
@@ -598,6 +841,92 @@ function ErrLine({ msg }: { msg: string }) {
       <span className="mono" style={{ color: "var(--color-critical)", wordBreak: "break-word" }}>
         {msg}
       </span>
+    </div>
+  );
+}
+
+function NbListView({ notebooks, selNb, setSelNb, onPickUrl, busy }: {
+  notebooks: { id: string; title: string; created_at?: string }[];
+  selNb: string | null;
+  setSelNb: (id: string | null) => void;
+  onPickUrl: (url: string) => void;
+  busy: boolean;
+}) {
+  const [expandedNb, setExpandedNb] = useState<string | null>(null);
+  // single-select: tick one source URL at a time (ticking another clears the first)
+  const [tickedUrl, setTickedUrl] = useState<string | null>(null);
+  const { data: sourcesData } = usePolling<SourcesResp>(
+    selNb ? `/api/thailandnow/deep/notebooks/${selNb}/sources` : "", 15000,
+  );
+  const sources = sourcesData?.sources ?? [];
+
+  const copySources = useCallback(() => {
+    const readySources = sources.filter((s) => s.status === "ready").map((s) => s.url);
+    if (readySources.length > 0) {
+      navigator.clipboard.writeText(readySources.join("\n"));
+    }
+  }, [sources]);
+
+  return (
+    <div className="flex flex-col gap-1">
+      {notebooks.length === 0 ? (
+        <div className="mono" style={{ color: "var(--color-muted)" }}>
+          no research notebooks yet — run SEARCH
+        </div>
+      ) : (
+        notebooks.map((nb) => (
+          <div key={nb.id} className="row-in flex flex-col items-stretch">
+            <button
+              className="flex items-center gap-2"
+              onClick={() => {
+                setSelNb(nb.id);
+                setExpandedNb(expandedNb === nb.id ? null : nb.id);
+              }}
+              style={{ textAlign: "left", background: "transparent", border: 0, cursor: "pointer" }}
+            >
+              <span className="pip" style={{ background: nb.id === selNb ? "var(--color-signal)" : "var(--color-muted)" }} />
+              <span className="mono flex-grow">{(nb.title || nb.id).slice(0, 60)}</span>
+              {expandedNb === nb.id ? "▾" : "▸"}
+            </button>
+            {expandedNb === nb.id && nb.id === selNb && (
+              <div className="ml-5 mt-1 border-l border-gray-700 pl-3">
+                <div className="flex items-center gap-2 mb-1">
+                  <span className="label">SOURCES · tick one → EDIT EVENT</span>
+                  <button className="btn btn--compact" onClick={copySources}>copy URLs</button>
+                  <button
+                    className="btn btn--compact btn--signal"
+                    disabled={!tickedUrl || busy}
+                    onClick={() => tickedUrl && onPickUrl(tickedUrl)}
+                  >
+                    {busy ? "OPENING…" : "EDIT EVENT"}
+                  </button>
+                </div>
+                {sources.length === 0 ? (
+                  <div className="mono" style={{ color: "var(--color-muted)" }}>no sources found</div>
+                ) : (
+                  <div className="flex flex-col gap-0.5">
+                    {sources.map((src, i) => {
+                      const ticked = src.url === tickedUrl;
+                      return (
+                        <label key={i} className="flex items-center gap-2 mono text-sm" style={{ color: ticked ? "var(--color-signal)" : "var(--color-phosphor-dim)" }}>
+                          <input
+                            type="checkbox"
+                            checked={ticked}
+                            onChange={() => setTickedUrl(ticked ? null : src.url)}
+                          />
+                          <a href={src.url} target="_blank" rel="noreferrer" style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                            {src.title} ({src.status}) {src.url}
+                          </a>
+                        </label>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        ))
+      )}
     </div>
   );
 }

@@ -17,9 +17,13 @@ import asyncio
 import json
 import os
 import re
+import signal
 import urllib.parse
+from collections import deque
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
+from uuid import uuid4
 
 import httpx
 from fastapi import APIRouter, Body, HTTPException
@@ -42,6 +46,117 @@ def _opts() -> dict:
         if m.kind == "panel" and m.panel == "thailandnow":
             return m.options or {}
     return {}
+
+
+# --- DEEP mode async job store (copies notebooklm.py's _JOBS/_spawn pattern) ---
+# Module-local (not shared) — matches notebooklm/comfyui/ffmpeg house style.
+
+
+@dataclass
+class TnJob:
+    id: str
+    kind: str  # "deep-search" (research) — "deep-extract" may follow
+    label: str
+    status: str = "queued"  # queued | running | done | error | cancelled
+    progress: int = 0
+    events: list[dict] = field(default_factory=list)
+    source_urls: list[str] = field(default_factory=list)
+    window: dict | None = None
+    notebook: str | None = None       # nid
+    notebook_title: str | None = None
+    error: str | None = None
+    logs: deque = field(default_factory=lambda: deque(maxlen=200))
+    proc: asyncio.subprocess.Process | None = field(default=None, repr=False)
+    cancel: bool = False
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id, "kind": self.kind, "label": self.label, "status": self.status,
+            "progress": self.progress,
+            "events": self.events, "source_urls": self.source_urls,
+            "window": self.window, "notebook": self.notebook,
+            "notebook_title": self.notebook_title,
+            "error": self.error, "logs": list(self.logs),
+        }
+
+
+_TN_JOBS: dict[str, TnJob] = {}
+_TN_RUNNING = {"queued", "running"}
+_TN_BG: set[asyncio.Task[object]] = set()
+
+
+class _TnCancelled(Exception):
+    """Internal: a job step saw job.cancel (or was SIGTERM'd) mid-run."""
+
+
+async def _tn_run_step(job: TnJob, argv: list[str], timeout: float) -> str:
+    """One job step: run, stream stdout+stderr into job.logs, return stdout text.
+    Raises _TnCancelled if cancelled/SIGTERM'd, else RuntimeError on failure —
+    _tn_run_job maps both to job status. (Raises RuntimeError, NOT HTTPException,
+    so background failures land in job.error instead of leaking to a request.)"""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        )
+    except FileNotFoundError:
+        raise RuntimeError("notebooklm CLI not found")
+    job.proc = proc
+
+    async def pump(stream) -> list[str]:
+        buf: list[str] = []
+        while True:
+            line = await stream.readline()
+            if not line:
+                break
+            s = line.decode(errors="replace").rstrip()
+            job.logs.append(s)
+            buf.append(s)
+        return buf
+
+    try:
+        out, err = await asyncio.wait_for(
+            asyncio.gather(pump(proc.stdout), pump(proc.stderr)), timeout=timeout
+        )
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        job.proc = None
+        raise RuntimeError(f"step timed out: {' '.join(argv[1:4])}")
+    rc = await proc.wait()
+    job.proc = None
+    if job.cancel or rc in (-signal.SIGTERM, -signal.SIGINT):
+        raise _TnCancelled()
+    if rc != 0:
+        raise RuntimeError("\n".join(err).strip() or f"exit {rc}")
+    return "\n".join(out)
+
+
+async def _tn_run_job(job: TnJob, flow) -> None:
+    """Wrap a flow coroutine: running → done/error/cancelled."""
+    job.status = "running"
+    try:
+        await flow
+    except _TnCancelled:
+        job.status = "cancelled"
+        return
+    except Exception as e:  # noqa: BLE001 — any step failure → error status
+        job.status, job.error = "error", str(e) or e.__class__.__name__
+        return
+    if job.cancel:
+        job.status = "cancelled"
+    else:
+        job.status, job.progress = "done", 100
+
+
+def _tn_spawn(kind: str, label: str, make_flow) -> dict:
+    """Create a queued TnJob and schedule its flow (a job -> coroutine factory)."""
+    jid = uuid4().hex[:8]
+    job = TnJob(id=jid, kind=kind, label=label)
+    _TN_JOBS[jid] = job
+    task = asyncio.create_task(_tn_run_job(job, make_flow(job)))
+    _TN_BG.add(task)
+    task.add_done_callback(_TN_BG.discard)
+    return {"id": jid}
 
 
 # --- WRITERS / shared engine (slices 1-4) ---
@@ -341,7 +456,188 @@ async def _jina_read(url: str, timeout: float = 30.0) -> str:
         return r.text
 
 
+# --- FREE extraction: regex-based event parsing (no LLM, 100% free) ---
+# ponytail: SCOUT is now regex-only; z.ai lives only in DEEP mode (2026-07-24)
+
+
+# Thai month names + abbreviations (for Buddhist-era year support)
+_THAI_MONTHS = [
+    "ม.ค.", "มกราคม", "ม.ค.", "January",
+    "ก.พ.", "กุมภาพันธ์", "ก.พ.", "February",
+    "มี.ค.", "มีนาคม", "มี.ค.", "March",
+    "เม.ย.", "เมษายน", "เม.ย.", "April",
+    "พ.ค.", "พฤษภาคม", "พ.ค.", "May",
+    "มิ.ย.", "มิถุนายน", "มิ.ย.", "June",
+    "ก.ค.", "กรกฎาคม", "ก.ค.", "July",
+    "ส.ค.", "สิงหาคม", "ส.ค.", "August",
+    "ก.ย.", "กันยายน", "ก.ย.", "September",
+    "ต.ค.", "ตุลาคม", "ต.ค.", "October",
+    "พ.ย.", "พฤศจิกายน", "พ.ย.", "November",
+    "ธ.ค.", "ธันวาคม", "ธ.ค.", "December",
+]
+
+# Date regex patterns (EN DMY/MDY, ISO, Thai with Buddhist era)
+_DATE_PATTERNS = [
+    # ISO: 2026-07-15 or 2026/07/15
+    r"\b(\d{4})[-/](\d{1,2})[-/](\d{1,2})\b",
+    # EN DMY: 15 July 2026 / 15th July 2026 / 15-July-2026
+    r"\b(\d{1,2})(?:st|nd|rd|th)?[-\s]+([A-Za-z]+)[-\s]+(\d{4})\b",
+    # EN MDY: July 15, 2026 / July 15th 2026
+    r"\b([A-Za-z]+)[-\s]+(\d{1,2})(?:st|nd|rd|th)?,?\s*(\d{4})\b",
+    # Thai Buddhist: 15 ก.ค. 2569 (convert 2569 → 2026)
+    r"\b(\d{1,2})[-\s]+(" + "|".join(_THAI_MONTHS[:12]) + r")[-\s]+(\d{4})\b",
+]
+
+_MONTH_NAMES = {
+    "january": "01", "jan": "01", "february": "02", "feb": "02",
+    "march": "03", "mar": "03", "april": "04", "apr": "04", "may": "05",
+    "june": "06", "jun": "06", "july": "07", "jul": "07", "august": "08", "aug": "08",
+    "september": "09", "sep": "09", "october": "10", "oct": "10",
+    "november": "11", "nov": "11", "december": "12", "dec": "12",
+}
+
+_THAI_TO_EN_MONTH = {
+    "มกราคม": "01", "ม.ค.": "01", "กุมภาพันธ์": "02", "ก.พ.": "02",
+    "มีนาคม": "03", "มี.ค.": "03", "เมษายน": "04", "เม.ย.": "04",
+    "พฤษภาคม": "05", "พ.ค.": "05", "มิถุนายน": "06", "มิ.ย.": "06",
+    "กรกฎาคม": "07", "ก.ค.": "07", "สิงหาคม": "08", "ส.ค.": "08",
+    "กันยายน": "09", "ก.ย.": "09", "ตุลาคม": "10", "ต.ค.": "10",
+    "พฤศจิกายน": "11", "พ.ย.": "11", "ธันวาคม": "12", "ธ.ค.": "12",
+}
+
+
+def _parse_date(text: str) -> str | None:
+    """Extract first YYYY-MM-DD date from text using multiple patterns.
+    Supports EN DMY/MDY, ISO, and Thai Buddhist era (2569 → 2026)."""
+    if not text:
+        return None
+
+    text_lower = text.lower()
+
+    # Try ISO format first (e.g., 2026-07-15)
+    m = re.search(r"\b(\d{4})[-/](\d{1,2})[-/](\d{1,2})\b", text)
+    if m:
+        year, month, day = m.groups()
+        try:
+            d = datetime(int(year), int(month), int(day))
+            return d.strftime("%Y-%m-%d")
+        except ValueError:
+            pass
+
+    # Try EN DMY: 15 July 2026
+    m = re.search(r"\b(\d{1,2})(?:st|nd|rd|th)?[-\s]+([a-z]+)[-\s]+(\d{4})\b", text_lower)
+    if m:
+        day, month_name, year = m.groups()
+        month_num = _MONTH_NAMES.get(month_name[:3])
+        if month_num:
+            try:
+                d = datetime(int(year), int(month_num), int(day))
+                return d.strftime("%Y-%m-%d")
+            except ValueError:
+                pass
+
+    # Try EN MDY: July 15, 2026
+    m = re.search(r"\b([a-z]+)[-\s]+(\d{1,2})(?:st|nd|rd|th)?,?\s*(\d{4})\b", text_lower)
+    if m:
+        month_name, day, year = m.groups()
+        month_num = _MONTH_NAMES.get(month_name[:3])
+        if month_num:
+            try:
+                d = datetime(int(year), int(month_num), int(day))
+                return d.strftime("%Y-%m-%d")
+            except ValueError:
+                pass
+
+    # Try Thai Buddhist: 15 ก.ค. 2569 → convert to 2026-07-15
+    for pat in _DATE_PATTERNS[3:4]:  # Only the Thai pattern
+        m = re.search(pat, text, re.IGNORECASE)
+        if m:
+            day, month_name, year = m.groups()
+            month_num = _THAI_TO_EN_MONTH.get(month_name, _THAI_TO_EN_MONTH.get(month_name[:3]))
+            if month_num and int(year) > 2400:  # Buddhist era
+                year_ce = int(year) - 543
+                try:
+                    d = datetime(year_ce, int(month_num), int(day))
+                    return d.strftime("%Y-%m-%d")
+                except ValueError:
+                    pass
+
+    return None
+
+
+def _extract_events_regex(markdown: str, source_url: str, today_iso: str,
+                          window_end_iso: str, category: str) -> list[dict]:
+    """Extract events from Jina-fetched markdown using regex only (no LLM).
+    Finds title, URL, dates, location, language from page structure."""
+    if not markdown:
+        return []
+
+    lines = markdown.split("\n")
+    events: list[dict] = []
+
+    # Look for event-like structures (headings + date patterns nearby)
+    i = 0
+    while i < len(lines):
+        line = lines[i].strip()
+
+        # Skip empty lines
+        if not line:
+            i += 1
+            continue
+
+        # Heading = likely event title
+        if line.startswith("#"):
+            title = line.lstrip("#").strip()
+            if len(title) > 200:
+                title = title[:200]
+
+            # Look ahead 5 lines AND back 5 lines for date + location (date often precedes title)
+            date_found = None
+            location = ""
+            language = "th" if any(re.search(r"[ก-๙]", lines[j]) for j in range(i, min(i+6, len(lines)))) else "en"
+
+            # lookback window: lines before the heading (date often comes first on listing pages)
+            lookback_start = max(0, i - 5)
+            lookback_lines = [lines[j].strip() for j in range(lookback_start, i)]
+            # lookahead window: lines after the heading
+            lookahead_lines = [lines[j].strip() for j in range(i+1, min(i+6, len(lines)))]
+
+            for lookahead in [*lookback_lines, *lookahead_lines]:
+                # Try to extract date
+                if not date_found:
+                    date_found = _parse_date(lookahead)
+
+                # Simple location heuristics (common patterns)
+                if not location and any(kw in lookahead.lower() for kw in
+                                      ["bangkok", "bkk", "chiang mai", "phuket", "pattaya",
+                                       "impact", "qsncc", "bitec", "ศูนย์", "จังหวัด", "กรุงเทพ", "เชียงใหม่"]):
+                    location = lookahead[:120]
+
+            # Only count if we have a valid date in window
+            if date_found:
+                if date_found < today_iso or date_found > window_end_iso:
+                    i += 1
+                    continue  # Skip events outside the window
+
+                events.append({
+                    "title": title,
+                    "url": source_url,
+                    "start_date": date_found,
+                    "end_date": "",
+                    "signup_deadline": "",
+                    "location": location,
+                    "language": language,
+                    "summary": f"{category} event" if category else "Event from {source_url}",
+                    "source": "scout",
+                })
+
+        i += 1
+
+    return events
+
+
 # --- LLM → structured JSON (R5): zai returns text; parse it defensively ---
+# Only used in DEEP mode now; SCOUT is 100% free (regex)
 
 
 def _parse_json_lenient(text: str):
@@ -466,44 +762,37 @@ _DEFAULT_LISTINGS = [
     "https://allconferencealert.net/country/thailand/",
     "https://10times.com/thailand",
 ]
-_EXTRACT_SYS = (
-    "You extract structured event data from web pages as JSON. Return ONLY a JSON array — "
-    "no prose, no code fence. Each element has keys title, url, start_date, end_date, "
-    "signup_deadline (all dates YYYY-MM-DD or null), location, language (en/th), summary. "
-    "Skip anything without a real start date. Dates are absolute, never relative."
-)
 
 
 async def _extract_events_from(url: str, today_iso: str, window_end_iso: str, category: str,
                                source: str) -> tuple[list[dict], str | None]:
-    """Jina-fetch one page, ask the LLM for a JSON array of dated events, then normalize +
-    window-filter each. Returns (events, error_or_none)."""
+    """Jina-fetch one page, then extract events using regex only (NO LLM — 100% free).
+    Supports EN DMY/MDY, ISO dates, and Thai Buddhist-era years. Returns (events, error_or_none)."""
     try:
         md = await _jina_read(url, timeout=30.0)
     except Exception as e:
         return [], f"fetch {url}: {e}"
-    cat = f" Focus area: {category}." if category else ""
-    user = (
-        f"Today is {today_iso}. List upcoming events on this page whose start date is within "
-        f"{today_iso} to {window_end_iso}.{cat}\n"
-        f"Page ({url}):\n{md[:9000]}"
-    )
-    arr = await _llm_json(user, system=_EXTRACT_SYS)
-    if not isinstance(arr, list):
-        return [], None
-    out = [_normalize_event(ev, today_iso, window_end_iso, source) for ev in arr]
-    return [e for e in out if e], None
+
+    try:
+        events = _extract_events_regex(md, url, today_iso, window_end_iso, category)
+        return [e for e in events if e], None
+    except Exception as e:
+        return [], f"extract {url}: {e}"
 
 
 @router.post("/api/thailandnow/events/scout")
 async def scout_events(payload: dict = Body(default={})):
     """Events radar (R5) — future Thailand events only, multi-source, dated + filtered.
 
-    Tier 1 / keyless: direct event-listing pages (TAT, allconferencealert, 10times) +
-    DuckDuckGo broad queries (catches news mentions), each fetched via Jina with the LLM
-    extracting a dated JSON array per page. Results are window-filtered (start_date within
-    today → today+weeks), deduped, and sorted by start_date. ``weeks`` is 1..52 (default 4).
-    No API keys required. (Tier 2 / NotebookLM deep research lives at /events/deep.)
+    **100% FREE (2026-07-24)**: Tier 1 / keyless — direct event-listing pages (TAT,
+    allconferencealert, 10times) + DuckDuckGo broad queries (English + Thai), each
+    fetched via **Jina + regex extraction only** — NO LLM calls in SCOUT. Supports
+    EN DMY/MDY, ISO dates, and Thai Buddhist-era years (2569 → 2026). Results are
+    window-filtered (start_date within today → today+weeks), deduped, and sorted by
+    start_date. ``weeks`` is 1..52 (default 4). No API keys required.
+
+    **Standing rule**: free-first search, paid LLM last resort. z.ai lives only in DEEP
+    mode (/events/deep). See hot.md § 2026-07-24 for the Somatic→Railjack adoption brief.
     """
     body = payload or {}
     category = (body.get("query") or "").strip()
@@ -514,31 +803,51 @@ async def scout_events(payload: dict = Body(default={})):
     today_iso, window_end_iso = today.strftime("%Y-%m-%d"), window_end.strftime("%Y-%m-%d")
     span = today.strftime("%B %Y")
 
-    # candidate URLs: direct listings + DuckDuckGo broad results
-    candidates: dict[str, None] = {}
-    for u in (opts.get("event_listings") or _DEFAULT_LISTINGS):
-        candidates.setdefault(u, None)
+    # candidate URLs: DuckDuckGo broad results FIRST (diverse sources), then direct listings
     errors: list[str] = []
     cat_q = f" {category}" if category else ""
     queries = opts.get("event_queries") or [
+        # English queries (diverse source types: festival/exhibition/seminar/expo)
         f"Thailand events{cat_q} {span} conference festival exhibition",
         f"upcoming Thailand events{cat_q} {span} seminar expo Bangkok",
+        # Thai queries (for Thai sources) - free-first rule
+        f"อีเวนต์ ประเทศไทย{cat_q} {span} มหกรรม นิทรรศการ การประชุม เทศกาล",
+        f"กิจกรรม{cat_q} {span} ไทย งานแสดงสินค้า ประชุม สัมมนา",
+        # extra diversity: official + ticketing sites
+        f"Thailand{cat_q} {span} events site:eventbrite.com OR site:tatnews.org",
     ]
+    ddg_urls: list[str] = []
     for q in queries:
         try:
             md = await _jina_read(f"https://duckduckgo.com/html/?q={urllib.parse.quote(q)}")
             for ev in _parse_ddg(md):
-                candidates.setdefault(ev["url"], None)
+                ddg_urls.append(ev["url"])
         except Exception as e:
             errors.append(f"ddg {q!r}: {e}")
 
-    # R7: optional env-gated boosters (no-op without BRAVE_API_KEY / GNEWS_KEY)
-    boost_q = f"Thailand{cat_q} {span} events"
-    brave, gnews = await asyncio.gather(_brave_urls(boost_q), _gnews_urls(boost_q))
-    for u in [*brave, *gnews]:
-        candidates.setdefault(u, None)
+    # R7: agent-reach pattern — run EVERY query through Brave (independent index, not Google-dependent)
+    # + GNews for news coverage. All parallel, all best-effort (no-op without keys).
+    brave_results = await asyncio.gather(*[_brave_urls(q) for q in queries])
+    brave_urls = [u for batch in brave_results for u in batch]
+    gnews_urls = await _gnews_urls(f"Thailand{cat_q} {span} events")
+    ddg_urls.extend([*brave_urls, *gnews_urls])
 
-    urls = list(candidates)[:8]
+    # dedupe by DOMAIN (1 URL per domain → no 10times.com spam, forces diversity)
+    listings = opts.get("event_listings") or _DEFAULT_LISTINGS
+    seen_domains: set[str] = set()
+    urls: list[str] = []
+    for u in [*ddg_urls, *listings]:  # DDG first (diverse), listings as fallback
+        try:
+            host = urllib.parse.urlparse(u).hostname or ""
+            # strip www. + take last 2 labels for domain (e.g. 10times.com)
+            domain = ".".join(host.replace("www.", "").split(".")[-2:])
+        except Exception:
+            domain = u
+        if domain and domain not in seen_domains:
+            seen_domains.add(domain)
+            urls.append(u)
+        if len(urls) >= 15:
+            break
     results = await asyncio.gather(*[
         _extract_events_from(u, today_iso, window_end_iso, category, "scout") for u in urls
     ])
@@ -600,12 +909,110 @@ async def _nlm_ensure_notebook() -> str:
     return nid
 
 
-@router.post("/api/thailandnow/events/deep")
-async def deep_events(payload: dict = Body(default={})):
-    """Events radar Tier 2 (R6) — NotebookLM deep web research. Runs a fast research pass on
-    the query+window in a dedicated notebook, then asks for a dated JSON event list. Slow
-    (1-2 min). Returns events in the same shape as /events/scout, window-filtered + sorted.
-    """
+@router.get("/api/thailandnow/debug")
+async def debug_info() -> dict:
+    """Debug endpoint to check module health."""
+    import traceback
+    status: dict[str, str | bool] = {"module_loaded": True}
+
+    # Test notebooklm CLI
+    try:
+        result = await _nlm_run(["auth", "check", "--json"], timeout=15)
+        status["notebooklm_auth"] = "ok" if result else "failed"
+    except Exception as e:
+        status["notebooklm_auth"] = f"error: {e}"
+
+    # Test z.ai (if used)
+    try:
+        from .zai import zai_message
+        test = await zai_message("test", max_tokens=10, timeout=10)
+        status["zai"] = "ok"
+    except Exception as e:
+        status["zai"] = f"error: {e}"
+
+    return status
+
+# --- EVENTS radar DEEP mode: async research (per-run notebook) + on-demand extract ---
+# Two-button model: SEARCH kicks off NotebookLM research in the background (browser-
+# notifies on done); EXTRACT runs the free regex extractor on a chosen notebook's
+# sources whenever the user likes. No z.ai (quota exhausted). Copies notebooklm.py's
+# _JOBS/_spawn background-job pattern (see _tn_spawn above).
+
+_TN_NB_PREFIX = "Thailand NOW Events"  # notebooks this mode creates are filtered by this prefix
+
+
+async def _tn_list_notebooks() -> list[dict]:
+    """notebooklm list, filtered to only this mode's notebooks (title prefix match).
+    Adds a ready-source count per notebook for the dropdown."""
+    out = await _nlm_run(["list", "--json"], timeout=30)
+    data = _parse_json_lenient(out) or {}
+    nbs = data.get("notebooks", data if isinstance(data, list) else [])
+    mine = [n for n in nbs if str(n.get("title", "")).startswith(_TN_NB_PREFIX)]
+    # newest first (created_at desc) — most recent research surfaces at top of dropdown
+    mine.sort(key=lambda n: str(n.get("created_at") or ""), reverse=True)
+    return mine
+
+
+async def _tn_source_urls(nid: str) -> list[str]:
+    """Ready source URLs for a notebook (status == 'ready')."""
+    out = await _nlm_run(["source", "list", "--json", "--notebook", nid], timeout=30)
+    data = _parse_json_lenient(out) or {}
+    srcs = data.get("sources", data if isinstance(data, list) else [])
+    return [s["url"] for s in srcs
+            if isinstance(s, dict) and s.get("status") == "ready" and s.get("url")]
+
+
+async def _flow_deep_search(job: TnJob, category: str, weeks: int,
+                            today_iso: str, window_end_iso: str, span: str) -> None:
+    """Background flow: create a fresh per-run notebook → start research → wait for it
+    (up to 600s, IN THE BACKGROUND not in the HTTP request) → collect ready source URLs.
+    No extraction here — EXTRACT is a separate on-demand call. Research RPC failing
+    upstream (START_FAST_RESEARCH null) is caught + logged, then we still scan whatever
+    sources the notebook already has."""
+    job.window = {"from": today_iso, "to": window_end_iso, "weeks": weeks}
+    topic = re.sub(r"\s+", " ", f"upcoming and future Thailand {category} events "
+                              f"happening AFTER {today_iso}, within the next {weeks} weeks — "
+                              "conference festival exhibition seminar").strip()
+    title = f"{_TN_NB_PREFIX} · {span} · {today_iso}"
+
+    # 1. create a fresh notebook for this run
+    out = await _tn_run_step(job, ["notebooklm", "create", title, "--json"], timeout=60)
+    data = _parse_json_lenient(out) or {}
+    nid = data.get("id") or (data.get("notebook") or {}).get("id")
+    if not nid:
+        raise RuntimeError("notebooklm create returned no id")
+    job.notebook, job.notebook_title = nid, title
+    job.progress = 10
+
+    # 2-3. start research + wait for it (the long step, runs in background)
+    try:
+        await _tn_run_step(job, ["notebooklm", "source", "add-research", topic,
+                                 "--mode", "fast", "--no-wait", "--notebook", nid], timeout=120)
+        job.progress = 30
+        await _tn_run_step(job, ["notebooklm", "research", "wait", "-n", nid,
+                                 "--import-all", "--timeout", "600", "--json"], timeout=660)
+        job.progress = 90
+    except _TnCancelled:
+        raise  # let _tn_run_job mark cancelled
+    except Exception as e:
+        # START_FAST_RESEARCH currently returns null upstream — log + continue to source scan
+        job.logs.append(f"research step failed (continuing to source export): {e}")
+
+    # 4. collect ready source URLs (always run, even if research failed)
+    try:
+        job.source_urls = await _tn_source_urls(nid)
+    except Exception as e:
+        job.logs.append(f"source list failed: {e}")
+    # _tn_run_job bumps progress to 100 on clean return
+
+
+@router.post("/api/thailandnow/deep/search")
+async def deep_search(payload: dict = Body(default={})):
+    """DEEP SEARCH — kick off NotebookLM research in the background. Returns {id}
+    immediately; poll GET /api/thailandnow/jobs. Browser-notifies on done (frontend).
+    One deep-search job at a time (409 if already queued/running)."""
+    if any(j.kind == "deep-search" and j.status in _TN_RUNNING for j in _TN_JOBS.values()):
+        raise HTTPException(409, "a DEEP SEARCH job is already queued/running")
     body = payload or {}
     category = (body.get("query") or "").strip()
     weeks = max(1, min(52, int(body.get("weeks") or 4)))
@@ -613,41 +1020,128 @@ async def deep_events(payload: dict = Body(default={})):
     window_end = today + timedelta(weeks=weeks)
     today_iso, window_end_iso = today.strftime("%Y-%m-%d"), window_end.strftime("%Y-%m-%d")
     span = today.strftime("%B %Y")
-    topic = re.sub(r"\s+", " ", f"Thailand {category} events {span} conference festival exhibition seminar").strip()
+    label = f"DEEP · {category or 'events'} · {today_iso}→{window_end_iso}"
+    return _tn_spawn("deep-search", label,
+                     lambda j: _flow_deep_search(j, category, weeks, today_iso, window_end_iso, span))
 
-    nid = await _nlm_ensure_notebook()
+
+@router.post("/api/thailandnow/deep/extract")
+async def deep_extract(payload: dict = Body(default={})):
+    """DEEP EXTRACT — on-demand: run the FREE regex extractor on a chosen notebook's
+    ready sources → dated events. No z.ai. Same response shape as /events/scout so the
+    frontend merge works unchanged. Press whenever (research need not be running)."""
+    body = payload or {}
+    nid = (body.get("notebook_id") or "").strip()
+    if not nid:
+        raise HTTPException(400, "notebook_id required")
+    category = (body.get("query") or "").strip()
+    weeks = max(1, min(52, int(body.get("weeks") or 4)))
+    today = datetime.now()
+    window_end = today + timedelta(weeks=weeks)
+    today_iso, window_end_iso = today.strftime("%Y-%m-%d"), window_end.strftime("%Y-%m-%d")
     window = {"from": today_iso, "to": window_end_iso, "weeks": weeks}
     errors: list[str] = []
-    # 1. fast web research into the notebook (blocking; imports found sources)
+
     try:
-        await _nlm_run(["source", "add-research", topic, "--notebook", nid,
-                        "--mode", "fast", "--import-all"], timeout=200)
-    except HTTPException as e:
-        return {"events": [], "count": 0, "errors": [str(e.detail)], "window": window, "notebook": nid}
-    # 2. ask for a dated JSON list (continues the notebook's conversation — fine for a
-    #    dedicated research corpus; --new isn't in CLI 0.3.3)
-    ask = (
-        f"List upcoming Thailand events whose start date is within {today_iso} to {window_end_iso}. "
-        "Return ONLY a JSON array; each element: title, url, start_date (YYYY-MM-DD), end_date, "
-        "signup_deadline (null if none), location, language (en/th), summary. "
-        "Only events with a real start date in that window; skip anything undated."
-    )
-    try:
-        out = await _nlm_run(["ask", ask, "--notebook", nid, "--json"], timeout=120)
-    except HTTPException as e:
-        return {"events": [], "count": 0, "errors": [str(e.detail)], "window": window, "notebook": nid}
-    parsed = _parse_json_lenient(out)
-    answer = parsed.get("answer") if isinstance(parsed, dict) else None
-    arr = _parse_json_lenient(answer) if isinstance(answer, str) else None
+        source_urls = await _tn_source_urls(nid)
+    except Exception as e:
+        return {"events": [], "count": 0, "errors": [f"sources fetch failed: {e}"],
+                "window": window, "notebook": nid}
+    if not source_urls:
+        return {"events": [], "count": 0, "errors": ["notebook has no ready sources"],
+                "window": window, "notebook": nid}
+
     events: dict[str, dict] = {}
-    if isinstance(arr, list):
-        for ev in arr:
-            n = _normalize_event(ev, today_iso, window_end_iso, "notebooklm")
+    results = await asyncio.gather(
+        *[_extract_events_from(u, today_iso, window_end_iso, category, "deep") for u in source_urls[:20]],
+        return_exceptions=True,
+    )
+    for r in results:
+        if isinstance(r, Exception):
+            errors.append(f"extract: {r}")
+            continue
+        evs, err = r
+        if err:
+            errors.append(err)
+        for ev in evs:
+            n = _normalize_event(ev, today_iso, window_end_iso, "deep")
             if n:
                 events.setdefault(n["url"] or n["title"], n)
     ordered = sorted(events.values(), key=lambda e: e.get("start_date") or "9999")
     return {"events": ordered, "count": len(ordered), "errors": errors,
             "window": window, "notebook": nid}
+
+
+@router.post("/api/thailandnow/deep/seed")
+async def deep_seed(payload: dict = Body(default={})):
+    """Seed a ThickBox event from a single source URL: Jina-fetch + free regex
+    extract (title/dates/location). Used by the notebook-browser checkbox → open
+    the event detail panel for one URL at a time. Wide window (52w) so seed never
+    drops an event just for being outside the scouted span. Falls back to a
+    URL-derived title if the page has no parseable dated event."""
+    url = (payload.get("url") or "").strip()
+    if not url:
+        raise HTTPException(400, "url required")
+    today = datetime.now()
+    window_end = today + timedelta(weeks=52)
+    today_iso, window_end_iso = today.strftime("%Y-%m-%d"), window_end.strftime("%Y-%m-%d")
+    evs, _err = await _extract_events_from(url, today_iso, window_end_iso, "", "deep-seed")
+    if evs:
+        return {"event": evs[0]}
+    # fallback: no dated event found — derive a title from the URL host+path
+    try:
+        host = urllib.parse.urlparse(url).hostname or ""
+        title = host.replace("www.", "") or url
+    except Exception:
+        title = url[:80]
+    return {"event": {
+        "title": title, "url": url, "start_date": "", "end_date": "",
+        "signup_deadline": "", "location": "", "language": "en",
+        "summary": "", "source": "deep-seed",
+    }}
+
+
+@router.get("/api/thailandnow/deep/notebooks")
+async def deep_notebooks() -> dict:
+    """This mode's notebooks (title prefix 'Thailand NOW Events'), newest first.
+    Source of the EXTRACT dropdown."""
+    return {"notebooks": await _tn_list_notebooks()}
+
+
+@router.get("/api/thailandnow/deep/notebooks/{nid}/sources")
+async def deep_notebook_sources(nid: str) -> dict:
+    """All sources of a notebook (for browsing URLs). Unlike _tn_source_urls (ready-only),
+    returns every source with its status so the user can see what's importable."""
+    out = await _nlm_run(["source", "list", "--json", "--notebook", nid], timeout=30)
+    data = _parse_json_lenient(out) or {}
+    srcs = data.get("sources", data if isinstance(data, list) else [])
+    return {"sources": [
+        {"id": s.get("id", ""), "title": s.get("title", ""),
+         "url": s.get("url", ""), "status": s.get("status", "")}
+        for s in srcs if isinstance(s, dict)
+    ]}
+
+
+@router.get("/api/thailandnow/jobs")
+def tn_jobs() -> dict:
+    """All Thailand NOW jobs (deep-search, …) with full status — polled by the frontend."""
+    return {"jobs": [j.to_dict() for j in reversed(list(_TN_JOBS.values()))]}
+
+
+@router.post("/api/thailandnow/jobs/{jid}/cancel")
+async def tn_cancel_job(jid: str) -> dict:
+    j = _TN_JOBS.get(jid)
+    if not j:
+        raise HTTPException(404, "unknown job")
+    if j.status not in _TN_RUNNING:
+        raise HTTPException(409, f"job is {j.status}, nothing to cancel")
+    j.cancel = True
+    if j.proc is not None:
+        j.proc.send_signal(signal.SIGTERM)
+    return {"status": "cancelling"}
+
+
+def _gem_path() -> Path:
     """Resolve the publicity gem path (relative paths anchor at the repo root)."""
     p = Path(_opts().get("gem_path", "app/gems/event-publicity.md"))
     if not p.is_absolute():
