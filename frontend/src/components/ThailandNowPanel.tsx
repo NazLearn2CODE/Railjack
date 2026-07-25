@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { fetchJSON, usePolling } from "../api";
 import type { ModuleConfig } from "../store";
+import { marked } from "marked"; // NEW: Added marked import
 
 /**
  * THAILAND NOW — monthly content pipeline. Two tabs sharing a desk-driven engine:
@@ -82,6 +83,23 @@ interface ProvisionResp {
 
 const CT = { "content-type": "application/json" } as const;
 
+// NEW: Archive types
+interface ArchiveSource {
+  name: string;
+  url: string;
+  snippet?: string;
+}
+interface ArchiveReply {
+  answer: string;
+  sources: ArchiveSource[];
+  mode: "direct" | "synthesized" | "degraded";
+  note?: string;
+}
+interface ArchiveMsg {
+  q: string;
+  reply: ArchiveReply;
+}
+
 async function post<T>(url: string, body: unknown): Promise<{ ok: boolean; data?: T; error?: string }> {
   const res = await fetch(url, { method: "POST", headers: CT, body: JSON.stringify(body) });
   if (!res.ok) {
@@ -131,7 +149,7 @@ function usePersistentState<T>(key: string, initial: T) {
 }
 
 export default function ThailandNowPanel({ module: _module }: { module: ModuleConfig }) {
-  const [tab, setTab] = useState<"writers" | "events">("writers");
+  const [tab, setTab] = useState<"writers" | "events"| "archive">("writers"); // MODIFIED
   const { data, error } = usePolling<DesksResp>("/api/thailandnow/desks", 15000);
 
   return (
@@ -149,12 +167,19 @@ export default function ThailandNowPanel({ module: _module }: { module: ModuleCo
         >
           EVENTS
         </button>
+        <button // NEW: ARCHIVE button
+          className={`btn btn--compact ${tab === "archive" ? "btn--signal" : ""}`}
+          onClick={() => setTab("archive")}
+        >
+          ARCHIVE
+        </button>
       </div>
 
       {tab === "writers" && (
         <WritersTab desks={data?.desks ?? []} ready={data?.ready ?? false} loading={!data && !error} error={error} />
       )}
       {tab === "events" && <EventsTab />}
+      {tab === "archive" && <ArchiveTab />} {/* NEW: ArchiveTab render */}
     </div>
   );
 }
@@ -650,6 +675,114 @@ function EventsTab() {
             ))}
           </div>
         )}
+      </section>
+    </>
+  );
+}
+
+
+/* --------------------------------- ARCHIVE -------------------------------- */
+
+function ArchiveTab() {
+  const [exchanges, setExchanges] = usePersistentState<ArchiveMsg[]>("tn.archive", []);
+  const [question, setQuestion] = useState("");
+  const [asking, setAsking] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const scrollRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (scrollRef.current) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    }
+  }, [exchanges.length]);
+
+  const ask = useCallback(async () => {
+    const q = question.trim();
+    if (!q || asking) return;
+
+    setAsking(true);
+    setError(null);
+    const r = await post<ArchiveReply>("/api/thailandnow/archive/ask", { question: q });
+    setAsking(false);
+
+    if (r.ok && r.data) {
+      setExchanges((prev) => [...prev, { q, reply: r.data! }]);
+      setQuestion("");
+    } else {
+      setError(r.error || "ask failed");
+    }
+  }, [question, asking]);
+
+  const handleKeyDown = useCallback((e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+      e.preventDefault();
+      ask();
+    }
+  }, [ask]);
+
+  return (
+    <>
+      <section className="hud hud--bracket flex flex-col flex-grow reveal reveal-1 p-3">
+        <div className="label mb-2">ARCHIVE CHAT</div>
+        <div ref={scrollRef} className="flex flex-col gap-2 overflow-auto flex-grow mb-3">
+          {exchanges.length === 0 ? (
+            <div className="mono" style={{ color: "var(--color-muted)" }}>
+              Ask about past events, news, or general Thailand NOW content.
+            </div>
+          ) : (
+            exchanges.map((ex, i) => (
+              <div key={i} className="border border-edge bg-void p-2">
+                <div className="flex items-baseline gap-2">
+                  <span className="mono" style={{ color: "var(--color-muted)" }}>
+                    Q
+                  </span>
+                  <span className="mono">{ex.q}</span>
+                </div>
+                <div className="mt-2 prose-md text-sm" dangerouslySetInnerHTML={{ __html: marked.parse(ex.reply.answer) as string }} />
+                {ex.reply.sources.length > 0 && (
+                  <div className="flex flex-wrap gap-x-2 mt-2">
+                    <span className="mono text-xs" style={{ color: "var(--color-muted)" }}>Sources:</span>
+                    {ex.reply.sources.map((src, srcIdx) => (
+                      <a key={srcIdx} href={src.url} target="_blank" rel="noreferrer" className="mono text-xs" style={{ color: "var(--color-signal)" }}>
+                        {src.name}
+                      </a>
+                    ))}
+                  </div>
+                )}
+                <div className="flex items-center justify-between mt-2">
+                  <span className="pip" style={{ background:
+                    ex.reply.mode === "direct" ? "var(--color-go)" :
+                    ex.reply.mode === "synthesized" ? "var(--color-phosphor)" :
+                    "var(--color-critical)"
+                  }}></span>
+                  <span className="mono text-xs" style={{ color: "var(--color-muted)" }}>{ex.reply.mode.toUpperCase()}</span>
+                  <button
+                    className="btn btn--compact"
+                    onClick={() => navigator.clipboard.writeText(ex.reply.answer).catch(() => {})}
+                  >
+                   {/* RAW reply text — plain text on the clipboard, no HTML/ANSI artifacts (ARCHIVE plan COPY constraint). */}
+                    COPY
+                  </button>
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+        {error && <ErrLine msg={error} />}
+        <div className="flex shrink-0 items-center gap-2 mt-auto">
+          <textarea
+            className="input"
+            rows={3}
+            placeholder="ask about an event…"
+            value={question}
+            onChange={(e) => setQuestion(e.target.value)}
+            onKeyDown={handleKeyDown}
+            style={{ flexGrow: 1, resize: "vertical" }}
+          />
+          <button className="btn btn--signal" disabled={!question.trim() || asking} onClick={ask}>
+            {asking ? "ASKING…" : "ASK"}
+          </button>
+        </div>
       </section>
     </>
   );
