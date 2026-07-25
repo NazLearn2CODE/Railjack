@@ -102,9 +102,9 @@ providers:
 
 buttons:
   - label: BOOTSTRAP
-    insert: "Bootstrap: git pull --ff-only to sync CephalonVoid and SomaticRailjack, then read hot.md, index.md, Cephalon.md, CLAUDE.md (+ .claude/agents), run python3 vault-check.py, then give me a one-line status."
+    insert: "Bootstrap: git pull --ff-only to sync CephalonVoid and Railjack (origin), then read hot.md, index.md, Cephalon.md, CLAUDE.md (+ .claude/agents), run python3 vault-check.py, then give me a one-line status."
   - label: COMMIT & PUSH
-    insert: "Session-end per Cephalon.md: update hot.md + logs/memory-log.md, run python3 vault-check.py, then commit and push the vault to CephalonVoid, and push any Railjack work to the SomaticRailjack remote (machine/railjack backup branch only — never shared main)."
+    insert: "Session-end per Cephalon.md: update hot.md + logs/memory-log.md, run python3 vault-check.py, then commit and push the vault to CephalonVoid, and push any Railjack work to origin (Railjack.git, main branch)."
 
 catalog:
   mcp_insert_template: "use the {name} MCP to "
