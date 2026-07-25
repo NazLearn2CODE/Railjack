@@ -20,11 +20,18 @@ from pathlib import Path
 
 from fastapi import APIRouter, Body, HTTPException
 
+from . import zai
+
 router = APIRouter()
 
 SCRIPTS = Path.home() / "Cephalon" / "10-knowledge" / "skills" / "newsroom" / "scripts"
 QUEUE = SCRIPTS / "queue.py"
 APPEND = SCRIPTS / "nl_append.py"
+# The Rules Gem drives REWRITE (news-producer prompt → two-layer broadcast
+# script). ~/Gems is the office canonical copy; home has no ~/Gems, so the
+# vault-synced gem is the source here — _gem_text falls through to it.
+GEM = Path.home() / "Gems" / "news-producer-gem.md"
+GEM_FALLBACK = Path.home() / "Cephalon" / "10-knowledge" / "ai-workflow" / "gemini-gem-news-rules.md"
 # Run via the system interpreter, not the scripts' shebang: vault files carry no
 # exec bit (git syncs can drop it — the Somatic original 500s on exactly this),
 # and the skill's deps live with the system python3, not Railjack's venv.
@@ -52,10 +59,24 @@ def _json(out: bytes):
     return data
 
 
+def _fail(out: bytes, err: bytes) -> str:
+    """Best error text for a nonzero exit. Scripts print their own reason as
+    ``{"_fatal": ...}`` on STDOUT (e.g. 'run nl_auth.py once' when the Google
+    creds are missing), so check stdout first — else SEND TO NL fails with a
+    blank stderr and the button just reads 'script failed (no output)'."""
+    try:
+        d = json.loads(out)
+        if isinstance(d, dict) and d.get("_fatal"):
+            return d["_fatal"]
+    except Exception:
+        pass
+    return err.decode(errors="replace")[-300:].strip() or "script failed (no output)"
+
+
 async def _script(argv: list[str], timeout: float = 90):
     rc, out, err = await _run(argv, timeout=timeout)
     if rc != 0:
-        raise HTTPException(502, err.decode(errors="replace")[-300:])
+        raise HTTPException(502, _fail(out, err))
     return _json(out)
 
 
@@ -112,6 +133,57 @@ async def api_append(body: dict = Body(...)):
         argv.append("--today")
     argv += ["--text", text]
     return await _script(argv, timeout=60)
+
+
+# ---------------------------------------------------------------- rewrite
+# Source article → two-layer broadcast script via the news-producer Rules Gem.
+# Rides app/zai.py (the OmniRoute gateway, NOT z.ai direct), so the pass keeps
+# working past a z.ai quota wall. Editorial hard rule: source-only, and never
+# translate a person's name or title out of the original Thai — the writers
+# render those themselves.
+
+
+def _gem_text() -> str:
+    for p in (GEM, GEM_FALLBACK):
+        if p.exists():
+            return p.read_text(encoding="utf-8")
+    raise HTTPException(500, "Rules Gem not found (looked in ~/Gems and the vault)")
+
+
+@router.post("/api/newsroom/rewrite")
+async def api_rewrite(body: dict = Body(...)):
+    """Run the Script-box text through the Rules Gem → finished two-layer script.
+
+    The override block restates the editorial non-negotiables on top of the gem:
+    source-only (no fact from training memory), and every person's name +
+    title/rank stays in the original Thai script. Returns ``{"rewritten": ...}``
+    for the panel's iframe."""
+    text = (body.get("text") or "").strip()
+    if not text:
+        raise HTTPException(400, "nothing to rewrite — the Script box is empty")
+    prompt = (
+        _gem_text()
+        + "\n\n=== CRITICAL EDITORIAL RULE (overrides everything above) ===\n"
+        "Use ONLY the information in the SOURCE ARTICLE below. Never add names, "
+        "dates, ranks, titles, agencies, figures, locations, or any fact from your "
+        "own knowledge or training. Specifically:\n"
+        "- Copy each person's rank/title EXACTLY as the source gives it — never "
+        "promote, demote, or infer one (source says Prime Minister → not Deputy).\n"
+        "- Do NOT invent a day of week, absolute date, or which agency acts unless "
+        "the source states it. No date in source → write none.\n"
+        "- Do NOT guess transliterations. If the source doesn't state it, omit it.\n"
+        "- Do NOT translate or transliterate any PERSON'S NAME or their TITLE/rank "
+        "from Thai — leave every name and honorific in the ORIGINAL THAI SCRIPT "
+        "exactly as the source writes it. Translate the rest of the story into "
+        "English as normal; the human writers render the names/titles themselves.\n"
+        "Output ONLY the finished two-layer script (broadcast layer, then `---`, "
+        "then the digital block). No preamble, no commentary.\n\n"
+        "=== SOURCE ARTICLE ===\n" + text
+    )
+    out = await zai.zai_message(prompt, max_tokens=9000, timeout=120)
+    if not out.strip():
+        raise HTTPException(502, "rewrite came back empty")
+    return {"rewritten": out}
 
 
 # ---------------------------------------------------------------- health

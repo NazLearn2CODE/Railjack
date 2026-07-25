@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { fetchJSON } from "../api";
-import { useStore, type ModuleConfig } from "../store";
+import type { ModuleConfig } from "../store";
 
 /**
  * NEWSROOM panel — thin HUD over the newsroom skill CLI (queue.py +
@@ -8,11 +8,21 @@ import { useStore, type ModuleConfig } from "../store";
  * editable script area, SEND TO NL (append + auto-mark), and a ledger tab.
  * Port of Somatic's NewsroomPanel (18ef2ff) into home Railjack's idiom.
  *
- * REWRITE inserts a canned prompt into the tmux Claude session via the
- * cockpit terminal-insert plumbing (Half-1: zero new model wiring, human in
- * the loop) — Naz copies the rewritten script back into the textarea before
- * sending.
+ * REWRITE runs the Script-box text through the backend Rules-Gem pass
+ * (/api/newsroom/rewrite, source-only — keeps Thai names/titles in the
+ * original script) and renders the finished two-layer script in an embedded
+ * iframe; "⇐ load into Script" pulls it into the editable box before SEND TO NL.
  */
+
+// Wrap the rewritten script in a self-contained dark HTML doc for the iframe.
+const escapeHtml = (s: string) =>
+  s.replace(/[&<>]/g, (c) => (({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }) as Record<string, string>)[c]);
+const rewriteDoc = (body: string, muted = false) =>
+  `<!doctype html><html><head><meta charset="utf-8"><style>` +
+  `body{margin:0;padding:12px;background:#0b0f14;` +
+  `color:${muted ? "#5f7285" : "#c8d3df"};` +
+  `font:17px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace;` +
+  `white-space:pre-wrap;word-wrap:break-word}</style></head><body>${escapeHtml(body)}</body></html>`;
 
 interface Story {
   id: string;
@@ -50,6 +60,8 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
   const [error, setError] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [rewritten, setRewritten] = useState("");
+  const [rewriting, setRewriting] = useState(false);
 
   const refreshQueue = useCallback(() => {
     setLoading(true);
@@ -103,13 +115,32 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
     setSending(false);
   };
 
-  // Same module-switch idiom as CockpitControls: type into the shared tmux
-  // session (no Enter), then show the terminal so Naz reviews and fires it.
+  // REWRITE: POST the Script-box text to the backend Rules-Gem pass (which
+  // rides the OmniRoute gateway), then render the finished two-layer script in
+  // the iframe. Inlined (not via `post`) because we need the response body.
   const rewrite = async () => {
-    if (!selected) return;
-    await post("/api/terminal/insert", { text: `/newsroom process story ${selected.id}` });
-    const tmux = useStore.getState().config?.modules.find((m) => m.id === "tmux");
-    if (tmux) useStore.getState().setActive(tmux.id);
+    if (!selected || !sendText.trim()) return;
+    setRewriting(true);
+    setRewritten("");
+    setError(null);
+    try {
+      const res = await fetch("/api/newsroom/rewrite", {
+        method: "POST",
+        headers: CT,
+        body: JSON.stringify({ text: sendText }),
+      });
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({ detail: res.statusText }));
+        setError(typeof d.detail === "string" ? d.detail : JSON.stringify(d.detail));
+      } else {
+        const d = await res.json().catch(() => ({}));
+        setRewritten(d.rewritten || "");
+      }
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setRewriting(false);
+    }
   };
 
   return (
@@ -231,7 +262,7 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
                       value={sendText}
                       onChange={(e) => setSendText(e.target.value)}
                       className="input mono flex-1"
-                      style={{ resize: "none", fontSize: "0.75rem" }}
+                      style={{ resize: "none", fontSize: "1.0625rem" }}
                     />
                   </label>
 
@@ -239,9 +270,10 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
                     <button
                       className="btn"
                       onClick={() => void rewrite()}
-                      title="Type '/newsroom process story <id>' into the tmux Claude session (review + Enter there)"
+                      disabled={rewriting || !sendText.trim()}
+                      title="Run the Script-box text through the Rules Gem (source-only) → two-layer script"
                     >
-                      REWRITE
+                      {rewriting ? "REWRITING…" : "REWRITE"}
                     </button>
                     <button
                       className="btn btn--signal"
@@ -251,6 +283,36 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
                       {sending ? "SENDING…" : "SEND TO NL"}
                     </button>
                   </div>
+
+                  {/* Rewritten article — Rules-Gem output, rendered in an iframe */}
+                  {(rewriting || rewritten) && (
+                    <div className="flex min-h-0 flex-col gap-1" style={{ minHeight: 160 }}>
+                      <div className="flex items-center gap-2">
+                        <span className="label">
+                          Rewritten article{rewriting ? " — processing…" : ""}
+                        </span>
+                        {rewritten && (
+                          <button
+                            className="btn btn--compact ml-auto"
+                            style={{ padding: "2px 8px" }}
+                            onClick={() => setSendText(rewritten)}
+                          >
+                            ⇐ load into Script
+                          </button>
+                        )}
+                      </div>
+                      <iframe
+                        title="rewritten article"
+                        srcDoc={rewriting ? rewriteDoc("processing rewrite…", true) : rewriteDoc(rewritten)}
+                        style={{
+                          width: "100%",
+                          minHeight: 140,
+                          border: "1px solid var(--color-edge)",
+                          background: "var(--color-void)",
+                        }}
+                      />
+                    </div>
+                  )}
                 </>
               ) : (
                 <div className="flex flex-1 items-center justify-center">
