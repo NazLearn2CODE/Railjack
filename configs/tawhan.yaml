@@ -59,6 +59,8 @@ modules:
         model: glm-5      # /events/publicize; the call routes through app/zai.py (ZAI_API_KEY + z.ai Anthropic endpoint)
       gem_path: app/gems/event-publicity.md                     # read fresh each /events/publicize call
       notebooklm_notebook_id: ""                                # R6: DEEP RESEARCH notebook (created + cached on first use)
+      archive_gem_path: app/gems/event-archive-qa.md            # Stage 2: source-only Q&A gem
+      # archive_folder_id: <override>                           # optional; defaults to the tian desk's drive_folder_id
       desks:
         - {id: paul,   kind: article, drive_folder_id: 1w8ESeKzvW-Er36qjMjgfLU7fMwa8KSu6, trello_list_name: "To draft (Paul)",   doc_name: "[{yyyymm}] [CAT] #{nn}",               card_name: "Article | {mon} #{nn}", count: 12, labels: ["Quota", "Happening NOW"]}
         - {id: teerin, kind: blog,    drive_folder_id: 1jUTZ5qchpViAioBWfUpIdu5PQCwdSWSq, trello_list_name: "To draft (Teerin)", doc_name: "[{yyyymm}] [CAT] Working Title #{nn}", card_name: "Blog | #{nn}",            count: 5, labels: ["Quota", "Happening NOW"]}

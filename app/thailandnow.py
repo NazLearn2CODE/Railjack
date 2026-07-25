@@ -18,6 +18,7 @@ import json
 import os
 import re
 import signal
+import time
 import urllib.parse
 from collections import deque
 from dataclasses import dataclass, field
@@ -1278,6 +1279,213 @@ async def create_event_doc(payload: dict = Body(default={})):
     })
 
 
+# --- ARCHIVE tab (Stage 1) — chat Q&A over the Event Drive, DIRECT path only ---
+# Stage 1 answers presence/listing + title-search questions directly (no LLM).
+# Detail/synthesis questions ("when is Songkran?") 501 until Stage 2 wires z.ai.
+# z.ai is NOT called here at all — direct retrieval only. See docs/thailandnow-plan.md.
+
+_ARCHIVE_LIST_CACHE: list[dict] | None = None
+_ARCHIVE_LIST_CACHE_AT: float = 0.0
+_ARCHIVE_LIST_TTL_S: float = 90.0
+
+# Stopwords stripped before deciding list-all vs specific lookup. Includes the
+# presence phrases themselves ("do we have", "lined up", "any", "what events",
+# "coming up", "list", "show me") + function words + "event(s)" — so "do we have
+# any events lined up?" leaves no content tokens (→ list-all), while "do we have
+# Songkran lined up?" leaves "songkran" (→ targeted title search).
+_ARCHIVE_STOP = {
+    "do", "we", "have", "has", "had", "any", "some", "lined", "up", "for", "from",
+    "the", "a", "an", "in", "on", "at", "is", "are", "was", "were", "there", "here",
+    "show", "me", "us", "all", "list", "what", "whats", "coming", "of", "about",
+    "please", "events", "event", "this", "that", "next", "upcoming", "scheduled",
+    "planned",
+}
+
+# synthesis/detail intent → wants specific info about an event. Stage 1 can't
+# answer these (no LLM), so they 501. Interrogatives + "tell me about/describe".
+_ARCHIVE_DETAIL = re.compile(
+    r"\b(when|where|who|why|how|what date|what time|how much|how many|"
+    r"tell me about|describe)\b"
+)
+
+
+def _archive_folder_id() -> str:
+    """The Event Drive folder: options.archive_folder_id if set, else the TIAN
+    desk's drive_folder_id (where EVENTS→CREATE writes the [yyyymm] docs). 503
+    if neither is configured."""
+    opts = _opts()
+    fid = opts.get("archive_folder_id")
+    if fid:
+        return fid
+    desk = next((d for d in opts.get("desks", []) if d.get("id") == "tian"), None)
+    if desk and desk.get("drive_folder_id"):
+        return desk["drive_folder_id"]
+    raise HTTPException(
+        503, "no Event Drive folder — set options.archive_folder_id "
+        "or a tian desk drive_folder_id",
+    )
+
+
+async def _drive_list_event_docs(token: str) -> list[dict]:
+    """List the Event Drive's Google Docs (newest first), paginating on
+    nextPageToken, 90s-TTL-cached. Returns [{id,name,modifiedTime,webViewLink}].
+    The Drive ``q`` is passed via httpx params= (folder id folded into the q
+    value, never the URL)."""
+    global _ARCHIVE_LIST_CACHE, _ARCHIVE_LIST_CACHE_AT
+    if _ARCHIVE_LIST_CACHE is not None and \
+            (time.monotonic() - _ARCHIVE_LIST_CACHE_AT) < _ARCHIVE_LIST_TTL_S:
+        return _ARCHIVE_LIST_CACHE
+    folder = _archive_folder_id()
+    hdr = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    out: list[dict] = []
+    page_token: str | None = None
+    async with httpx.AsyncClient(timeout=30) as c:
+        while True:
+            params = {
+                "q": f"'{folder}' in parents and "
+                "mimeType='application/vnd.google-apps.document' and trashed=false",
+                "fields": "files(id,name,modifiedTime,webViewLink),nextPageToken",
+                "orderBy": "modifiedTime desc",
+                "pageSize": 200,
+                "supportsAllDrives": "true",
+            }
+            if page_token:
+                params["pageToken"] = page_token
+            r = await c.get("https://www.googleapis.com/drive/v3/files",
+                            headers=hdr, params=params)
+            if r.status_code != 200:
+                raise HTTPException(502, f"Drive list failed: {r.status_code} {r.text[:200]}")
+            data = r.json()
+            for f in data.get("files", []):
+                out.append({
+                    "id": f.get("id", ""), "name": f.get("name", ""),
+                    "modifiedTime": f.get("modifiedTime", ""),
+                    "webViewLink": f.get("webViewLink", ""),
+                })
+            page_token = data.get("nextPageToken")
+            if not page_token:
+                break
+    _ARCHIVE_LIST_CACHE = out
+    _ARCHIVE_LIST_CACHE_AT = time.monotonic()
+    return out
+
+
+async def _drive_read_doc(token: str, doc_id: str) -> str:
+    """Export a Google Doc as plain text. (Stage 2 calls this to feed synthesis;
+    Stage 1 defines but does not call it.)"""
+    hdr = {"Authorization": f"Bearer {token}"}
+    async with httpx.AsyncClient(timeout=30) as c:
+        r = await c.get(
+            f"https://www.googleapis.com/drive/v3/files/{doc_id}/export",
+            headers=hdr, params={"mimeType": "text/plain"},
+        )
+        if r.status_code != 200:
+            raise HTTPException(502, f"Doc export failed: {r.status_code} {r.text[:200]}")
+        return r.text
+
+
+def _archive_tokenize(text: str) -> set[str]:
+    """Lowercase alnum tokens ≥2 chars. Strips [], quotes — only alnum runs survive."""
+    return {t for t in re.findall(r"[a-z0-9]+", text.lower()) if len(t) >= 2}
+
+
+def _archive_score_title(q_tokens: set[str], title: str) -> int:
+    """Relevance of a query against a doc title: substring-hit ×3 (token of len≥3
+    found anywhere in the title) + exact token-overlap ×1. 0 if nothing overlaps."""
+    t_low = title.lower()
+    score = 0
+    for q in q_tokens:
+        if len(q) >= 3 and q in t_low:
+            score += 3
+    score += len(q_tokens & _archive_tokenize(t_low))
+    return score
+
+
+def _archive_content_tokens(question: str) -> set[str]:
+    """Meaningful query tokens: tokenize, drop a bare 20xx year + stopwords.
+    Empty ⇒ general listing request (→ list-all); non-empty ⇒ specific lookup
+    (→ title search those tokens)."""
+    toks = _archive_tokenize(question)
+    year_m = re.search(r"\b(20\d{2})\b", question)
+    if year_m:
+        toks.discard(year_m.group(1))
+    return toks - _ARCHIVE_STOP
+
+
+def _archive_is_presence(question: str) -> bool:
+    """General listing intent (no specific event named) → list-all response.
+    True when no content tokens survive stripping (e.g. 'do we have any events?',
+    'what's coming up?', '2026'). 'do we have Songkran?' leaves 'songkran' → False."""
+    return not _archive_content_tokens(question)
+
+
+def _archive_is_detail(question: str) -> bool:
+    """Synthesis/detail intent — wants specific info about an event (when/where/
+    how much). Stage 1 has no LLM, so these 501 until Stage 2 wires the path."""
+    return bool(_ARCHIVE_DETAIL.search(question.lower()))
+
+
+@router.post("/api/thailandnow/archive/ask")
+async def archive_ask(payload: dict = Body(default={})):
+    r"""ARCHIVE tab (Stage 1) — chat Q&A over the Event Drive. DIRECT answers only:
+
+    presence/listing → all names + links (cap 30, newest first);
+    title search → tokenize + score doc names (year-filtered on a \b20\d{2}\b in
+    the question), matches as "• name — link", else 3 closest titles + folder link;
+    detail/synthesis → 501 (Stage 2 wires z.ai). No LLM call here at all."""
+    question = (payload.get("question") or "").strip()
+    if not question:
+        raise HTTPException(400, "question required")
+    token = await _google_token()
+    docs = await _drive_list_event_docs(token)
+    folder = _archive_folder_id()
+    folder_link = f"https://drive.google.com/drive/folders/{folder}"
+
+    if not docs:
+        return {"answer": "No event docs in the Event Drive yet.",
+                "sources": [], "mode": "direct"}
+
+    # 1) detail / synthesis → Stage 2 (no LLM in Stage 1). Checked FIRST so a
+    #    question like "when is the next event?" 501s instead of list-all.
+    if _archive_is_detail(question):
+        raise HTTPException(501, "synthesis path not yet wired (Stage 2)")
+
+    # 2) general listing (no specific event named) → all names + links
+    if _archive_is_presence(question):
+        top = docs[:30]
+        return {
+            "answer": "\n".join(f"• {d['name']} — {d['webViewLink']}" for d in top),
+            "sources": [{"name": d["name"], "url": d["webViewLink"]} for d in top],
+            "mode": "direct",
+        }
+
+    # 3) specific lookup → title search the content tokens (year-filtered)
+    content = _archive_content_tokens(question)
+    year_m = re.search(r"\b(20\d{2})\b", question)
+    pool = docs
+    if year_m:
+        year = year_m.group(1)
+        pool = [d for d in docs if re.match(rf"^\[{year}", d["name"])] or docs
+    scored = sorted(
+        ((_archive_score_title(content, d["name"]), d) for d in pool),
+        key=lambda x: x[0], reverse=True,
+    )
+    matches = [d for s, d in scored if s > 0]
+    if matches:
+        return {
+            "answer": "\n".join(f"• {d['name']} — {d['webViewLink']}" for d in matches),
+            "sources": [{"name": d["name"], "url": d["webViewLink"]} for d in matches],
+            "mode": "direct",
+        }
+    # no match → 3 closest titles + folder link
+    sugg = [d["name"] for _, d in scored[:3]]
+    answer = f"No events matching `{question}` in the Event Drive."
+    if sugg:
+        answer += "\n\nClosest titles:\n" + "\n".join(f"• {n}" for n in sugg)
+    answer += f"\n\nBrowse the Event Drive: {folder_link}"
+    return {"answer": answer, "sources": [], "mode": "direct"}
+
+
 if __name__ == "__main__":
     # Self-check the non-trivial pure logic (no network, no creds).
     # R5: LLM-JSON parsing + date normalization / window filtering.
@@ -1323,3 +1531,18 @@ if __name__ == "__main__":
     print("OK parsers — ddg:", [d["url"] for d in ddg], "| json+date normalize OK")
     print("OK gem:", len(gem), "chars | images:", [i["url"].split("/")[-1] for i in imgs])
     print("OK names + dedup (yyyymm", ym, mon, ")")
+    # ARCHIVE Stage 1: tokenize + title score + presence/detail classification
+    assert _archive_tokenize('Songkran 2026 "[EN]"') == {"songkran", "2026", "en"}, _archive_tokenize('Songkran 2026 "[EN]"')
+    assert _archive_tokenize("a I 1") == set(), "single-char tokens dropped"
+    assert _archive_score_title({"songkran"}, '[202604] [EN] "Songkran Festival"') >= 3, "substring hit"
+    assert _archive_score_title({"songkran"}, "Loi Krathong") == 0, "no overlap"
+    assert _archive_is_presence("do we have any events lined up for 2026?") is True
+    assert _archive_is_presence("show me what's coming up") is True
+    assert _archive_is_presence("2026") is True
+    assert _archive_is_presence("Songkran") is False, "bare event name not presence"
+    assert _archive_is_presence("do we have Songkran?") is False, "specific presence → title search, not list-all"
+    assert _archive_content_tokens("do we have Songkran lined up?") == {"songkran"}, _archive_content_tokens("do we have Songkran lined up?")
+    assert _archive_is_detail("when is Songkran?") is True
+    assert _archive_is_detail("where is it held") is True
+    assert _archive_is_detail("Songkran") is False, "bare event name not detail"
+    print("OK archive: tokenize + title score + presence/detail classify")
