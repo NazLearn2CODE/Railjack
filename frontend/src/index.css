@@ -307,6 +307,13 @@
   letter-spacing: 0.08em;
   white-space: nowrap;
 }
+/* Scrollable list body (SEO/HEALTH item lists). Nested overflow:auto gives the
+   hover navigation for free: cursor inside scrolls just this list; outside it,
+   the wheel scrolls the parent panel. */
+.scroll-y {
+  overflow-y: auto;
+  max-height: 18rem;
+}
 .btn--hazard:hover:not(:disabled) {
   border-color: var(--color-hazard);
   color: var(--color-hazard);

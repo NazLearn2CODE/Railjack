@@ -1629,15 +1629,25 @@ async def _wp_list_all(endpoint: str, fields: str) -> list[dict]:
 
 
 async def _seo_media_set() -> set[str]:
-    """Cached set of media source_urls (TTL options.seo_media_cache_ttl_s, default
-    24h). ~5750 items — pulled once, reused across scans. Module-global cache."""
+    """Cached set of every image URL WP knows (TTL options.seo_media_cache_ttl_s,
+    default 24h): each item's ``source_url`` PLUS every ``media_details.sizes[*]
+    .source_url`` (the generated crops). ~5750 items — pulled once, reused across
+    scans. Module-global cache. Including crops at match time kills the bulk of
+    image false-positives (content refs sized crops, not the original)."""
     global _SEO_MEDIA_CACHE
     ttl = float(_opts().get("seo_media_cache_ttl_s", 86400))
     now = time.time()
     if _SEO_MEDIA_CACHE and (now - _SEO_MEDIA_CACHE[1]) < ttl:
         return _SEO_MEDIA_CACHE[0]
-    items = await _wp_list_all("/media", "id,source_url")
-    urls = {it.get("source_url", "") for it in items if it.get("source_url")}
+    items = await _wp_list_all("/media", "id,source_url,media_details")
+    urls: set[str] = set()
+    for it in items:
+        if it.get("source_url"):
+            urls.add(it["source_url"])
+        sizes = (it.get("media_details") or {}).get("sizes") or {}
+        for s in sizes.values():
+            if s.get("source_url"):
+                urls.add(s["source_url"])
     _SEO_MEDIA_CACHE = (urls, now)
     return urls
 
@@ -1750,9 +1760,12 @@ def _seo_suggest(orphan_title: str, candidates: list[tuple[str, str]], n: int = 
 
 
 def _seo_img_base(url: str) -> str:
-    """Strip a WP size suffix (-WxH) before the extension so a content crop matches
-    its media-library original: '.../khon-09-1024x683.jpg' -> '.../khon-09.jpg'."""
-    return re.sub(r"-\d+x\d+(?=\.[a-zA-Z]{2,4}$)", "", url)
+    """Normalise a WP image URL to its library original so a content ref matches:
+    strip a size suffix (``-WxH``) AND an edit-variant suffix (``-e{timestamp}``)
+    before the extension. '.../khon-09-1024x683.jpg' -> '.../khon-09.jpg';
+    '.../khon-09-e1596123456.jpg' -> '.../khon-09.jpg'."""
+    url = re.sub(r"-\d+x\d+(?=\.[a-zA-Z]{2,4}$)", "", url)
+    return re.sub(r"-e\d+(?=\.[a-zA-Z]{2,4}$)", "", url)
 
 
 def _seo_img_has_ext(url: str) -> bool:
@@ -1790,17 +1803,19 @@ def _seo_internal_report(
     extra_paths: set[str], site_host: str,
 ) -> dict:
     """Pure: from content-bearing WP records (posts + pages + event CPT; each with
-    ``link``, ``title.rendered``, ``content.rendered``) + the media source_url set
-    + extra valid paths (category/tag archives), compute broken internal links,
-    broken internal images, orphan posts/events, and the external link/image sets
-    (handed to S2's HTTP check). No network. Image crops are matched to their
-    media original by stripping the -WxH suffix; extensionless refs are skipped."""
+    ``id``, ``link``, ``title.rendered``, ``content.rendered``) + the media URL set
+    (originals + crops) + extra valid paths (category/tag archives), compute broken
+    internal links, internal image candidates (src ∉ media set — HTTP-probed later
+    by the flow), orphan posts/events, and the external link/image sets. No network.
+    Image crops/edit-variants are matched to their media original by stripping the
+    -WxH / -e{ts} suffix; extensionless refs are skipped."""
     media_bases = {_seo_img_base(m) for m in media_urls}
 
     def parse(rec: dict) -> dict:
         html = (rec.get("content") or {}).get("rendered", "")
         ex = _seo_extract(html, site_host)
         return {
+            "id": rec.get("id"),
             "link": rec.get("link", ""),
             "title": (rec.get("title") or {}).get("rendered", ""),
             "path": _seo_path(rec.get("link", "")),
@@ -1824,15 +1839,17 @@ def _seo_internal_report(
                 continue
             if any(tgt.startswith(pfx) for pfx in _WP_ARCHIVE_PREFIXES):
                 continue
-            broken_internal.append({"from": it["link"], "from_title": it["title"], "to": tgt})
+            broken_internal.append(
+                {"from": it["link"], "from_id": it["id"], "from_title": it["title"], "to": tgt})
 
-    broken_images: list[dict] = []
+    image_candidates: list[dict] = []  # src ∉ media set → HTTP-probed in _flow_seo_health
     for it in all_items:
         for src in it["internal_imgs"]:
             if not _seo_img_has_ext(src):
                 continue  # extensionless edit/placeholder ref — unvalidatable, skip
             if _seo_img_base(src) not in media_bases:
-                broken_images.append({"from": it["link"], "from_title": it["title"], "src": src})
+                image_candidates.append(
+                    {"from": it["link"], "from_id": it["id"], "from_title": it["title"], "src": src})
 
     # orphan ARTICLES (posts + events): zero inbound internal links from anywhere
     inbound = {it["path"]: 0 for it in article_items}
@@ -1840,7 +1857,7 @@ def _seo_internal_report(
         for tgt in src_it["internal_link_paths"]:
             if tgt != src_it["path"] and tgt in inbound:
                 inbound[tgt] += 1
-    orphans = [{"link": it["link"], "title": it["title"]}
+    orphans = [{"id": it["id"], "link": it["link"], "title": it["title"]}
                for it in article_items if inbound.get(it["path"], 0) == 0]
 
     return {
@@ -1849,7 +1866,7 @@ def _seo_internal_report(
         "event_count": len(events),
         "valid_paths": len(valid_paths),
         "broken_internal_links": broken_internal,
-        "broken_internal_images": broken_images,
+        "image_candidates": image_candidates,   # → broken_internal_images / image_manual_check in the flow
         "orphans": orphans,
         "external_links": sorted({u for it in all_items for u in it["external_links"]}),
         "external_imgs": sorted({u for it in all_items for u in it["external_imgs"]}),
@@ -1875,38 +1892,63 @@ async def _flow_seo_health(job: "TnJob") -> None:
         cands = [(l, t) for (l, t) in titles if l != o["link"]]
         o["suggested"] = _seo_suggest(o["title"], cands, n=3)
     job.progress = 50
-    # external HTTP checks (links + images) — polite, bounded concurrency.
+    # HTTP-verify external links/images AND internal image candidates. The latter
+    # is the definitive image vetting: a 200 kills every crop/edit-variant false
+    # positive the media-set prefilter missed; only a real 404/410 stays "broken."
     ext = sorted(set(rep["external_links"]) | set(rep["external_imgs"]))
+    img_cands = rep.pop("image_candidates", [])  # intermediate — not in the final report
     conc = max(1, int(_opts().get("seo_external_concurrency", 8)))
     timeout = float(_opts().get("seo_external_timeout_s", 10))
+    sem = asyncio.Semaphore(conc)
+    ua = "Mozilla/5.0 (compatible; RailjackSEOBot/1.0)"
     broken_external: list[dict] = []
     manual_check: list[dict] = []
-    if ext:
-        sem = asyncio.Semaphore(conc)
-        ua = "Mozilla/5.0 (compatible; RailjackSEOBot/1.0)"
+    broken_images: list[dict] = []          # HTTP-confirmed missing internal images
+    image_manual: list[dict] = []
 
-        async def check_one(url: str) -> None:
-            async with sem:
-                try:
-                    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as c:
-                        r = await c.head(url, headers={"User-Agent": ua})
-                        if r.status_code == 405:  # some hosts reject HEAD → fall back to GET
-                            r = await c.get(url, headers={"User-Agent": ua})
-                    code = r.status_code
-                except (httpx.HTTPError, OSError):
-                    manual_check.append({"url": url, "reason": "timeout/error"})
-                    return
-                if code in (404, 410):
-                    broken_external.append({"url": url, "status": code})
-                elif code >= 400:
-                    manual_check.append({"url": url, "status": code, "reason": "client-error/blocked"})
-                # 2xx/3xx → ok (no record)
+    async def probe(url: str) -> int:
+        if url.startswith("//"):
+            url = "https:" + url  # protocol-relative '//host/…' → fetchable
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as c:
+            r = await c.head(url, headers={"User-Agent": ua})
+            if r.status_code == 405:  # some hosts reject HEAD → fall back to GET
+                r = await c.get(url, headers={"User-Agent": ua})
+            return r.status_code
 
-        tasks = [asyncio.create_task(check_one(u)) for u in ext]
+    async def check_ext(url: str) -> None:
+        async with sem:
+            try:
+                code = await probe(url)
+            except (httpx.HTTPError, OSError):
+                manual_check.append({"url": url, "reason": "timeout/error"})
+                return
+        if code in (404, 410):
+            broken_external.append({"url": url, "status": code})
+        elif code >= 400:
+            manual_check.append({"url": url, "status": code, "reason": "client-error/blocked"})
+        # 2xx/3xx → ok (no record)
+
+    async def check_img(cand: dict) -> None:
+        async with sem:
+            try:
+                code = await probe(cand["src"])
+            except (httpx.HTTPError, OSError):
+                image_manual.append({**cand, "reason": "timeout/error"})
+                return
+        if code in (404, 410):
+            broken_images.append({**cand, "status": code})
+        elif code >= 400:  # 403/blocked → likely Sucuri on a non-asset path; verify by hand
+            image_manual.append({**cand, "status": code, "reason": "client-error/blocked"})
+        # 2xx/3xx → image exists (crop/variant the media set didn't list) → drop
+
+    tasks = [asyncio.create_task(check_ext(u)) for u in ext]
+    tasks += [asyncio.create_task(check_img(c)) for c in img_cands]
+    total = len(tasks)
+    if total:
         for i, fut in enumerate(asyncio.as_completed(tasks), 1):
             await fut
             if i % conc == 0:
-                job.progress = min(90, 50 + int(40 * i / len(ext)))
+                job.progress = min(90, 50 + int(40 * i / total))
                 if job.cancel:
                     for t in tasks:
                         t.cancel()
@@ -1914,6 +1956,8 @@ async def _flow_seo_health(job: "TnJob") -> None:
     job.progress = 95
     job.result = {
         **rep,
+        "broken_internal_images": broken_images,
+        "image_manual_check": image_manual,
         "broken_external_links": broken_external,
         "manual_check": manual_check,
         "external_checked": len(ext),
@@ -1993,6 +2037,7 @@ if __name__ == "__main__":
         assert _seo_classify(u, sh) is None, u
     assert _seo_path("https://www.thailandnow.in.th/arts/x/?q=1#t") == "/arts/x"
     assert _seo_img_base("https://x/khon-09-1024x683.jpg") == "https://x/khon-09.jpg"
+    assert _seo_img_base("https://x/khon-09-e1596123456.jpg") == "https://x/khon-09.jpg", "edit-variant strip"
     assert _seo_img_has_ext("https://x/y.jpg") and not _seo_img_has_ext("https://x/edit-no-ext")
     # parser: data: placeholder skipped; real URL from data-src + srcset captured
     ex = _seo_extract(
@@ -2010,20 +2055,20 @@ if __name__ == "__main__":
     # internal report: whitelisted category link excluded; sized image matched to media
     # original; extensionless ref skipped; orphan among post AND event.
     posts = [
-        {"link": "https://www.thailandnow.in.th/p1/", "title": {"rendered": "Post One"},
+        {"id": 1, "link": "https://www.thailandnow.in.th/p1/", "title": {"rendered": "Post One"},
          "content": {"rendered": '<a href="/p2/">two</a><a href="/gone/">gone</a>'
                      '<a href="/current-affairs/">cat</a>'
                      '<img src="https://www.thailandnow.in.th/wp-content/uploads/img1-1024x683.jpg">'
                      '<img src="https://www.thailandnow.in.th/wp-content/uploads/img-broken.jpg">'
                      '<img src="https://www.thailandnow.in.th/wp-content/uploads/edit-no-ext">'}},
-        {"link": "https://www.thailandnow.in.th/p2/", "title": {"rendered": "Post Two"},
+        {"id": 2, "link": "https://www.thailandnow.in.th/p2/", "title": {"rendered": "Post Two"},
          "content": {"rendered": ""}},
-        {"link": "https://www.thailandnow.in.th/p3/", "title": {"rendered": "Post Three"},
+        {"id": 3, "link": "https://www.thailandnow.in.th/p3/", "title": {"rendered": "Post Three"},
          "content": {"rendered": '<a href="https://youtube.com/w">yt</a>'}},
     ]
-    pages = [{"link": "https://www.thailandnow.in.th/about/", "title": {"rendered": "About"},
+    pages = [{"id": 7, "link": "https://www.thailandnow.in.th/about/", "title": {"rendered": "About"},
               "content": {"rendered": '<a href="/p1/">p1</a>'}}]
-    events = [{"link": "https://www.thailandnow.in.th/event/e1/", "title": {"rendered": "Event One"},
+    events = [{"id": 9, "link": "https://www.thailandnow.in.th/event/e1/", "title": {"rendered": "Event One"},
                "content": {"rendered": ""}}]
     rep = _seo_internal_report(
         posts, pages, events,
@@ -2033,8 +2078,12 @@ if __name__ == "__main__":
     assert rep["valid_paths"] == 6, rep["valid_paths"]  # /p1,/p2,/p3,/about,/event/e1 + /current-affairs
     assert len(rep["broken_internal_links"]) == 1, rep["broken_internal_links"]  # only /gone/
     assert rep["broken_internal_links"][0]["to"] == "/gone", rep["broken_internal_links"]
-    assert len(rep["broken_internal_images"]) == 1, rep["broken_internal_images"]  # img-broken only
+    assert rep["broken_internal_links"][0]["from_id"] == 1, "from_id plumbed"   # /gone/ lives in p1
+    assert len(rep["image_candidates"]) == 1, rep["image_candidates"]  # img-broken only (img1 crop matches)
+    assert rep["image_candidates"][0]["src"].endswith("img-broken.jpg"), rep["image_candidates"]
+    assert rep["image_candidates"][0]["from_id"] == 1, "image candidate from_id plumbed"
     assert len(rep["orphans"]) == 2, rep["orphans"]  # post3 + event1
+    assert {o["id"] for o in rep["orphans"]} == {3, 9}, "orphan id plumbed"
     assert {o["link"].split("/")[-2] for o in rep["orphans"]} == {"p3", "e1"}, rep["orphans"]
     assert rep["external_links"] == ["https://youtube.com/w"], rep["external_links"]
     # suggest: token overlap ranks + filters

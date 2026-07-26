@@ -102,16 +102,42 @@ interface ArchiveMsg {
 
 // SEO HEALTH report (THAILAND NOW → SEO tab → HEALTH)
 interface HealthSuggestion { link: string; title: string }
-interface HealthOrphan { link: string; title: string; suggested: HealthSuggestion[] }
+interface HealthOrphan { id?: number; link: string; title: string; suggested: HealthSuggestion[] }
 interface HealthReport {
   post_count: number; page_count: number; event_count: number; valid_paths: number;
-  broken_internal_links: { from: string; from_title: string; to: string }[];
-  broken_internal_images: { from: string; from_title: string; src: string }[];
+  broken_internal_links: { from: string; from_id?: number; from_title: string; to: string }[];
+  broken_internal_images: { from: string; from_id?: number; from_title: string; src: string; status?: number }[];
+  image_manual_check: { from: string; from_id?: number; from_title: string; src: string; status?: number; reason: string }[];
   orphans: HealthOrphan[];
   external_links: string[]; external_imgs: string[];
   broken_external_links: { url: string; status: number }[];
   manual_check: { url: string; status?: number; reason: string }[];
   external_checked: number; at: string;
+}
+
+/** WP admin "edit post" URL derived from a record's own permalink (admin is
+ *  same-origin). Returns null when we lack the post id (EDIT hidden then). */
+function wpEditUrl(id: number | undefined, link: string): string | null {
+  if (!id || !link) return null;
+  try { return `${new URL(link).origin}/wp-admin/post.php?post=${id}&action=edit`; }
+  catch { return null; }
+}
+
+/** Best-effort origin from a permalink, so a bare-path broken-link target
+ *  (`/gone/`) resolves to the WP site, not Railjack's own origin. "" on failure. */
+function safeOrigin(link: string): string {
+  try { return new URL(link).origin; } catch { return ""; }
+}
+
+/** ✎ link → open the record's source post in the WP editor (manual fix). Hidden
+ *  when no post id is available (e.g. a stale cached report, or site-wide
+ *  external links with no per-post attribution yet). */
+function WpEdit({ id, link }: { id?: number; link: string }) {
+  const u = wpEditUrl(id, link);
+  return u
+    ? <a className="mono" href={u} target="_blank" rel="noreferrer" title="Open in WordPress editor"
+        style={{ color: "var(--color-muted)", marginLeft: "0.4rem" }}>✎</a>
+    : null;
 }
 
 async function post<T>(url: string, body: unknown): Promise<{ ok: boolean; data?: T; error?: string }> {
@@ -204,8 +230,13 @@ function healthCopyText(r: HealthReport): string {
   L.push(`MANUAL CHECK (${r.manual_check.length}) — blocked/timeout, verify by hand:`);
   for (const m of r.manual_check) L.push(`- ${m.url} (${m.reason})`);
   L.push("");
-  L.push(`BROKEN IMAGES (${r.broken_internal_images.length}):`);
-  for (const b of r.broken_internal_images) L.push(`- ${b.src}  (in: ${b.from_title})`);
+  L.push(`BROKEN IMAGES (${r.broken_internal_images.length}) — HTTP-confirmed missing (404/410):`);
+  for (const b of r.broken_internal_images) L.push(`- [${b.status}] ${b.src}  (in: ${b.from_title})`);
+  if (r.image_manual_check?.length) {
+    L.push("");
+    L.push(`IMAGE MANUAL CHECK (${r.image_manual_check.length}) — blocked/timeout, verify by hand:`);
+    for (const m of r.image_manual_check) L.push(`- ${m.src}  (in: ${m.from_title}) (${m.reason})`);
+  }
   return L.join("\n");
 }
 
@@ -216,12 +247,10 @@ function HealthList({ title, count, accent, hint, children }: {
     <div className="border border-edge bg-void p-2">
       <div className="label" style={{ color: accent }}>{title} ({count})</div>
       {hint && <div className="mono text-xs" style={{ color: "var(--color-muted)" }}>{hint}</div>}
-      {children}
+      {count > 0 && <div className="scroll-y mt-1">{children}</div>}
     </div>
   );
 }
-
-const HEALTH_CAP = 25;
 
 function HealthSubTab() {
   const [report, setReport] = usePersistentState<HealthReport | null>("tn.seo.health.report", null);
@@ -255,8 +284,6 @@ function HealthSubTab() {
   }, [jobs, setReport]);
 
   const r = report;
-  const more = (n: number) =>
-    n > HEALTH_CAP ? <div className="mono text-xs mt-1" style={{ color: "var(--color-muted)" }}>+{n - HEALTH_CAP} more (COPY for the full list)</div> : null;
 
   return (
     <section className="hud hud--bracket reveal reveal-1 p-3 flex flex-col gap-2">
@@ -284,7 +311,7 @@ function HealthSubTab() {
           </button>
         )}
         <span className="mono" style={{ color: "var(--color-muted)" }}>
-          pulls posts+media via authed WP REST, HTTP-checks external links — ~1-2 min
+          pulls posts+media via authed WP REST, HTTP-checks links + image candidates — ~1-2 min
         </span>
       </div>
 
@@ -300,44 +327,52 @@ function HealthSubTab() {
           </div>
 
           <HealthList title="ORPHAN ARTICLES" count={r.orphans.length} accent="var(--color-critical)"
-            hint="zero inbound internal links — the SEO priority">
-            {r.orphans.slice(0, HEALTH_CAP).map((o) => (
+            hint="zero inbound internal links — the SEO priority. ✎ opens the editor to un-orphan by hand; link with a suggested target.">
+            {r.orphans.map((o) => (
               <div key={o.link} className="text-sm mt-1">
                 <a href={o.link} target="_blank" rel="noreferrer" style={{ color: "var(--color-phosphor)" }}>{o.title || o.link}</a>
+                <WpEdit id={o.id} link={o.link} />
                 {o.suggested.length > 0 && (
                   <span className="mono text-xs" style={{ color: "var(--color-muted)" }}>
-                    {" — suggest: "}{o.suggested.map((s) => s.title).join(" · ")}
+                    {" — link with: "}
+                    {o.suggested.map((s, i) => (
+                      <span key={s.link}>
+                        {i > 0 && " · "}
+                        <a href={s.link} target="_blank" rel="noreferrer" title={s.link}
+                          style={{ color: "var(--color-phosphor-dim)" }}>{s.title}</a>
+                      </span>
+                    ))}
                   </span>
                 )}
               </div>
             ))}
-            {more(r.orphans.length)}
           </HealthList>
 
-          <HealthList title="BROKEN INTERNAL LINKS" count={r.broken_internal_links.length} accent="var(--color-hazard)">
-            {r.broken_internal_links.slice(0, HEALTH_CAP).map((b, i) => (
+          <HealthList title="BROKEN INTERNAL LINKS" count={r.broken_internal_links.length} accent="var(--color-hazard)"
+            hint="target slug ∉ published set. ✎ opens the source post to fix/remove.">
+            {r.broken_internal_links.map((b, i) => (
               <div key={i} className="text-sm mt-1">
                 <span style={{ color: "var(--color-phosphor-dim)" }}>{b.from_title || b.from}</span>
                 {" → "}
-                <a href={b.to} target="_blank" rel="noreferrer" style={{ color: "var(--color-critical)" }}>{b.to}</a>
+                <a href={safeOrigin(b.from) + b.to} target="_blank" rel="noreferrer" style={{ color: "var(--color-critical)" }}>{b.to}</a>
+                <WpEdit id={b.from_id} link={b.from} />
               </div>
             ))}
-            {more(r.broken_internal_links.length)}
           </HealthList>
 
-          <HealthList title="BROKEN EXTERNAL LINKS" count={r.broken_external_links.length} accent="var(--color-hazard)">
-            {r.broken_external_links.slice(0, HEALTH_CAP).map((b, i) => (
+          <HealthList title="BROKEN EXTERNAL LINKS" count={r.broken_external_links.length} accent="var(--color-hazard)"
+            hint="HTTP 404/410. Per-post attribution + bulk-remove arrive in Stage B.">
+            {r.broken_external_links.map((b, i) => (
               <div key={i} className="text-sm mt-1">
                 <span className="mono" style={{ color: "var(--color-critical)" }}>[{b.status}]</span>{" "}
                 <a href={b.url} target="_blank" rel="noreferrer" style={{ color: "var(--color-phosphor)" }}>{b.url}</a>
               </div>
             ))}
-            {more(r.broken_external_links.length)}
           </HealthList>
 
           <HealthList title="MANUAL CHECK" count={r.manual_check.length} accent="var(--color-hazard)"
             hint="blocked/timeout — verify by hand (NOT confirmed broken)">
-            {r.manual_check.slice(0, HEALTH_CAP).map((m, i) => (
+            {r.manual_check.map((m, i) => (
               <div key={i} className="text-xs mt-1">
                 <a href={m.url} target="_blank" rel="noreferrer" style={{ color: "var(--color-phosphor-dim)" }}>{m.url}</a>
                 {" "}
@@ -347,13 +382,27 @@ function HealthSubTab() {
           </HealthList>
 
           <HealthList title="BROKEN IMAGES" count={r.broken_internal_images.length} accent="var(--color-hazard)"
-            hint="internal image src not in the media library (may include WP edit-variant noise)">
-            {r.broken_internal_images.slice(0, HEALTH_CAP).map((b, i) => (
+            hint="HTTP-confirmed missing (404/410) — crop/variant false-positives already filtered out.">
+            {r.broken_internal_images.map((b, i) => (
               <div key={i} className="text-xs mt-1">
+                <span className="mono" style={{ color: "var(--color-critical)" }}>[{b.status}]</span>{" "}
                 <a href={b.src} target="_blank" rel="noreferrer" style={{ color: "var(--color-critical)" }}>{b.src}</a>
+                <span className="mono text-xs" style={{ color: "var(--color-muted)" }}> in {b.from_title}</span>
+                <WpEdit id={b.from_id} link={b.from} />
               </div>
             ))}
-            {more(r.broken_internal_images.length)}
+          </HealthList>
+
+          <HealthList title="IMAGE MANUAL CHECK" count={(r.image_manual_check ?? []).length} accent="var(--color-hazard)"
+            hint="image probe blocked/timeout — verify by hand (NOT confirmed broken)">
+            {(r.image_manual_check ?? []).map((m, i) => (
+              <div key={i} className="text-xs mt-1">
+                <a href={m.src} target="_blank" rel="noreferrer" style={{ color: "var(--color-phosphor-dim)" }}>{m.src}</a>
+                {" "}
+                <span className="mono" style={{ color: "var(--color-muted)" }}>({m.reason})</span>
+                <WpEdit id={m.from_id} link={m.from} />
+              </div>
+            ))}
           </HealthList>
         </div>
       ) : (
