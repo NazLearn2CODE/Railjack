@@ -29,6 +29,7 @@ from uuid import uuid4
 
 import httpx
 from fastapi import APIRouter, Body, HTTPException
+from pydantic import BaseModel
 
 from .config import CONFIG
 from .zai import zai_message
@@ -1604,11 +1605,11 @@ def _wp_site_host() -> str:
     return h[4:] if h.startswith("www.") else h
 
 
-async def _wp(method: str, path: str, params: dict | None = None):
+async def _wp(method: str, path: str, params: dict | None = None, json_body: dict | None = None):
     """Authed WP REST call (Basic auth via httpx). Returns parsed JSON or None."""
     url, user, pwd = _wp_creds()
     async with httpx.AsyncClient(timeout=30, auth=(user, pwd)) as c:
-        r = await c.request(method, f"{url}/wp-json/wp/v2{path}", params=params or {})
+        r = await c.request(method, f"{url}/wp-json/wp/v2{path}", params=params or {}, json=json_body)
         if r.status_code >= 400:
             raise HTTPException(502, f"WP {method} {path}: {r.status_code} {r.text[:200]}")
         return r.json() if r.content else None
@@ -1992,6 +1993,13 @@ async def _flow_seo_health(job: "TnJob") -> None:
     timeout = float(_opts().get("seo_external_timeout_s", 10))
     sem = asyncio.Semaphore(conc)
     ua = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+    probe_headers = {
+        "User-Agent": ua,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Sec-Fetch-Site": "none",
+        "Sec-Fetch-Mode": "navigate",
+    }
     broken_external: list[dict] = []
     manual_check: list[dict] = []
     broken_images: list[dict] = []          # HTTP-confirmed missing internal images
@@ -2006,9 +2014,9 @@ async def _flow_seo_health(job: "TnJob") -> None:
         if url.startswith("//"):
             url = "https:" + url  # protocol-relative '//host/…' → fetchable
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as c:
-            r = await c.head(url, headers={"User-Agent": ua})
+            r = await c.head(url, headers=probe_headers)
             if r.status_code == 405:  # some hosts reject HEAD → fall back to GET
-                r = await c.get(url, headers={"User-Agent": ua})
+                r = await c.get(url, headers=probe_headers)
             return r.status_code
 
     async def check_ext(url: str) -> None:
@@ -2090,6 +2098,99 @@ async def _flow_seo_health(job: "TnJob") -> None:
     }
 
 
+def _seo_norm_url(u: str) -> str:
+    """Normalize a URL for matching: strip scheme, www, query, and trailing slashes."""
+    u = (u or "").strip().lower()
+    u = re.sub(r"^(?:https?:)?//", "", u)
+    u = re.sub(r"^www\.", "", u)
+    u = u.split("?")[0].split("#")[0].rstrip("/")
+    return u
+
+
+def _seo_strip_target(html: str, kind: str, target: str) -> tuple[str, int, str, str]:
+    """Pure: find matching <a> or <img> tags in html referencing target, strip them,
+    and return (new_html, match_count, snippet_before, snippet_after).
+    For <a>: tag stripped, inner text kept as prose.
+    For <img>: tag dropped entirely.
+    snippets show ~40 chars context around the first match before and after stripping."""
+    if not html or not target:
+        return html, 0, "", ""
+
+    target_raw = target.strip()
+    target_norm = _seo_norm_url(target_raw)
+    if not target_norm:
+        return html, 0, "", ""
+
+    matches = 0
+    first_start = -1
+    first_end = -1
+    first_replacement = ""
+
+    if kind == "image":
+        img_re = re.compile(r"<img\b[^>]*?>", re.IGNORECASE | re.DOTALL)
+        pos = 0
+        chunks = []
+        for m in img_re.finditer(html):
+            tag_str = m.group(0)
+            tag_norm = _seo_norm_url(tag_str)
+            if target_raw in tag_str or (target_norm and target_norm in tag_norm):
+                matches += 1
+                if first_start == -1:
+                    first_start = m.start()
+                    first_end = m.end()
+                    first_replacement = ""
+                chunks.append(html[pos:m.start()])
+                pos = m.end()
+        chunks.append(html[pos:])
+        new_html = "".join(chunks) if matches > 0 else html
+    else:  # "link"
+        a_re = re.compile(r'<a\b[^>]*?\bhref=["\']?([^"\'>]+)["\']?[^>]*?>(.*?)</a>', re.IGNORECASE | re.DOTALL)
+        pos = 0
+        chunks = []
+        for m in a_re.finditer(html):
+            href_val = m.group(1)
+            inner_text = m.group(2)
+            href_norm = _seo_norm_url(href_val)
+            if (target_raw in href_val or href_val in target_raw or
+                    (target_norm and target_norm in href_norm)):
+                matches += 1
+                if first_start == -1:
+                    first_start = m.start()
+                    first_end = m.end()
+                    first_replacement = inner_text
+                chunks.append(html[pos:m.start()])
+                chunks.append(inner_text)
+                pos = m.end()
+        chunks.append(html[pos:])
+        new_html = "".join(chunks) if matches > 0 else html
+
+    if matches == 0:
+        return html, 0, "", ""
+
+    ctx_start = max(0, first_start - 40)
+    ctx_end = min(len(html), first_end + 40)
+    snippet_before = html[ctx_start:ctx_end]
+    snippet_after = html[ctx_start:first_start] + first_replacement + html[first_end:ctx_end]
+
+    return new_html, matches, snippet_before, snippet_after
+
+
+class SeoPreviewFixReq(BaseModel):
+    post_id: int
+    kind: str  # "link" | "image"
+    target: str
+
+
+class SeoApplyFixReq(BaseModel):
+    post_id: int
+    kind: str  # "link" | "image"
+    target: str
+
+
+class SeoApplyFixBulkReq(BaseModel):
+    items: list[SeoApplyFixReq]
+
+
 @router.post("/api/thailandnow/seo/scan")
 async def seo_scan():
     """HEALTH scan — kick off an async ``seo-health`` job. 409 if one is already
@@ -2109,6 +2210,89 @@ async def seo_report(jid: str):
     if job.status != "done":
         raise HTTPException(409, f"job is {job.status}; not ready")
     return job.result
+
+
+@router.post("/api/thailandnow/seo/preview-fix")
+async def seo_preview_fix(req: SeoPreviewFixReq):
+    """Preview removing a broken link or image from a WP post.
+    Reads content.raw via GET /wp/v2/posts/{post_id}?context=edit.
+    Does NOT modify WP. Returns {post_id, matches, before, after}."""
+    try:
+        post = await _wp("GET", f"/posts/{req.post_id}", {"context": "edit"})
+    except HTTPException as e:
+        if e.status_code in (401, 403):
+            raise HTTPException(403, f"WP edit context permission denied for post {req.post_id}. Verify WP credentials app-password has edit capabilities.")
+        raise
+    if not post or not isinstance(post, dict):
+        raise HTTPException(404, f"WP post {req.post_id} not found")
+
+    raw_content = (post.get("content") or {}).get("raw", "")
+    new_html, matches, before, after = _seo_strip_target(raw_content, req.kind, req.target)
+    return {
+        "post_id": req.post_id,
+        "kind": req.kind,
+        "target": req.target,
+        "matches": matches,
+        "before": before,
+        "after": after,
+    }
+
+
+@router.post("/api/thailandnow/seo/apply-fix")
+async def seo_apply_fix(req: SeoApplyFixReq):
+    """Apply fix: remove broken link or image from WP post.
+    Reads content.raw, strips target, POSTs {content: new_raw} to /wp/v2/posts/{post_id}.
+    Idempotent: 0 matches -> returns {ok: true, matches: 0}, no PUT/POST."""
+    try:
+        post = await _wp("GET", f"/posts/{req.post_id}", {"context": "edit"})
+    except HTTPException as e:
+        if e.status_code in (401, 403):
+            raise HTTPException(403, f"WP edit context permission denied for post {req.post_id}.")
+        raise
+    if not post or not isinstance(post, dict):
+        raise HTTPException(404, f"WP post {req.post_id} not found")
+
+    raw_content = (post.get("content") or {}).get("raw", "")
+    new_html, matches, before, after = _seo_strip_target(raw_content, req.kind, req.target)
+
+    if matches == 0:
+        return {
+            "ok": True,
+            "matches": 0,
+            "post_id": req.post_id,
+            "post_link": post.get("link", ""),
+        }
+
+    await _wp("POST", f"/posts/{req.post_id}", json_body={"content": new_html})
+    return {
+        "ok": True,
+        "matches": matches,
+        "post_id": req.post_id,
+        "post_link": post.get("link", ""),
+    }
+
+
+@router.post("/api/thailandnow/seo/apply-fix-bulk")
+async def seo_apply_fix_bulk(req: SeoApplyFixBulkReq):
+    """Bulk apply fix: remove multiple broken links/images.
+    Iterates items; continues on error; returns per-item results."""
+    results = []
+    for item in req.items:
+        try:
+            res = await seo_apply_fix(item)
+            results.append(res)
+        except Exception as e:
+            results.append({
+                "ok": False,
+                "error": str(e),
+                "post_id": item.post_id,
+                "target": item.target,
+            })
+    return {
+        "results": results,
+        "total": len(req.items),
+        "successful": len([r for r in results if r.get("ok")]),
+    }
 
 
 if __name__ == "__main__":
@@ -2164,6 +2348,14 @@ if __name__ == "__main__":
     assert _seo_img_base("https://x/khon-09-1024x683.jpg") == "https://x/khon-09.jpg"
     assert _seo_img_base("https://x/khon-09-e1596123456.jpg") == "https://x/khon-09.jpg", "edit-variant strip"
     assert _seo_img_has_ext("https://x/y.jpg") and not _seo_img_has_ext("https://x/edit-no-ext")
+    # Slice 2: _seo_strip_target tag matching and stripping
+    st_a, st_c, st_b, st_af = _seo_strip_target('<p>Hello <a href="https://dead.link/x">Dead Link Text</a> here.</p>', "link", "https://dead.link/x")
+    assert st_c == 1, st_c
+    assert st_a == "<p>Hello Dead Link Text here.</p>", st_a
+    assert "Dead Link Text" in st_af, st_af
+    st_img, st_img_c, _, _ = _seo_strip_target('<p>Logo: <img src="https://dead.img/a.jpg" alt="test"> image</p>', "image", "https://dead.img/a.jpg")
+    assert st_img_c == 1, st_img_c
+    assert st_img == "<p>Logo:  image</p>", st_img
     # parser: data: placeholder skipped; real URL from data-src + srcset captured
     ex = _seo_extract(
         '<a href="/good/">g</a><a href="https://youtube.com/w">y</a><a href="#skip">s</a>'

@@ -241,12 +241,15 @@ function healthCopyText(r: HealthReport): string {
   return L.join("\n");
 }
 
-function HealthList({ title, count, accent, hint, children }: {
-  title: string; count: number; accent: string; hint?: string; children: ReactNode;
+function HealthList({ title, count, accent, hint, action, children }: {
+  title: string; count: number; accent: string; hint?: string; action?: ReactNode; children: ReactNode;
 }) {
   return (
     <div className="border border-edge bg-void p-2">
-      <div className="label" style={{ color: accent }}>{title} ({count})</div>
+      <div className="flex items-center justify-between gap-2">
+        <div className="label" style={{ color: accent }}>{title} ({count})</div>
+        {action}
+      </div>
       {hint && <div className="mono text-xs" style={{ color: "var(--color-muted)" }}>{hint}</div>}
       {count > 0 && <div className="scroll-y mt-1">{children}</div>}
     </div>
@@ -262,6 +265,49 @@ function HealthSubTab() {
   const jobs = jobsData?.jobs ?? [];
   const scanJob = jobs.find((j) => j.kind === "seo-health") ?? null;
   const scanning = !!scanJob && (scanJob.status === "queued" || scanJob.status === "running");
+
+  // Slice 2: Preview / Fix / Dismiss / Bulk states
+  const [activePreview, setActivePreview] = useState<{
+    key: string;
+    postId: number;
+    kind: "link" | "image";
+    target: string;
+    loading: boolean;
+    data?: { matches: number; before: string; after: string };
+    error?: string;
+    applied?: boolean;
+  } | null>(null);
+
+  const [dismissed, setDismissed] = usePersistentState<string[]>("tn.seo.dismissed", []);
+  const [showDismissed, setShowDismissed] = useState(false);
+  const [bulkConfirmSection, setBulkConfirmSection] = useState<string | null>(null);
+  const [bulkProgress, setBulkProgress] = useState<string | null>(null);
+
+  const handleStartPreview = async (key: string, postId: number, kind: "link" | "image", target: string) => {
+    setActivePreview({ key, postId, kind, target, loading: true });
+    const res = await post<{ post_id: number; matches: number; before: string; after: string }>("/api/thailandnow/seo/preview-fix", {
+      post_id: postId, kind, target,
+    });
+    if (res.ok && res.data) {
+      setActivePreview({ key, postId, kind, target, loading: false, data: res.data });
+    } else {
+      setActivePreview({ key, postId, kind, target, loading: false, error: res.error || "Failed to load preview" });
+    }
+  };
+
+  const handleApplyFix = async () => {
+    if (!activePreview || !activePreview.data) return;
+    const { postId, kind, target } = activePreview;
+    setActivePreview((prev) => prev ? { ...prev, loading: true } : null);
+    const res = await post<{ ok: boolean; matches: number }>("/api/thailandnow/seo/apply-fix", {
+      post_id: postId, kind, target,
+    });
+    if (res.ok) {
+      setActivePreview((prev) => prev ? { ...prev, loading: false, applied: true } : null);
+    } else {
+      setActivePreview((prev) => prev ? { ...prev, loading: false, error: res.error || "Failed to apply fix" } : null);
+    }
+  };
 
   const startScan = useCallback(async () => {
     setErr(null);
@@ -350,71 +396,315 @@ function HealthSubTab() {
           </HealthList>
 
           <HealthList title="BROKEN INTERNAL LINKS" count={r.broken_internal_links.length} accent="var(--color-hazard)"
-            hint="target slug ∉ published set. ✎ opens the source post to fix/remove.">
-            {r.broken_internal_links.map((b, i) => (
-              <div key={i} className="text-sm mt-1 flex flex-col gap-0.5">
-                <div>
-                  <span style={{ color: "var(--color-phosphor-dim)" }}>{b.from_title || b.from}</span>
-                  {" → "}
-                  <a href={safeOrigin(b.from) + b.to} target="_blank" rel="noreferrer" style={{ color: "var(--color-critical)" }}>{b.to}</a>
-                  <WpEdit id={b.from_id} link={b.from} />
-                  {b.href && b.href !== b.to && b.href !== safeOrigin(b.from) + b.to && (
-                    <span className="mono text-xs ml-2" style={{ color: "var(--color-muted)" }}>[raw: {b.href}]</span>
-                  )}
+            hint="target slug ∉ published set. ✎ opens the source post. Remove strips tag and keeps inner text."
+            action={
+              r.broken_internal_links.length > 0 && (
+                <button
+                  className="btn btn--crit text-xs py-0.5 px-1.5"
+                  onClick={() => setBulkConfirmSection("internal")}
+                >
+                  REMOVE ALL ({r.broken_internal_links.length})
+                </button>
+              )
+            }
+          >
+            {bulkConfirmSection === "internal" && (
+              <div className="p-2 border border-critical bg-shade flex flex-col gap-2 my-1">
+                <div className="mono text-xs font-bold" style={{ color: "var(--color-critical)" }}>
+                  CONFIRM BULK REMOVE ({r.broken_internal_links.length} Broken Internal Links)
                 </div>
-                {b.reason && (
-                  <div className="mono text-xs" style={{ color: "var(--color-muted)" }}>{b.reason}</div>
-                )}
+                <div className="mono text-xs text-muted">
+                  Strips all matching broken internal links across source posts, preserving inner text.
+                </div>
+                {bulkProgress && <div className="mono text-xs" style={{ color: "var(--color-signal)" }}>{bulkProgress}</div>}
+                <div className="flex gap-2">
+                  <button
+                    className="btn btn--crit"
+                    disabled={!!bulkProgress}
+                    onClick={async () => {
+                      setBulkProgress("Applying bulk removal...");
+                      const items = r.broken_internal_links
+                        .filter((b) => b.from_id)
+                        .map((b) => ({ post_id: b.from_id!, kind: "link" as const, target: b.href || b.to }));
+                      const res = await post<{ successful: number; total: number }>("/api/thailandnow/seo/apply-fix-bulk", { items });
+                      if (res.ok && res.data) {
+                        setBulkProgress(`Finished: ${res.data.successful} / ${res.data.total} successful. Re-scan to verify.`);
+                      } else {
+                        setBulkProgress(`Error: ${res.error || "failed"}`);
+                      }
+                    }}
+                  >
+                    CONFIRM BULK REMOVE
+                  </button>
+                  <button className="btn" onClick={() => { setBulkConfirmSection(null); setBulkProgress(null); }}>CANCEL</button>
+                </div>
               </div>
-            ))}
-          </HealthList>
+            )}
 
-          {r.internal_manual_check && r.internal_manual_check.length > 0 && (
-            <HealthList title="INTERNAL MANUAL CHECK" count={r.internal_manual_check.length} accent="var(--color-hazard)"
-              hint="internal links that returned 403/5xx/timeout — verify by hand (NOT confirmed broken). ✎ opens the source post.">
-              {r.internal_manual_check.map((b, i) => (
+            {r.broken_internal_links.map((b, i) => {
+              const rowKey = `int-${i}-${b.from_id}-${b.to}`;
+              return (
                 <div key={i} className="text-sm mt-1 flex flex-col gap-0.5">
                   <div>
                     <span style={{ color: "var(--color-phosphor-dim)" }}>{b.from_title || b.from}</span>
                     {" → "}
-                    <a href={safeOrigin(b.from) + b.to} target="_blank" rel="noreferrer" style={{ color: "var(--color-hazard)" }}>{b.to}</a>
+                    <a href={safeOrigin(b.from) + b.to} target="_blank" rel="noreferrer" style={{ color: "var(--color-critical)" }}>{b.to}</a>
                     <WpEdit id={b.from_id} link={b.from} />
+                    {b.from_id && (
+                      <button
+                        className="btn btn--crit text-xs py-0.5 px-1 ml-2"
+                        onClick={() => handleStartPreview(rowKey, b.from_id!, "link", b.href || b.to)}
+                      >
+                        Remove
+                      </button>
+                    )}
+                    {b.href && b.href !== b.to && b.href !== safeOrigin(b.from) + b.to && (
+                      <span className="mono text-xs ml-2" style={{ color: "var(--color-muted)" }}>[raw: {b.href}]</span>
+                    )}
                   </div>
                   {b.reason && (
                     <div className="mono text-xs" style={{ color: "var(--color-muted)" }}>{b.reason}</div>
                   )}
-                </div>
-              ))}
-            </HealthList>
-          )}
 
-          <HealthList title="BROKEN EXTERNAL LINKS" count={r.broken_external_links.length} accent="var(--color-hazard)"
-            hint="HTTP 404/410. ✎ opens the source post in WordPress editor.">
-            {r.broken_external_links.map((b, i) => {
-              const src0 = b.from && b.from.length > 0 ? b.from[0] : null;
-              return (
-                <div key={i} className="text-sm mt-1">
-                  <span className="mono" style={{ color: "var(--color-critical)" }}>[{b.status}]</span>{" "}
-                  <a href={b.url} target="_blank" rel="noreferrer" style={{ color: "var(--color-phosphor)" }}>{b.url}</a>
-                  {src0 && <WpEdit id={src0.from_id} link={src0.from} />}
-                  {b.from && b.from.length > 1 && (
-                    <span className="mono text-xs ml-2" style={{ color: "var(--color-muted)" }}>({b.from.length} posts)</span>
+                  {activePreview && activePreview.key === rowKey && (
+                    <div className="mt-1.5 p-2 border border-edge bg-shade flex flex-col gap-1.5 rounded">
+                      <div className="mono text-xs font-bold" style={{ color: "var(--color-phosphor)" }}>
+                        FIX PREVIEW — Post #{activePreview.postId}
+                      </div>
+                      {activePreview.loading && <div className="mono text-xs" style={{ color: "var(--color-muted)" }}>Loading preview...</div>}
+                      {activePreview.error && <div className="mono text-xs" style={{ color: "var(--color-critical)" }}>{activePreview.error}</div>}
+                      {activePreview.applied && <div className="mono text-xs font-bold" style={{ color: "var(--color-go)" }}>✓ Removed from WP content! Re-scan to update report.</div>}
+                      {!activePreview.loading && !activePreview.applied && activePreview.data && (
+                        <>
+                          <div className="mono text-xs">Matches found in raw HTML: {activePreview.data.matches}</div>
+                          {activePreview.data.matches === 0 ? (
+                            <div className="mono text-xs" style={{ color: "var(--color-hazard)" }}>0 matches found in content.raw (may already be removed).</div>
+                          ) : (
+                            <div className="flex flex-col gap-1">
+                              <div className="mono text-xs text-muted">BEFORE:</div>
+                              <pre className="mono text-xs p-1.5 overflow-x-auto whitespace-pre-wrap" style={{ background: "rgba(255,0,0,0.1)", border: "1px solid var(--color-critical)" }}>
+                                {activePreview.data.before}
+                              </pre>
+                              <div className="mono text-xs text-muted">AFTER:</div>
+                              <pre className="mono text-xs p-1.5 overflow-x-auto whitespace-pre-wrap" style={{ background: "rgba(0,255,0,0.1)", border: "1px solid var(--color-go)" }}>
+                                {activePreview.data.after}
+                              </pre>
+                            </div>
+                          )}
+                          <div className="flex items-center gap-2 mt-1">
+                            <button
+                              className="btn btn--crit"
+                              disabled={activePreview.loading || activePreview.data.matches === 0}
+                              onClick={handleApplyFix}
+                            >
+                              CONFIRM REMOVE
+                            </button>
+                            <button className="btn" onClick={() => setActivePreview(null)}>CANCEL</button>
+                          </div>
+                        </>
+                      )}
+                    </div>
                   )}
                 </div>
               );
             })}
           </HealthList>
 
-          <HealthList title="MANUAL CHECK" count={r.manual_check.length} accent="var(--color-hazard)"
-            hint="blocked/timeout — verify by hand (NOT confirmed broken)">
+          {r.internal_manual_check && r.internal_manual_check.length > 0 && (
+            <HealthList
+              title="INTERNAL MANUAL CHECK"
+              count={r.internal_manual_check.filter((b) => showDismissed || !dismissed.includes(`intmc-${b.from}->${b.to}`)).length}
+              accent="var(--color-hazard)"
+              hint="internal links that returned 403/5xx/timeout — verify by hand. ✕ dismisses from view."
+              action={
+                dismissed.some((k) => k.startsWith("intmc-")) && (
+                  <button className="btn text-xs py-0.5 px-1.5" onClick={() => setShowDismissed((v) => !v)}>
+                    {showDismissed ? "Hide Dismissed" : "Show Dismissed"}
+                  </button>
+                )
+              }
+            >
+              {r.internal_manual_check.map((b, i) => {
+                const itemKey = `intmc-${b.from}->${b.to}`;
+                const isDismissed = dismissed.includes(itemKey);
+                if (isDismissed && !showDismissed) return null;
+                return (
+                  <div key={i} className="text-sm mt-1 flex flex-col gap-0.5" style={{ opacity: isDismissed ? 0.5 : 1 }}>
+                    <div>
+                      <span style={{ color: "var(--color-phosphor-dim)" }}>{b.from_title || b.from}</span>
+                      {" → "}
+                      <a href={safeOrigin(b.from) + b.to} target="_blank" rel="noreferrer" style={{ color: "var(--color-hazard)" }}>{b.to}</a>
+                      <WpEdit id={b.from_id} link={b.from} />
+                      <button
+                        className="mono font-bold text-xs ml-2 hover:text-white"
+                        style={{ color: "var(--color-muted)" }}
+                        title={isDismissed ? "Restore" : "Dismiss"}
+                        onClick={() => setDismissed((prev) => isDismissed ? prev.filter((k) => k !== itemKey) : [...prev, itemKey])}
+                      >
+                        {isDismissed ? "[Restore]" : "✕"}
+                      </button>
+                    </div>
+                    {b.reason && (
+                      <div className="mono text-xs" style={{ color: "var(--color-muted)" }}>{b.reason}</div>
+                    )}
+                  </div>
+                );
+              })}
+            </HealthList>
+          )}
+
+          <HealthList
+            title="BROKEN EXTERNAL LINKS"
+            count={r.broken_external_links.length}
+            accent="var(--color-hazard)"
+            hint="HTTP 404/410. ✎ opens the source post. Remove strips tag and keeps inner text."
+            action={
+              r.broken_external_links.length > 0 && (
+                <button
+                  className="btn btn--crit text-xs py-0.5 px-1.5"
+                  onClick={() => setBulkConfirmSection("external")}
+                >
+                  REMOVE ALL ({r.broken_external_links.length})
+                </button>
+              )
+            }
+          >
+            {bulkConfirmSection === "external" && (
+              <div className="p-2 border border-critical bg-shade flex flex-col gap-2 my-1">
+                <div className="mono text-xs font-bold" style={{ color: "var(--color-critical)" }}>
+                  CONFIRM BULK REMOVE ({r.broken_external_links.length} Broken External Links)
+                </div>
+                <div className="mono text-xs text-muted">
+                  Strips all matching broken external links across source posts, preserving inner text.
+                </div>
+                {bulkProgress && <div className="mono text-xs" style={{ color: "var(--color-signal)" }}>{bulkProgress}</div>}
+                <div className="flex gap-2">
+                  <button
+                    className="btn btn--crit"
+                    disabled={!!bulkProgress}
+                    onClick={async () => {
+                      setBulkProgress("Applying bulk removal...");
+                      const items: { post_id: number; kind: "link"; target: string }[] = [];
+                      for (const b of r.broken_external_links) {
+                        if (b.from && b.from.length > 0) {
+                          for (const f of b.from) {
+                            if (f.from_id) items.push({ post_id: f.from_id, kind: "link", target: b.url });
+                          }
+                        }
+                      }
+                      const res = await post<{ successful: number; total: number }>("/api/thailandnow/seo/apply-fix-bulk", { items });
+                      if (res.ok && res.data) {
+                        setBulkProgress(`Finished: ${res.data.successful} / ${res.data.total} successful. Re-scan to verify.`);
+                      } else {
+                        setBulkProgress(`Error: ${res.error || "failed"}`);
+                      }
+                    }}
+                  >
+                    CONFIRM BULK REMOVE
+                  </button>
+                  <button className="btn" onClick={() => { setBulkConfirmSection(null); setBulkProgress(null); }}>CANCEL</button>
+                </div>
+              </div>
+            )}
+
+            {r.broken_external_links.map((b, i) => {
+              const src0 = b.from && b.from.length > 0 ? b.from[0] : null;
+              const rowKey = `ext-${i}-${src0?.from_id}-${b.url}`;
+              return (
+                <div key={i} className="text-sm mt-1 flex flex-col gap-0.5">
+                  <div>
+                    <span className="mono" style={{ color: "var(--color-critical)" }}>[{b.status}]</span>{" "}
+                    <a href={b.url} target="_blank" rel="noreferrer" style={{ color: "var(--color-phosphor)" }}>{b.url}</a>
+                    {src0 && <WpEdit id={src0.from_id} link={src0.from} />}
+                    {src0?.from_id && (
+                      <button
+                        className="btn btn--crit text-xs py-0.5 px-1 ml-2"
+                        onClick={() => handleStartPreview(rowKey, src0.from_id!, "link", b.url)}
+                      >
+                        Remove
+                      </button>
+                    )}
+                    {b.from && b.from.length > 1 && (
+                      <span className="mono text-xs ml-2" style={{ color: "var(--color-muted)" }}>({b.from.length} posts)</span>
+                    )}
+                  </div>
+
+                  {activePreview && activePreview.key === rowKey && (
+                    <div className="mt-1.5 p-2 border border-edge bg-shade flex flex-col gap-1.5 rounded">
+                      <div className="mono text-xs font-bold" style={{ color: "var(--color-phosphor)" }}>
+                        FIX PREVIEW — Post #{activePreview.postId}
+                      </div>
+                      {activePreview.loading && <div className="mono text-xs" style={{ color: "var(--color-muted)" }}>Loading preview...</div>}
+                      {activePreview.error && <div className="mono text-xs" style={{ color: "var(--color-critical)" }}>{activePreview.error}</div>}
+                      {activePreview.applied && <div className="mono text-xs font-bold" style={{ color: "var(--color-go)" }}>✓ Removed from WP content! Re-scan to update report.</div>}
+                      {!activePreview.loading && !activePreview.applied && activePreview.data && (
+                        <>
+                          <div className="mono text-xs">Matches found in raw HTML: {activePreview.data.matches}</div>
+                          {activePreview.data.matches === 0 ? (
+                            <div className="mono text-xs" style={{ color: "var(--color-hazard)" }}>0 matches found in content.raw (may already be removed).</div>
+                          ) : (
+                            <div className="flex flex-col gap-1">
+                              <div className="mono text-xs text-muted">BEFORE:</div>
+                              <pre className="mono text-xs p-1.5 overflow-x-auto whitespace-pre-wrap" style={{ background: "rgba(255,0,0,0.1)", border: "1px solid var(--color-critical)" }}>
+                                {activePreview.data.before}
+                              </pre>
+                              <div className="mono text-xs text-muted">AFTER:</div>
+                              <pre className="mono text-xs p-1.5 overflow-x-auto whitespace-pre-wrap" style={{ background: "rgba(0,255,0,0.1)", border: "1px solid var(--color-go)" }}>
+                                {activePreview.data.after}
+                              </pre>
+                            </div>
+                          )}
+                          <div className="flex items-center gap-2 mt-1">
+                            <button
+                              className="btn btn--crit"
+                              disabled={activePreview.loading || activePreview.data.matches === 0}
+                              onClick={handleApplyFix}
+                            >
+                              CONFIRM REMOVE
+                            </button>
+                            <button className="btn" onClick={() => setActivePreview(null)}>CANCEL</button>
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </HealthList>
+
+          <HealthList
+            title="MANUAL CHECK"
+            count={r.manual_check.filter((m) => showDismissed || !dismissed.includes(`mc-${m.url}`)).length}
+            accent="var(--color-hazard)"
+            hint="blocked/timeout — verify by hand (NOT confirmed broken). ✕ dismisses from view."
+            action={
+              dismissed.some((k) => k.startsWith("mc-")) && (
+                <button className="btn text-xs py-0.5 px-1.5" onClick={() => setShowDismissed((v) => !v)}>
+                  {showDismissed ? "Hide Dismissed" : "Show Dismissed"}
+                </button>
+              )
+            }
+          >
             {r.manual_check.map((m, i) => {
+              const itemKey = `mc-${m.url}`;
+              const isDismissed = dismissed.includes(itemKey);
+              if (isDismissed && !showDismissed) return null;
               const src0 = m.from && m.from.length > 0 ? m.from[0] : null;
               return (
-                <div key={i} className="text-xs mt-1">
+                <div key={i} className="text-xs mt-1" style={{ opacity: isDismissed ? 0.5 : 1 }}>
                   <a href={m.url} target="_blank" rel="noreferrer" style={{ color: "var(--color-phosphor-dim)" }}>{m.url}</a>
                   {" "}
                   <span className="mono" style={{ color: "var(--color-muted)" }}>({m.reason})</span>
                   {src0 && <WpEdit id={src0.from_id} link={src0.from} />}
+                  <button
+                    className="mono font-bold text-xs ml-2 hover:text-white"
+                    style={{ color: "var(--color-muted)" }}
+                    title={isDismissed ? "Restore" : "Dismiss"}
+                    onClick={() => setDismissed((prev) => isDismissed ? prev.filter((k) => k !== itemKey) : [...prev, itemKey])}
+                  >
+                    {isDismissed ? "[Restore]" : "✕"}
+                  </button>
                   {m.from && m.from.length > 1 && (
                     <span className="mono text-xs ml-2" style={{ color: "var(--color-muted)" }}>({m.from.length} posts)</span>
                   )}
@@ -423,28 +713,152 @@ function HealthSubTab() {
             })}
           </HealthList>
 
-          <HealthList title="BROKEN IMAGES" count={r.broken_internal_images.length} accent="var(--color-hazard)"
-            hint="HTTP-confirmed missing (404/410) — crop/variant false-positives already filtered out.">
-            {r.broken_internal_images.map((b, i) => (
-              <div key={i} className="text-xs mt-1">
-                <span className="mono" style={{ color: "var(--color-critical)" }}>[{b.status}]</span>{" "}
-                <a href={b.src} target="_blank" rel="noreferrer" style={{ color: "var(--color-critical)" }}>{b.src}</a>
-                <span className="mono text-xs" style={{ color: "var(--color-muted)" }}> in {b.from_title}</span>
-                <WpEdit id={b.from_id} link={b.from} />
+          <HealthList
+            title="BROKEN IMAGES"
+            count={r.broken_internal_images.length}
+            accent="var(--color-hazard)"
+            hint="HTTP-confirmed missing (404/410). Remove drops img tag entirely."
+            action={
+              r.broken_internal_images.length > 0 && (
+                <button
+                  className="btn btn--crit text-xs py-0.5 px-1.5"
+                  onClick={() => setBulkConfirmSection("images")}
+                >
+                  REMOVE ALL ({r.broken_internal_images.length})
+                </button>
+              )
+            }
+          >
+            {bulkConfirmSection === "images" && (
+              <div className="p-2 border border-critical bg-shade flex flex-col gap-2 my-1">
+                <div className="mono text-xs font-bold" style={{ color: "var(--color-critical)" }}>
+                  CONFIRM BULK REMOVE ({r.broken_internal_images.length} Broken Images)
+                </div>
+                <div className="mono text-xs text-muted">
+                  Drops all matching broken img tags across source posts.
+                </div>
+                {bulkProgress && <div className="mono text-xs" style={{ color: "var(--color-signal)" }}>{bulkProgress}</div>}
+                <div className="flex gap-2">
+                  <button
+                    className="btn btn--crit"
+                    disabled={!!bulkProgress}
+                    onClick={async () => {
+                      setBulkProgress("Applying bulk removal...");
+                      const items = r.broken_internal_images
+                        .filter((b) => b.from_id)
+                        .map((b) => ({ post_id: b.from_id!, kind: "image" as const, target: b.src }));
+                      const res = await post<{ successful: number; total: number }>("/api/thailandnow/seo/apply-fix-bulk", { items });
+                      if (res.ok && res.data) {
+                        setBulkProgress(`Finished: ${res.data.successful} / ${res.data.total} successful. Re-scan to verify.`);
+                      } else {
+                        setBulkProgress(`Error: ${res.error || "failed"}`);
+                      }
+                    }}
+                  >
+                    CONFIRM BULK REMOVE
+                  </button>
+                  <button className="btn" onClick={() => { setBulkConfirmSection(null); setBulkProgress(null); }}>CANCEL</button>
+                </div>
               </div>
-            ))}
+            )}
+
+            {r.broken_internal_images.map((b, i) => {
+              const rowKey = `img-${i}-${b.from_id}-${b.src}`;
+              return (
+                <div key={i} className="text-xs mt-1 flex flex-col gap-0.5">
+                  <div>
+                    <span className="mono" style={{ color: "var(--color-critical)" }}>[{b.status}]</span>{" "}
+                    <a href={b.src} target="_blank" rel="noreferrer" style={{ color: "var(--color-critical)" }}>{b.src}</a>
+                    <span className="mono text-xs" style={{ color: "var(--color-muted)" }}> in {b.from_title}</span>
+                    <WpEdit id={b.from_id} link={b.from} />
+                    {b.from_id && (
+                      <button
+                        className="btn btn--crit text-xs py-0.5 px-1 ml-2"
+                        onClick={() => handleStartPreview(rowKey, b.from_id!, "image", b.src)}
+                      >
+                        Remove
+                      </button>
+                    )}
+                  </div>
+
+                  {activePreview && activePreview.key === rowKey && (
+                    <div className="mt-1.5 p-2 border border-edge bg-shade flex flex-col gap-1.5 rounded">
+                      <div className="mono text-xs font-bold" style={{ color: "var(--color-phosphor)" }}>
+                        FIX PREVIEW — Post #{activePreview.postId}
+                      </div>
+                      {activePreview.loading && <div className="mono text-xs" style={{ color: "var(--color-muted)" }}>Loading preview...</div>}
+                      {activePreview.error && <div className="mono text-xs" style={{ color: "var(--color-critical)" }}>{activePreview.error}</div>}
+                      {activePreview.applied && <div className="mono text-xs font-bold" style={{ color: "var(--color-go)" }}>✓ Removed from WP content! Re-scan to update report.</div>}
+                      {!activePreview.loading && !activePreview.applied && activePreview.data && (
+                        <>
+                          <div className="mono text-xs">Matches found in raw HTML: {activePreview.data.matches}</div>
+                          {activePreview.data.matches === 0 ? (
+                            <div className="mono text-xs" style={{ color: "var(--color-hazard)" }}>0 matches found in content.raw (may already be removed).</div>
+                          ) : (
+                            <div className="flex flex-col gap-1">
+                              <div className="mono text-xs text-muted">BEFORE:</div>
+                              <pre className="mono text-xs p-1.5 overflow-x-auto whitespace-pre-wrap" style={{ background: "rgba(255,0,0,0.1)", border: "1px solid var(--color-critical)" }}>
+                                {activePreview.data.before}
+                              </pre>
+                              <div className="mono text-xs text-muted">AFTER:</div>
+                              <pre className="mono text-xs p-1.5 overflow-x-auto whitespace-pre-wrap" style={{ background: "rgba(0,255,0,0.1)", border: "1px solid var(--color-go)" }}>
+                                {activePreview.data.after}
+                              </pre>
+                            </div>
+                          )}
+                          <div className="flex items-center gap-2 mt-1">
+                            <button
+                              className="btn btn--crit"
+                              disabled={activePreview.loading || activePreview.data.matches === 0}
+                              onClick={handleApplyFix}
+                            >
+                              CONFIRM REMOVE
+                            </button>
+                            <button className="btn" onClick={() => setActivePreview(null)}>CANCEL</button>
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
           </HealthList>
 
-          <HealthList title="IMAGE MANUAL CHECK" count={(r.image_manual_check ?? []).length} accent="var(--color-hazard)"
-            hint="image probe blocked/timeout — verify by hand (NOT confirmed broken)">
-            {(r.image_manual_check ?? []).map((m, i) => (
-              <div key={i} className="text-xs mt-1">
-                <a href={m.src} target="_blank" rel="noreferrer" style={{ color: "var(--color-phosphor-dim)" }}>{m.src}</a>
-                {" "}
-                <span className="mono" style={{ color: "var(--color-muted)" }}>({m.reason})</span>
-                <WpEdit id={m.from_id} link={m.from} />
-              </div>
-            ))}
+          <HealthList
+            title="IMAGE MANUAL CHECK"
+            count={(r.image_manual_check ?? []).filter((m) => showDismissed || !dismissed.includes(`imgmc-${m.src}`)).length}
+            accent="var(--color-hazard)"
+            hint="image probe blocked/timeout — verify by hand (NOT confirmed broken). ✕ dismisses from view."
+            action={
+              dismissed.some((k) => k.startsWith("imgmc-")) && (
+                <button className="btn text-xs py-0.5 px-1.5" onClick={() => setShowDismissed((v) => !v)}>
+                  {showDismissed ? "Hide Dismissed" : "Show Dismissed"}
+                </button>
+              )
+            }
+          >
+            {(r.image_manual_check ?? []).map((m, i) => {
+              const itemKey = `imgmc-${m.src}`;
+              const isDismissed = dismissed.includes(itemKey);
+              if (isDismissed && !showDismissed) return null;
+              return (
+                <div key={i} className="text-xs mt-1" style={{ opacity: isDismissed ? 0.5 : 1 }}>
+                  <a href={m.src} target="_blank" rel="noreferrer" style={{ color: "var(--color-phosphor-dim)" }}>{m.src}</a>
+                  {" "}
+                  <span className="mono" style={{ color: "var(--color-muted)" }}>({m.reason})</span>
+                  <WpEdit id={m.from_id} link={m.from} />
+                  <button
+                    className="mono font-bold text-xs ml-2 hover:text-white"
+                    style={{ color: "var(--color-muted)" }}
+                    title={isDismissed ? "Restore" : "Dismiss"}
+                    onClick={() => setDismissed((prev) => isDismissed ? prev.filter((k) => k !== itemKey) : [...prev, itemKey])}
+                  >
+                    {isDismissed ? "[Restore]" : "✕"}
+                  </button>
+                </div>
+              );
+            })}
           </HealthList>
         </div>
       ) : (
