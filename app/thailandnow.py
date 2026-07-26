@@ -1329,45 +1329,109 @@ def _archive_folder_id() -> str:
     )
 
 
+def _archive_union(doc_lists: list[list[dict]]) -> list[dict]:
+    """Dedupe Docs by id (a Doc can have >1 parent), sort newest-first by
+    modifiedTime. Pure — no I/O — so the __main__ self-check can assert it."""
+    seen: set[str] = set()
+    out: list[dict] = []
+    for docs in doc_lists:
+        for d in docs:
+            doc_id = d.get("id", "")
+            if doc_id and doc_id not in seen:
+                seen.add(doc_id)
+                out.append(d)
+    out.sort(key=lambda d: d.get("modifiedTime", ""), reverse=True)
+    return out
+
+
 async def _drive_list_event_docs(token: str) -> list[dict]:
-    """List the Event Drive's Google Docs (newest first), paginating on
-    nextPageToken, 90s-TTL-cached. Returns [{id,name,modifiedTime,webViewLink}].
-    The Drive ``q`` is passed via httpx params= (folder id folded into the q
-    value, never the URL)."""
+    """List the Event Drive's Google Docs (newest first), recursively walking
+    subfolders up to depth 5, paginating on nextPageToken, 90s-TTL-cached.
+    Returns [{id,name,modifiedTime,webViewLink,folderName}]."""
     global _ARCHIVE_LIST_CACHE, _ARCHIVE_LIST_CACHE_AT
     if _ARCHIVE_LIST_CACHE is not None and \
             (time.monotonic() - _ARCHIVE_LIST_CACHE_AT) < _ARCHIVE_LIST_TTL_S:
         return _ARCHIVE_LIST_CACHE
     folder = _archive_folder_id()
     hdr = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-    out: list[dict] = []
-    page_token: str | None = None
+
+    doc_lists: list[list[dict]] = []
+
     async with httpx.AsyncClient(timeout=30) as c:
-        while True:
-            params = {
-                "q": f"'{folder}' in parents and "
-                "mimeType='application/vnd.google-apps.document' and trashed=false",
-                "fields": "files(id,name,modifiedTime,webViewLink),nextPageToken",
-                "orderBy": "modifiedTime desc",
-                "pageSize": 200,
-                "supportsAllDrives": "true",
-            }
-            if page_token:
-                params["pageToken"] = page_token
-            r = await c.get("https://www.googleapis.com/drive/v3/files",
-                            headers=hdr, params=params)
-            if r.status_code != 200:
-                raise HTTPException(502, f"Drive list failed: {r.status_code} {r.text[:200]}")
-            data = r.json()
-            for f in data.get("files", []):
-                out.append({
-                    "id": f.get("id", ""), "name": f.get("name", ""),
-                    "modifiedTime": f.get("modifiedTime", ""),
-                    "webViewLink": f.get("webViewLink", ""),
-                })
-            page_token = data.get("nextPageToken")
-            if not page_token:
-                break
+        root_name = ""
+        r_root = await c.get(
+            f"https://www.googleapis.com/drive/v3/files/{folder}",
+            headers=hdr, params={"fields": "name", "supportsAllDrives": "true"},
+        )
+        if r_root.status_code == 200:
+            root_name = r_root.json().get("name", "")
+
+        folder_queue: list[tuple[str, str, int]] = [(folder, root_name, 0)]
+
+        while folder_queue:
+            cur_folder_id, cur_folder_name, depth = folder_queue.pop(0)
+
+            # 1. Fetch Docs in cur_folder_id
+            cur_docs: list[dict] = []
+            page_token: str | None = None
+            while True:
+                params = {
+                    "q": f"'{cur_folder_id}' in parents and "
+                    "mimeType='application/vnd.google-apps.document' and trashed=false",
+                    "fields": "files(id,name,modifiedTime,webViewLink),nextPageToken",
+                    "orderBy": "modifiedTime desc",
+                    "pageSize": 200,
+                    "supportsAllDrives": "true",
+                }
+                if page_token:
+                    params["pageToken"] = page_token
+                r = await c.get("https://www.googleapis.com/drive/v3/files",
+                                headers=hdr, params=params)
+                if r.status_code != 200:
+                    raise HTTPException(502, f"Drive list failed: {r.status_code} {r.text[:200]}")
+                data = r.json()
+                for f in data.get("files", []):
+                    cur_docs.append({
+                        "id": f.get("id", ""), "name": f.get("name", ""),
+                        "modifiedTime": f.get("modifiedTime", ""),
+                        "webViewLink": f.get("webViewLink", ""),
+                        "folderName": cur_folder_name,
+                    })
+                page_token = data.get("nextPageToken")
+                if not page_token:
+                    break
+
+            if cur_docs:
+                doc_lists.append(cur_docs)
+
+            # 2. Fetch child subfolders if depth < 5
+            if depth < 5:
+                sub_token: str | None = None
+                while True:
+                    sub_params = {
+                        "q": f"'{cur_folder_id}' in parents and "
+                        "mimeType='application/vnd.google-apps.folder' and trashed=false",
+                        "fields": "files(id,name),nextPageToken",
+                        "pageSize": 200,
+                        "supportsAllDrives": "true",
+                    }
+                    if sub_token:
+                        sub_params["pageToken"] = sub_token
+                    r_sub = await c.get("https://www.googleapis.com/drive/v3/files",
+                                        headers=hdr, params=sub_params)
+                    if r_sub.status_code != 200:
+                        raise HTTPException(502, f"Drive subfolder list failed: {r_sub.status_code} {r_sub.text[:200]}")
+                    sub_data = r_sub.json()
+                    for sf in sub_data.get("files", []):
+                        sf_id = sf.get("id")
+                        sf_name = sf.get("name", "")
+                        if sf_id:
+                            folder_queue.append((sf_id, sf_name, depth + 1))
+                    sub_token = sub_data.get("nextPageToken")
+                    if not sub_token:
+                        break
+
+    out = _archive_union(doc_lists)
     _ARCHIVE_LIST_CACHE = out
     _ARCHIVE_LIST_CACHE_AT = time.monotonic()
     return out
@@ -2453,4 +2517,11 @@ if __name__ == "__main__":
     assert _archive_is_detail("when is Songkran?") is True
     assert _archive_is_detail("where is it held") is True
     assert _archive_is_detail("Songkran") is False, "bare event name not detail"
-    print("OK archive: tokenize + title score + presence/detail classify")
+    # recursion union: dedupe by id, sort newest-first
+    _dupe_a = [{"id":"1","name":"A","modifiedTime":"2026-07-01T00:00:00Z"},
+               {"id":"1","name":"A","modifiedTime":"2026-07-01T00:00:00Z"}]   # same doc, 2 parents
+    _dupe_b = [{"id":"2","name":"B","modifiedTime":"2026-07-05T00:00:00Z"}]
+    _u = _archive_union([_dupe_a, _dupe_b])
+    assert len(_u) == 2, "dedupe by id failed"
+    assert _u[0]["id"] == "2", "newest-first sort failed (B is later than A)"
+    print("OK archive: tokenize + title score + presence/detail classify + recursive union")

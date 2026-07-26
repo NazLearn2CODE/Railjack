@@ -60,7 +60,7 @@ modules:
       gem_path: app/gems/event-publicity.md                     # read fresh each /events/publicize call
       notebooklm_notebook_id: ""                                # R6: DEEP RESEARCH notebook (created + cached on first use)
       archive_gem_path: app/gems/event-archive-qa.md            # Stage 2: source-only Q&A gem
-      # archive_folder_id: <override>                           # optional; defaults to the tian desk's drive_folder_id
+      archive_folder_id: 1MVYNNOaev_0P972YbwM01XGGLWPBP1vJ   # wider comprehensive Event archive (was: tian desk's event-docs folder)
       # --- SEO HEALTH (read-only link/image/orphan report) ---
       wordpress_url: https://www.thailandnow.in.th   # override of WORDPRESS_URL; user/password stay in ~/n8n/.secrets.env
       seo_media_cache_ttl_s: 86400                     # media library (~5750) pulled once/day
