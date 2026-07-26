@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { fetchJSON, usePolling } from "../api";
 import type { ModuleConfig } from "../store";
 import { marked } from "marked"; // NEW: Added marked import
@@ -100,6 +100,20 @@ interface ArchiveMsg {
   reply: ArchiveReply;
 }
 
+// SEO HEALTH report (THAILAND NOW → SEO tab → HEALTH)
+interface HealthSuggestion { link: string; title: string }
+interface HealthOrphan { link: string; title: string; suggested: HealthSuggestion[] }
+interface HealthReport {
+  post_count: number; page_count: number; event_count: number; valid_paths: number;
+  broken_internal_links: { from: string; from_title: string; to: string }[];
+  broken_internal_images: { from: string; from_title: string; src: string }[];
+  orphans: HealthOrphan[];
+  external_links: string[]; external_imgs: string[];
+  broken_external_links: { url: string; status: number }[];
+  manual_check: { url: string; status?: number; reason: string }[];
+  external_checked: number; at: string;
+}
+
 async function post<T>(url: string, body: unknown): Promise<{ ok: boolean; data?: T; error?: string }> {
   const res = await fetch(url, { method: "POST", headers: CT, body: JSON.stringify(body) });
   if (!res.ok) {
@@ -148,8 +162,209 @@ function usePersistentState<T>(key: string, initial: T) {
   return [state, setState] as const;
 }
 
+// --- SEO sub-module (HEALTH: read-only link/image/orphan report) ----------------
+// Phase 1 = detect-only. Mode-toggle idiom (cf. EventsTab SCOUT/DEEP); HEALTH is
+// the first SEO sub-tab. Async scan rides /api/thailandnow/jobs (kind=seo-health)
+// exactly like EVENTS DEEP: SCAN → poll → CANCEL → on done fetch /seo/report/{id}.
+
+function SeoTab() {
+  const [sub, setSub] = usePersistentState<"health">("tn.seo.tab", "health");
+  return (
+    <>
+      <div className="flex items-center gap-2 mb-2">
+        <button className={`btn ${sub === "health" ? "btn--signal" : ""}`} onClick={() => setSub("health")}>
+          HEALTH
+        </button>
+        <span className="mono" style={{ color: "var(--color-muted)" }}>
+          read-only link/image/orphan report — Phase 1 (detect); fixes are Phase 2
+        </span>
+      </div>
+      {sub === "health" && <HealthSubTab />}
+    </>
+  );
+}
+
+function healthCopyText(r: HealthReport): string {
+  const L: string[] = [];
+  L.push(`THAILAND NOW — SEO HEALTH report (${r.at})`);
+  L.push(`Scanned ${r.post_count} posts / ${r.page_count} pages / ${r.event_count} events · ${r.external_checked} external links checked`);
+  L.push("");
+  L.push(`ORPHAN ARTICLES (${r.orphans.length}) — zero inbound internal links:`);
+  for (const o of r.orphans) {
+    L.push(`- ${o.title} — ${o.link}`);
+    for (const s of o.suggested) L.push(`    suggest: ${s.title} — ${s.link}`);
+  }
+  L.push("");
+  L.push(`BROKEN INTERNAL LINKS (${r.broken_internal_links.length}):`);
+  for (const b of r.broken_internal_links) L.push(`- ${b.from_title} -> ${b.to}`);
+  L.push("");
+  L.push(`BROKEN EXTERNAL LINKS (${r.broken_external_links.length}):`);
+  for (const b of r.broken_external_links) L.push(`- [${b.status}] ${b.url}`);
+  L.push("");
+  L.push(`MANUAL CHECK (${r.manual_check.length}) — blocked/timeout, verify by hand:`);
+  for (const m of r.manual_check) L.push(`- ${m.url} (${m.reason})`);
+  L.push("");
+  L.push(`BROKEN IMAGES (${r.broken_internal_images.length}):`);
+  for (const b of r.broken_internal_images) L.push(`- ${b.src}  (in: ${b.from_title})`);
+  return L.join("\n");
+}
+
+function HealthList({ title, count, accent, hint, children }: {
+  title: string; count: number; accent: string; hint?: string; children: ReactNode;
+}) {
+  return (
+    <div className="border border-edge bg-void p-2">
+      <div className="label" style={{ color: accent }}>{title} ({count})</div>
+      {hint && <div className="mono text-xs" style={{ color: "var(--color-muted)" }}>{hint}</div>}
+      {children}
+    </div>
+  );
+}
+
+const HEALTH_CAP = 25;
+
+function HealthSubTab() {
+  const [report, setReport] = usePersistentState<HealthReport | null>("tn.seo.health.report", null);
+  const [err, setErr] = useState<string | null>(null);
+  const { data: jobsData, refetch: refetchJobs } = usePolling<{ jobs: TnJob[] }>(
+    "/api/thailandnow/jobs", 1500,
+  );
+  const jobs = jobsData?.jobs ?? [];
+  const scanJob = jobs.find((j) => j.kind === "seo-health") ?? null;
+  const scanning = !!scanJob && (scanJob.status === "queued" || scanJob.status === "running");
+
+  const startScan = useCallback(async () => {
+    setErr(null);
+    const r = await post<{ id: string }>("/api/thailandnow/seo/scan", {});
+    if (!r.ok) { setErr(r.error ?? "SCAN failed to start"); return; }
+    await refetchJobs();
+  }, [refetchJobs]);
+
+  // on a seo-health job flipping to done, fetch the report once
+  const prevDone = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    const doneIds = new Set(jobs.filter((j) => j.status === "done").map((j) => j.id));
+    const newly = jobs.filter((j) => doneIds.has(j.id) && !prevDone.current.has(j.id));
+    prevDone.current = doneIds;
+    for (const j of newly) {
+      if (j.kind !== "seo-health") continue;
+      fetchJSON<HealthReport>(`/api/thailandnow/seo/report/${j.id}`)
+        .then(setReport)
+        .catch(() => setErr("failed to fetch the report"));
+    }
+  }, [jobs, setReport]);
+
+  const r = report;
+  const more = (n: number) =>
+    n > HEALTH_CAP ? <div className="mono text-xs mt-1" style={{ color: "var(--color-muted)" }}>+{n - HEALTH_CAP} more (COPY for the full list)</div> : null;
+
+  return (
+    <section className="hud hud--bracket reveal reveal-1 p-3 flex flex-col gap-2">
+      <div className="flex flex-wrap items-center gap-2">
+        <button className="btn btn--signal" disabled={scanning} onClick={startScan}>
+          {scanning ? "SCANNING…" : "SCAN"}
+        </button>
+        {scanJob && (
+          <div className="flex items-center gap-2">
+            <span className="pip" style={{
+              background: scanJob.status === "error" ? "var(--color-critical)"
+                : scanJob.status === "done" ? "var(--color-go)" : "var(--color-signal)",
+            }} />
+            <span className="mono">{scanJob.status.toUpperCase()} · {scanJob.progress}%</span>
+            {scanning && (
+              <button className="btn btn--crit" onClick={() =>
+                fetchJSON(`/api/thailandnow/jobs/${scanJob.id}/cancel`, { method: "POST" }).catch(() => {})
+              }>CANCEL</button>
+            )}
+          </div>
+        )}
+        {r && (
+          <button className="btn" onClick={() => navigator.clipboard.writeText(healthCopyText(r)).catch(() => {})}>
+            COPY
+          </button>
+        )}
+        <span className="mono" style={{ color: "var(--color-muted)" }}>
+          pulls posts+media via authed WP REST, HTTP-checks external links — ~1-2 min
+        </span>
+      </div>
+
+      {err && <div className="mono" style={{ color: "var(--color-critical)" }}>{err}</div>}
+      {scanJob?.status === "error" && (
+        <div className="mono" style={{ color: "var(--color-critical)" }}>scan failed: {scanJob.error}</div>
+      )}
+
+      {r ? (
+        <div className="flex flex-col gap-2">
+          <div className="mono" style={{ color: "var(--color-muted)" }}>
+            {r.post_count} posts / {r.page_count} pages / {r.event_count} events · {r.external_checked} external checked · {r.at}
+          </div>
+
+          <HealthList title="ORPHAN ARTICLES" count={r.orphans.length} accent="var(--color-critical)"
+            hint="zero inbound internal links — the SEO priority">
+            {r.orphans.slice(0, HEALTH_CAP).map((o) => (
+              <div key={o.link} className="text-sm mt-1">
+                <a href={o.link} target="_blank" rel="noreferrer" style={{ color: "var(--color-phosphor)" }}>{o.title || o.link}</a>
+                {o.suggested.length > 0 && (
+                  <span className="mono text-xs" style={{ color: "var(--color-muted)" }}>
+                    {" — suggest: "}{o.suggested.map((s) => s.title).join(" · ")}
+                  </span>
+                )}
+              </div>
+            ))}
+            {more(r.orphans.length)}
+          </HealthList>
+
+          <HealthList title="BROKEN INTERNAL LINKS" count={r.broken_internal_links.length} accent="var(--color-hazard)">
+            {r.broken_internal_links.slice(0, HEALTH_CAP).map((b, i) => (
+              <div key={i} className="text-sm mt-1">
+                <span style={{ color: "var(--color-phosphor-dim)" }}>{b.from_title || b.from}</span>
+                {" → "}
+                <a href={b.to} target="_blank" rel="noreferrer" style={{ color: "var(--color-critical)" }}>{b.to}</a>
+              </div>
+            ))}
+            {more(r.broken_internal_links.length)}
+          </HealthList>
+
+          <HealthList title="BROKEN EXTERNAL LINKS" count={r.broken_external_links.length} accent="var(--color-hazard)">
+            {r.broken_external_links.slice(0, HEALTH_CAP).map((b, i) => (
+              <div key={i} className="text-sm mt-1">
+                <span className="mono" style={{ color: "var(--color-critical)" }}>[{b.status}]</span>{" "}
+                <a href={b.url} target="_blank" rel="noreferrer" style={{ color: "var(--color-phosphor)" }}>{b.url}</a>
+              </div>
+            ))}
+            {more(r.broken_external_links.length)}
+          </HealthList>
+
+          <HealthList title="MANUAL CHECK" count={r.manual_check.length} accent="var(--color-hazard)"
+            hint="blocked/timeout — verify by hand (NOT confirmed broken)">
+            {r.manual_check.slice(0, HEALTH_CAP).map((m, i) => (
+              <div key={i} className="text-xs mt-1">
+                <a href={m.url} target="_blank" rel="noreferrer" style={{ color: "var(--color-phosphor-dim)" }}>{m.url}</a>
+                {" "}
+                <span className="mono" style={{ color: "var(--color-muted)" }}>({m.reason})</span>
+              </div>
+            ))}
+          </HealthList>
+
+          <HealthList title="BROKEN IMAGES" count={r.broken_internal_images.length} accent="var(--color-hazard)"
+            hint="internal image src not in the media library (may include WP edit-variant noise)">
+            {r.broken_internal_images.slice(0, HEALTH_CAP).map((b, i) => (
+              <div key={i} className="text-xs mt-1">
+                <a href={b.src} target="_blank" rel="noreferrer" style={{ color: "var(--color-critical)" }}>{b.src}</a>
+              </div>
+            ))}
+            {more(r.broken_internal_images.length)}
+          </HealthList>
+        </div>
+      ) : (
+        !scanning && <div className="mono" style={{ color: "var(--color-muted)" }}>press SCAN to run a health report</div>
+      )}
+    </section>
+  );
+}
+
 export default function ThailandNowPanel({ module: _module }: { module: ModuleConfig }) {
-  const [tab, setTab] = useState<"writers" | "events"| "archive">("writers"); // MODIFIED
+  const [tab, setTab] = useState<"writers" | "events" | "archive" | "seo">("writers");
   const { data, error } = usePolling<DesksResp>("/api/thailandnow/desks", 15000);
 
   return (
@@ -173,6 +388,12 @@ export default function ThailandNowPanel({ module: _module }: { module: ModuleCo
         >
           ARCHIVE
         </button>
+        <button
+          className={`btn btn--compact ${tab === "seo" ? "btn--signal" : ""}`}
+          onClick={() => setTab("seo")}
+        >
+          SEO
+        </button>
       </div>
 
       {tab === "writers" && (
@@ -180,6 +401,7 @@ export default function ThailandNowPanel({ module: _module }: { module: ModuleCo
       )}
       {tab === "events" && <EventsTab />}
       {tab === "archive" && <ArchiveTab />} {/* NEW: ArchiveTab render */}
+      {tab === "seo" && <SeoTab />}
     </div>
   );
 }

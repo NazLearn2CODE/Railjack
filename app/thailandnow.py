@@ -70,6 +70,7 @@ class TnJob:
     logs: deque = field(default_factory=lambda: deque(maxlen=200))
     proc: asyncio.subprocess.Process | None = field(default=None, repr=False)
     cancel: bool = False
+    result: dict | None = None  # SEO HEALTH report (NOT in to_dict; fetch via /seo/report/{id})
 
     def to_dict(self) -> dict:
         return {
@@ -1853,6 +1854,92 @@ def _seo_internal_report(
         "external_links": sorted({u for it in all_items for u in it["external_links"]}),
         "external_imgs": sorted({u for it in all_items for u in it["external_imgs"]}),
     }
+
+
+async def _flow_seo_health(job: "TnJob") -> None:
+    """HEALTH scan: fetch WP content → internal report → orphan suggestions →
+    external HTTP checks → assemble the full report into ``job.result``. Honours
+    ``job.cancel`` between phases + between external-check batches (raises
+    _TnCancelled). Rides the shared TnJob store (kind=seo-health)."""
+    job.progress = 5
+    posts, pages, events, media, extra = await _seo_fetch_all()
+    if job.cancel:
+        raise _TnCancelled()
+    job.progress = 25
+    rep = _seo_internal_report(posts, pages, events, media, extra, _wp_site_host())
+    job.progress = 40
+    # orphan suggestions: top-3 by title-token overlap (exclude the orphan itself)
+    titles = [(p.get("link", ""), (p.get("title") or {}).get("rendered", ""))
+              for p in (posts + events) if p.get("link")]
+    for o in rep["orphans"]:
+        cands = [(l, t) for (l, t) in titles if l != o["link"]]
+        o["suggested"] = _seo_suggest(o["title"], cands, n=3)
+    job.progress = 50
+    # external HTTP checks (links + images) — polite, bounded concurrency.
+    ext = sorted(set(rep["external_links"]) | set(rep["external_imgs"]))
+    conc = max(1, int(_opts().get("seo_external_concurrency", 8)))
+    timeout = float(_opts().get("seo_external_timeout_s", 10))
+    broken_external: list[dict] = []
+    manual_check: list[dict] = []
+    if ext:
+        sem = asyncio.Semaphore(conc)
+        ua = "Mozilla/5.0 (compatible; RailjackSEOBot/1.0)"
+
+        async def check_one(url: str) -> None:
+            async with sem:
+                try:
+                    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as c:
+                        r = await c.head(url, headers={"User-Agent": ua})
+                        if r.status_code == 405:  # some hosts reject HEAD → fall back to GET
+                            r = await c.get(url, headers={"User-Agent": ua})
+                    code = r.status_code
+                except (httpx.HTTPError, OSError):
+                    manual_check.append({"url": url, "reason": "timeout/error"})
+                    return
+                if code in (404, 410):
+                    broken_external.append({"url": url, "status": code})
+                elif code >= 400:
+                    manual_check.append({"url": url, "status": code, "reason": "client-error/blocked"})
+                # 2xx/3xx → ok (no record)
+
+        tasks = [asyncio.create_task(check_one(u)) for u in ext]
+        for i, fut in enumerate(asyncio.as_completed(tasks), 1):
+            await fut
+            if i % conc == 0:
+                job.progress = min(90, 50 + int(40 * i / len(ext)))
+                if job.cancel:
+                    for t in tasks:
+                        t.cancel()
+                    raise _TnCancelled()
+    job.progress = 95
+    job.result = {
+        **rep,
+        "broken_external_links": broken_external,
+        "manual_check": manual_check,
+        "external_checked": len(ext),
+        "at": datetime.now().isoformat(timespec="seconds"),
+    }
+
+
+@router.post("/api/thailandnow/seo/scan")
+async def seo_scan():
+    """HEALTH scan — kick off an async ``seo-health`` job. 409 if one is already
+    running (single-flight). Returns ``{id}``; poll ``/api/thailandnow/jobs`` +
+    fetch the report via ``/api/thailandnow/seo/report/{id}`` when done."""
+    if any(j.kind == "seo-health" and j.status in _TN_RUNNING for j in _TN_JOBS.values()):
+        raise HTTPException(409, "an SEO HEALTH scan is already running")
+    return _tn_spawn("seo-health", "SEO HEALTH scan", _flow_seo_health)
+
+
+@router.get("/api/thailandnow/seo/report/{jid}")
+async def seo_report(jid: str):
+    """Finished HEALTH report for a job (404 no such job; 409 not done yet)."""
+    job = _TN_JOBS.get(jid)
+    if not job or job.kind != "seo-health":
+        raise HTTPException(404, "no such SEO HEALTH job")
+    if job.status != "done":
+        raise HTTPException(409, f"job is {job.status}; not ready")
+    return job.result
 
 
 if __name__ == "__main__":
