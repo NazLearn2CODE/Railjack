@@ -101,17 +101,19 @@ interface ArchiveMsg {
 }
 
 // SEO HEALTH report (THAILAND NOW → SEO tab → HEALTH)
+interface HealthSource { from: string; from_id?: number; from_title?: string }
 interface HealthSuggestion { link: string; title: string }
 interface HealthOrphan { id?: number; link: string; title: string; suggested: HealthSuggestion[] }
 interface HealthReport {
-  post_count: number; page_count: number; event_count: number; valid_paths: number;
-  broken_internal_links: { from: string; from_id?: number; from_title: string; to: string }[];
+  post_count: number; page_count: number; event_count: number; other_cpt_count?: number; valid_paths: number;
+  broken_internal_links: { from: string; from_id?: number; from_title: string; to: string; href?: string; reason?: string }[];
+  internal_manual_check?: { from: string; from_id?: number; from_title: string; to: string; href?: string; reason?: string }[];
   broken_internal_images: { from: string; from_id?: number; from_title: string; src: string; status?: number }[];
   image_manual_check: { from: string; from_id?: number; from_title: string; src: string; status?: number; reason: string }[];
   orphans: HealthOrphan[];
   external_links: string[]; external_imgs: string[];
-  broken_external_links: { url: string; status: number }[];
-  manual_check: { url: string; status?: number; reason: string }[];
+  broken_external_links: { url: string; status: number; from?: HealthSource[] }[];
+  manual_check: { url: string; status?: number; reason: string; from?: HealthSource[] }[];
   external_checked: number; at: string;
 }
 
@@ -130,13 +132,12 @@ function safeOrigin(link: string): string {
 }
 
 /** ✎ link → open the record's source post in the WP editor (manual fix). Hidden
- *  when no post id is available (e.g. a stale cached report, or site-wide
- *  external links with no per-post attribution yet). */
+ *  when no post id is available. S1.4: prominent color for visibility. */
 function WpEdit({ id, link }: { id?: number; link: string }) {
   const u = wpEditUrl(id, link);
   return u
-    ? <a className="mono" href={u} target="_blank" rel="noreferrer" title="Open in WordPress editor"
-        style={{ color: "var(--color-muted)", marginLeft: "0.4rem" }}>✎</a>
+    ? <a className="mono font-bold" href={u} target="_blank" rel="noreferrer" title="Edit source in WordPress editor"
+        style={{ color: "var(--color-phosphor-dim)", marginLeft: "0.4rem" }}>✎</a>
     : null;
 }
 
@@ -323,7 +324,7 @@ function HealthSubTab() {
       {r ? (
         <div className="flex flex-col gap-2">
           <div className="mono" style={{ color: "var(--color-muted)" }}>
-            {r.post_count} posts / {r.page_count} pages / {r.event_count} events · {r.external_checked} external checked · {r.at}
+            {r.post_count} posts / {r.page_count} pages / {r.event_count} events{r.other_cpt_count ? ` / ${r.other_cpt_count} CPTs` : ""} · {r.external_checked} external checked · {r.at}
           </div>
 
           <HealthList title="ORPHAN ARTICLES" count={r.orphans.length} accent="var(--color-critical)"
@@ -351,34 +352,75 @@ function HealthSubTab() {
           <HealthList title="BROKEN INTERNAL LINKS" count={r.broken_internal_links.length} accent="var(--color-hazard)"
             hint="target slug ∉ published set. ✎ opens the source post to fix/remove.">
             {r.broken_internal_links.map((b, i) => (
-              <div key={i} className="text-sm mt-1">
-                <span style={{ color: "var(--color-phosphor-dim)" }}>{b.from_title || b.from}</span>
-                {" → "}
-                <a href={safeOrigin(b.from) + b.to} target="_blank" rel="noreferrer" style={{ color: "var(--color-critical)" }}>{b.to}</a>
-                <WpEdit id={b.from_id} link={b.from} />
+              <div key={i} className="text-sm mt-1 flex flex-col gap-0.5">
+                <div>
+                  <span style={{ color: "var(--color-phosphor-dim)" }}>{b.from_title || b.from}</span>
+                  {" → "}
+                  <a href={safeOrigin(b.from) + b.to} target="_blank" rel="noreferrer" style={{ color: "var(--color-critical)" }}>{b.to}</a>
+                  <WpEdit id={b.from_id} link={b.from} />
+                  {b.href && b.href !== b.to && b.href !== safeOrigin(b.from) + b.to && (
+                    <span className="mono text-xs ml-2" style={{ color: "var(--color-muted)" }}>[raw: {b.href}]</span>
+                  )}
+                </div>
+                {b.reason && (
+                  <div className="mono text-xs" style={{ color: "var(--color-muted)" }}>{b.reason}</div>
+                )}
               </div>
             ))}
           </HealthList>
 
+          {r.internal_manual_check && r.internal_manual_check.length > 0 && (
+            <HealthList title="INTERNAL MANUAL CHECK" count={r.internal_manual_check.length} accent="var(--color-hazard)"
+              hint="internal links that returned 403/5xx/timeout — verify by hand (NOT confirmed broken). ✎ opens the source post.">
+              {r.internal_manual_check.map((b, i) => (
+                <div key={i} className="text-sm mt-1 flex flex-col gap-0.5">
+                  <div>
+                    <span style={{ color: "var(--color-phosphor-dim)" }}>{b.from_title || b.from}</span>
+                    {" → "}
+                    <a href={safeOrigin(b.from) + b.to} target="_blank" rel="noreferrer" style={{ color: "var(--color-hazard)" }}>{b.to}</a>
+                    <WpEdit id={b.from_id} link={b.from} />
+                  </div>
+                  {b.reason && (
+                    <div className="mono text-xs" style={{ color: "var(--color-muted)" }}>{b.reason}</div>
+                  )}
+                </div>
+              ))}
+            </HealthList>
+          )}
+
           <HealthList title="BROKEN EXTERNAL LINKS" count={r.broken_external_links.length} accent="var(--color-hazard)"
-            hint="HTTP 404/410. Per-post attribution + bulk-remove arrive in Stage B.">
-            {r.broken_external_links.map((b, i) => (
-              <div key={i} className="text-sm mt-1">
-                <span className="mono" style={{ color: "var(--color-critical)" }}>[{b.status}]</span>{" "}
-                <a href={b.url} target="_blank" rel="noreferrer" style={{ color: "var(--color-phosphor)" }}>{b.url}</a>
-              </div>
-            ))}
+            hint="HTTP 404/410. ✎ opens the source post in WordPress editor.">
+            {r.broken_external_links.map((b, i) => {
+              const src0 = b.from && b.from.length > 0 ? b.from[0] : null;
+              return (
+                <div key={i} className="text-sm mt-1">
+                  <span className="mono" style={{ color: "var(--color-critical)" }}>[{b.status}]</span>{" "}
+                  <a href={b.url} target="_blank" rel="noreferrer" style={{ color: "var(--color-phosphor)" }}>{b.url}</a>
+                  {src0 && <WpEdit id={src0.from_id} link={src0.from} />}
+                  {b.from && b.from.length > 1 && (
+                    <span className="mono text-xs ml-2" style={{ color: "var(--color-muted)" }}>({b.from.length} posts)</span>
+                  )}
+                </div>
+              );
+            })}
           </HealthList>
 
           <HealthList title="MANUAL CHECK" count={r.manual_check.length} accent="var(--color-hazard)"
             hint="blocked/timeout — verify by hand (NOT confirmed broken)">
-            {r.manual_check.map((m, i) => (
-              <div key={i} className="text-xs mt-1">
-                <a href={m.url} target="_blank" rel="noreferrer" style={{ color: "var(--color-phosphor-dim)" }}>{m.url}</a>
-                {" "}
-                <span className="mono" style={{ color: "var(--color-muted)" }}>({m.reason})</span>
-              </div>
-            ))}
+            {r.manual_check.map((m, i) => {
+              const src0 = m.from && m.from.length > 0 ? m.from[0] : null;
+              return (
+                <div key={i} className="text-xs mt-1">
+                  <a href={m.url} target="_blank" rel="noreferrer" style={{ color: "var(--color-phosphor-dim)" }}>{m.url}</a>
+                  {" "}
+                  <span className="mono" style={{ color: "var(--color-muted)" }}>({m.reason})</span>
+                  {src0 && <WpEdit id={src0.from_id} link={src0.from} />}
+                  {m.from && m.from.length > 1 && (
+                    <span className="mono text-xs ml-2" style={{ color: "var(--color-muted)" }}>({m.from.length} posts)</span>
+                  )}
+                </div>
+              );
+            })}
           </HealthList>
 
           <HealthList title="BROKEN IMAGES" count={r.broken_internal_images.length} accent="var(--color-hazard)"

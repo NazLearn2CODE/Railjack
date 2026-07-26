@@ -1774,17 +1774,50 @@ def _seo_img_has_ext(url: str) -> bool:
     return bool(re.search(r"\.(jpe?g|png|webp|gif|svg|avif)(?:$|\?)", url, re.I))
 
 
-async def _seo_fetch_all() -> tuple[list[dict], list[dict], list[dict], set[str], set[str]]:
-    """Fetch content-bearing types (posts + pages + the ``event`` CPT, full content)
+_MANGLED_HOST_RE = re.compile(
+    r"(?:https?:)?//(?:www\.)?[a-z0-9-]+\.(?:com|net|org|co|io|gov|me|th)|"
+    r"(?:www\.)?[a-z0-9-]+\.(?:com|net|org|co|io|gov|me|th)|"
+    r"(?:facebook|fb|twitter|x|instagram|ig|youtube|yt|tiktok|linkedin|t\.me|lineblog|pinterest|reddit)",
+    re.IGNORECASE,
+)
+
+
+async def _seo_fetch_all() -> tuple[list[dict], list[dict], list[dict], list[dict], set[str], set[str]]:
+    """Fetch content-bearing types (posts + pages + event CPT + all public CPTs, full content)
     + the media set + category/tag archive paths. Content types feed parsing; their
     paths plus the taxonomy paths form the valid-internal-path set. Soft on the
-    optional types — event/categories/tags that aren't REST-enabled are skipped."""
+    optional types — event/cpts/categories/tags that aren't REST-enabled are skipped."""
     posts = await _wp_list_all("/posts", "id,link,slug,title,content")
     pages = await _wp_list_all("/pages", "id,link,slug,title,content")
     try:
         events = await _wp_list_all("/event", "id,link,slug,title,content")
     except HTTPException:
         events = []
+
+    # S1.1: Discover and fetch all public custom post types (CPTs) like /interviews
+    other_cpts: list[dict] = []
+    _skip_types = {
+        "post", "page", "event", "attachment", "revision", "nav_menu_item",
+        "wp_block", "wp_template", "wp_template_part", "wp_navigation", "user"
+    }
+    try:
+        types_obj = await _wp("GET", "/types", {})
+        if isinstance(types_obj, dict):
+            for slug, info in types_obj.items():
+                if not isinstance(info, dict):
+                    continue
+                rest_base = info.get("rest_base")
+                # Fix 3: public /types doesn't expose show_in_rest; gate on
+                # rest_base presence only (+ skip builtins).
+                if rest_base and slug not in _skip_types:
+                    try:
+                        cpt_items = await _wp_list_all(f"/{rest_base}", "id,link,slug,title,content")
+                        other_cpts.extend(cpt_items)
+                    except HTTPException:
+                        pass
+    except HTTPException:
+        pass
+
     media = await _seo_media_set()
     extra: set[str] = set()
     for ep in ("/categories", "/tags"):
@@ -1795,21 +1828,22 @@ async def _seo_fetch_all() -> tuple[list[dict], list[dict], list[dict], set[str]
         for t in terms:
             if t.get("link"):
                 extra.add(_seo_path(t["link"]))
-    return posts, pages, events, media, extra
+    return posts, pages, events, other_cpts, media, extra
 
 
 def _seo_internal_report(
-    posts: list[dict], pages: list[dict], events: list[dict], media_urls: set[str],
-    extra_paths: set[str], site_host: str,
+    posts: list[dict], pages: list[dict], events: list[dict], other_cpts: list[dict] | None,
+    media_urls: set[str], extra_paths: set[str], site_host: str,
 ) -> dict:
-    """Pure: from content-bearing WP records (posts + pages + event CPT; each with
+    """Pure: from content-bearing WP records (posts + pages + event CPT + other CPTs; each with
     ``id``, ``link``, ``title.rendered``, ``content.rendered``) + the media URL set
     (originals + crops) + extra valid paths (category/tag archives), compute broken
     internal links, internal image candidates (src ∉ media set — HTTP-probed later
-    by the flow), orphan posts/events, and the external link/image sets. No network.
+    by the flow), orphan posts/events/CPTs, and the external link/image sets. No network.
     Image crops/edit-variants are matched to their media original by stripping the
     -WxH / -e{ts} suffix; extensionless refs are skipped."""
     media_bases = {_seo_img_base(m) for m in media_urls}
+    other_cpts = other_cpts or []
 
     def parse(rec: dict) -> dict:
         html = (rec.get("content") or {}).get("rendered", "")
@@ -1819,7 +1853,7 @@ def _seo_internal_report(
             "link": rec.get("link", ""),
             "title": (rec.get("title") or {}).get("rendered", ""),
             "path": _seo_path(rec.get("link", "")),
-            "internal_link_paths": {_seo_path(u) for u in ex["internal_links"]},
+            "internal_link_pairs": [(_seo_path(u), u) for u in ex["internal_links"]],
             "internal_imgs": ex["internal_imgs"],
             "external_links": ex["external_links"],
             "external_imgs": ex["external_imgs"],
@@ -1828,19 +1862,34 @@ def _seo_internal_report(
     p_items = [parse(r) for r in posts]
     e_items = [parse(r) for r in events]
     g_items = [parse(r) for r in pages]
-    article_items = p_items + e_items            # orphan-eligible
+    o_items = [parse(r) for r in other_cpts]
+    article_items = p_items + e_items + o_items   # orphan-eligible (posts, events, and extra CPTs)
     all_items = article_items + g_items          # everything that bears links
     valid_paths = {it["path"] for it in all_items if it["link"]} | set(extra_paths)
 
-    broken_internal: list[dict] = []
+    # S1.3: Per-post attribution for external links and images
+    ext_sources: dict[str, list[dict]] = {}
     for it in all_items:
-        for tgt in it["internal_link_paths"]:
+        rec_info = {"from": it["link"], "from_id": it["id"], "from_title": it["title"]}
+        for ext_u in (it["external_links"] + it["external_imgs"]):
+            if ext_u not in ext_sources:
+                ext_sources[ext_u] = []
+            if not any(s["from"] == it["link"] for s in ext_sources[ext_u]):
+                ext_sources[ext_u].append(rec_info)
+
+    # Fix 1: emit candidates for HTTP verification, not final broken_internal_links.
+    # The flow will probe each and classify as broken / manual / drop.
+    internal_link_candidates: list[dict] = []
+    for it in all_items:
+        for tgt, raw_href in it["internal_link_pairs"]:
             if tgt in valid_paths or tgt == it["path"]:
                 continue
             if any(tgt.startswith(pfx) for pfx in _WP_ARCHIVE_PREFIXES):
                 continue
-            broken_internal.append(
-                {"from": it["link"], "from_id": it["id"], "from_title": it["title"], "to": tgt})
+            internal_link_candidates.append({
+                "from": it["link"], "from_id": it["id"], "from_title": it["title"],
+                "to": tgt, "href": raw_href,
+            })
 
     image_candidates: list[dict] = []  # src ∉ media set → HTTP-probed in _flow_seo_health
     for it in all_items:
@@ -1851,10 +1900,10 @@ def _seo_internal_report(
                 image_candidates.append(
                     {"from": it["link"], "from_id": it["id"], "from_title": it["title"], "src": src})
 
-    # orphan ARTICLES (posts + events): zero inbound internal links from anywhere
+    # orphan ARTICLES (posts + events + CPTs): zero inbound internal links from anywhere
     inbound = {it["path"]: 0 for it in article_items}
     for src_it in all_items:
-        for tgt in src_it["internal_link_paths"]:
+        for tgt, _ in src_it["internal_link_pairs"]:
             if tgt != src_it["path"] and tgt in inbound:
                 inbound[tgt] += 1
     orphans = [{"id": it["id"], "link": it["link"], "title": it["title"]}
@@ -1864,13 +1913,54 @@ def _seo_internal_report(
         "post_count": len(posts),
         "page_count": len(pages),
         "event_count": len(events),
+        "other_cpt_count": len(other_cpts),
         "valid_paths": len(valid_paths),
-        "broken_internal_links": broken_internal,
+        "internal_link_candidates": internal_link_candidates,  # HTTP-verified in _flow_seo_health
         "image_candidates": image_candidates,   # → broken_internal_images / image_manual_check in the flow
         "orphans": orphans,
         "external_links": sorted({u for it in all_items for u in it["external_links"]}),
         "external_imgs": sorted({u for it in all_items for u in it["external_imgs"]}),
+        "ext_sources": ext_sources,
     }
+
+
+def _seo_resolve_href(raw_href: str, site_origin: str) -> str:
+    """Resolve a raw internal-link href to an absolute URL for probing.
+    Bare relative ('Facebook/X', '/foo') → site_origin + '/' + path;
+    schemeless ('//host/...') → 'https://host/...'; already-absolute → as-is.
+    Strips leading whitespace/junk text before resolving (e.g. 'Source: Facebook/X'
+    → site_origin + '/Source: Facebook/X' → will 404, which is correct)."""
+    h = (raw_href or "").strip()
+    if not h:
+        return ""
+    if h.startswith("//"):
+        return "https:" + h
+    parsed = urllib.parse.urlparse(h)
+    if parsed.scheme in ("http", "https"):
+        return h
+    # Bare relative — resolve against the site origin
+    if h.startswith("/"):
+        return site_origin + h
+    return site_origin + "/" + h
+
+
+def _seo_internal_link_reason(raw_href: str, site_host: str) -> str:
+    """Classify WHY a confirmed-broken internal link is broken (for the UI).
+    Fix 2: _MANGLED_HOST_RE now has no ^ anchors, so 'Source: Facebook/...' matches.
+    Exclude the site's own host from the mangled-external label."""
+    raw_clean = (raw_href or "").strip()
+    if not raw_clean or raw_clean == "#":
+        return "empty/anchor-only"
+    # Check if the href resolves to the site's own host → internal, not mangled-external
+    try:
+        parsed_host = urllib.parse.urlparse(raw_clean).netloc
+        if parsed_host and _seo_host_eq(parsed_host, site_host):
+            return "not a published page"
+    except Exception:
+        pass
+    if _MANGLED_HOST_RE.search(raw_clean.lstrip("/")):
+        return "likely a broken external link (missing scheme)"
+    return "not a published page"
 
 
 async def _flow_seo_health(job: "TnJob") -> None:
@@ -1879,32 +1969,38 @@ async def _flow_seo_health(job: "TnJob") -> None:
     ``job.cancel`` between phases + between external-check batches (raises
     _TnCancelled). Rides the shared TnJob store (kind=seo-health)."""
     job.progress = 5
-    posts, pages, events, media, extra = await _seo_fetch_all()
+    posts, pages, events, other_cpts, media, extra = await _seo_fetch_all()
     if job.cancel:
         raise _TnCancelled()
     job.progress = 25
-    rep = _seo_internal_report(posts, pages, events, media, extra, _wp_site_host())
+    rep = _seo_internal_report(posts, pages, events, other_cpts, media, extra, _wp_site_host())
     job.progress = 40
     # orphan suggestions: top-3 by title-token overlap (exclude the orphan itself)
     titles = [(p.get("link", ""), (p.get("title") or {}).get("rendered", ""))
-              for p in (posts + events) if p.get("link")]
+              for p in (posts + events + other_cpts) if p.get("link")]
     for o in rep["orphans"]:
         cands = [(l, t) for (l, t) in titles if l != o["link"]]
         o["suggested"] = _seo_suggest(o["title"], cands, n=3)
     job.progress = 50
-    # HTTP-verify external links/images AND internal image candidates. The latter
-    # is the definitive image vetting: a 200 kills every crop/edit-variant false
-    # positive the media-set prefilter missed; only a real 404/410 stays "broken."
+    # HTTP-verify external links/images, internal image candidates, AND internal
+    # link candidates (Fix 1). Internal links use authed probe (Sucuri bypass).
     ext = sorted(set(rep["external_links"]) | set(rep["external_imgs"]))
     img_cands = rep.pop("image_candidates", [])  # intermediate — not in the final report
+    int_link_cands = rep.pop("internal_link_candidates", [])  # Fix 1: HTTP-verify
+    ext_sources = rep.pop("ext_sources", {})
     conc = max(1, int(_opts().get("seo_external_concurrency", 8)))
     timeout = float(_opts().get("seo_external_timeout_s", 10))
     sem = asyncio.Semaphore(conc)
-    ua = "Mozilla/5.0 (compatible; RailjackSEOBot/1.0)"
+    ua = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
     broken_external: list[dict] = []
     manual_check: list[dict] = []
     broken_images: list[dict] = []          # HTTP-confirmed missing internal images
     image_manual: list[dict] = []
+    broken_internal: list[dict] = []        # Fix 1: HTTP-confirmed broken internal links
+    internal_manual: list[dict] = []        # Fix 1: internal links that need manual check
+
+    site_host = _wp_site_host()
+    site_origin = _wp_creds()[0].rstrip("/")  # e.g. "https://www.thailandnow.in.th"
 
     async def probe(url: str) -> int:
         if url.startswith("//"):
@@ -1916,17 +2012,17 @@ async def _flow_seo_health(job: "TnJob") -> None:
             return r.status_code
 
     async def check_ext(url: str) -> None:
+        srcs = ext_sources.get(url, [])
         async with sem:
             try:
                 code = await probe(url)
             except (httpx.HTTPError, OSError):
-                manual_check.append({"url": url, "reason": "timeout/error"})
+                manual_check.append({"url": url, "reason": "timeout/error", "from": srcs})
                 return
         if code in (404, 410):
-            broken_external.append({"url": url, "status": code})
+            broken_external.append({"url": url, "status": code, "from": srcs})
         elif code >= 400:
-            manual_check.append({"url": url, "status": code, "reason": "client-error/blocked"})
-        # 2xx/3xx → ok (no record)
+            manual_check.append({"url": url, "status": code, "reason": "client-error/blocked", "from": srcs})
 
     async def check_img(cand: dict) -> None:
         async with sem:
@@ -1941,8 +2037,35 @@ async def _flow_seo_health(job: "TnJob") -> None:
             image_manual.append({**cand, "status": code, "reason": "client-error/blocked"})
         # 2xx/3xx → image exists (crop/variant the media set didn't list) → drop
 
+    async def check_internal_link(cand: dict) -> None:
+        """Fix 1: HTTP-verify an internal link candidate (unauthed, clean UA)."""
+        abs_url = _seo_resolve_href(cand["href"], site_origin)
+        if not abs_url:
+            return  # empty href — skip
+        async with sem:
+            try:
+                code = await probe(abs_url)
+            except (httpx.HTTPError, OSError):
+                internal_manual.append({
+                    **cand,
+                    "reason": _seo_internal_link_reason(cand["href"], site_host),
+                })
+                return
+        if code in (404, 410):
+            broken_internal.append({
+                **cand,
+                "reason": _seo_internal_link_reason(cand["href"], site_host),
+            })
+        elif code >= 400:
+            internal_manual.append({
+                **cand,
+                "reason": _seo_internal_link_reason(cand["href"], site_host),
+            })
+        # 200/3xx → page exists (theme route, etc.) → drop (e.g. /interviews)
+
     tasks = [asyncio.create_task(check_ext(u)) for u in ext]
     tasks += [asyncio.create_task(check_img(c)) for c in img_cands]
+    tasks += [asyncio.create_task(check_internal_link(c)) for c in int_link_cands]
     total = len(tasks)
     if total:
         for i, fut in enumerate(asyncio.as_completed(tasks), 1):
@@ -1956,6 +2079,8 @@ async def _flow_seo_health(job: "TnJob") -> None:
     job.progress = 95
     job.result = {
         **rep,
+        "broken_internal_links": broken_internal,
+        "internal_manual_check": internal_manual,
         "broken_internal_images": broken_images,
         "image_manual_check": image_manual,
         "broken_external_links": broken_external,
@@ -2070,22 +2195,39 @@ if __name__ == "__main__":
               "content": {"rendered": '<a href="/p1/">p1</a>'}}]
     events = [{"id": 9, "link": "https://www.thailandnow.in.th/event/e1/", "title": {"rendered": "Event One"},
                "content": {"rendered": ""}}]
+    other_cpts = [{"id": 12, "link": "https://www.thailandnow.in.th/interviews/khon/", "title": {"rendered": "Interview Khon"},
+                   "content": {"rendered": '<a href="Facebook/MangledLink">mangled</a>'}}]
     rep = _seo_internal_report(
-        posts, pages, events,
+        posts, pages, events, other_cpts,
         {"https://www.thailandnow.in.th/wp-content/uploads/img1.jpg"},  # original → matches the -1024x683 crop
         {"/current-affairs"}, sh)
-    assert rep["post_count"] == 3 and rep["page_count"] == 1 and rep["event_count"] == 1, rep
-    assert rep["valid_paths"] == 6, rep["valid_paths"]  # /p1,/p2,/p3,/about,/event/e1 + /current-affairs
-    assert len(rep["broken_internal_links"]) == 1, rep["broken_internal_links"]  # only /gone/
-    assert rep["broken_internal_links"][0]["to"] == "/gone", rep["broken_internal_links"]
-    assert rep["broken_internal_links"][0]["from_id"] == 1, "from_id plumbed"   # /gone/ lives in p1
+    assert rep["post_count"] == 3 and rep["page_count"] == 1 and rep["event_count"] == 1 and rep["other_cpt_count"] == 1, rep
+    assert rep["valid_paths"] == 7, rep["valid_paths"]  # /p1,/p2,/p3,/about,/event/e1,/interviews/khon + /current-affairs
+    # Fix 1: _seo_internal_report now emits candidates (not broken); flow HTTP-verifies them.
+    cands = rep["internal_link_candidates"]
+    assert len(cands) == 2, cands  # /gone/ + Facebook/MangledLink
+    assert cands[0]["to"] == "/gone", cands
+    assert cands[0]["from_id"] == 1, "from_id plumbed"   # /gone/ lives in p1
+    assert cands[1]["to"] == "/Facebook/MangledLink" or cands[1]["to"] == "Facebook/MangledLink", cands
+    # Fix 1: _seo_resolve_href resolves bare relative to absolute
+    so = "https://www.thailandnow.in.th"
+    assert _seo_resolve_href("/gone/", so) == "https://www.thailandnow.in.th/gone/"
+    assert _seo_resolve_href("Facebook/Mangled", so) == "https://www.thailandnow.in.th/Facebook/Mangled"
+    assert _seo_resolve_href("//example.com/x", so) == "https://example.com/x"
+    assert _seo_resolve_href("https://example.com/y", so) == "https://example.com/y"
+    assert _seo_resolve_href("", so) == ""
+    # Fix 2: _seo_internal_link_reason — mangled-external regex (no ^ anchors) + site-host exclusion
+    assert _seo_internal_link_reason("Facebook/MangledLink", sh) == "likely a broken external link (missing scheme)"
+    assert _seo_internal_link_reason("Source: Facebook/ASEANParaGamesThailand2025", sh) == "likely a broken external link (missing scheme)"
+    assert _seo_internal_link_reason("/interviews/", sh) == "not a published page"  # no mangled host
+    assert _seo_internal_link_reason("https://www.thailandnow.in.th/gone/", sh) == "not a published page"  # own host → not mangled
     assert len(rep["image_candidates"]) == 1, rep["image_candidates"]  # img-broken only (img1 crop matches)
     assert rep["image_candidates"][0]["src"].endswith("img-broken.jpg"), rep["image_candidates"]
     assert rep["image_candidates"][0]["from_id"] == 1, "image candidate from_id plumbed"
-    assert len(rep["orphans"]) == 2, rep["orphans"]  # post3 + event1
-    assert {o["id"] for o in rep["orphans"]} == {3, 9}, "orphan id plumbed"
-    assert {o["link"].split("/")[-2] for o in rep["orphans"]} == {"p3", "e1"}, rep["orphans"]
+    assert len(rep["orphans"]) == 3, rep["orphans"]  # post3 + event1 + interview12
+    assert {o["id"] for o in rep["orphans"]} == {3, 9, 12}, "orphan id plumbed"
     assert rep["external_links"] == ["https://youtube.com/w"], rep["external_links"]
+    assert rep["ext_sources"]["https://youtube.com/w"][0]["from_id"] == 3, "external link per-post attribution"
     # suggest: token overlap ranks + filters
     sugg = _seo_suggest("Khon epic festival", [
         ("https://www.thailandnow.in.th/khon/", "Record youth turnout for Khon epic"),
