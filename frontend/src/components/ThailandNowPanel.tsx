@@ -136,8 +136,7 @@ function safeOrigin(link: string): string {
 function WpEdit({ id, link }: { id?: number; link: string }) {
   const u = wpEditUrl(id, link);
   return u
-    ? <a className="mono font-bold" href={u} target="_blank" rel="noreferrer" title="Edit source in WordPress editor"
-        style={{ color: "var(--color-phosphor-dim)", marginLeft: "0.4rem" }}>✎</a>
+    ? <a className="seo-icon seo-icon--edit" href={u} target="_blank" rel="noreferrer" title="Edit in WordPress editor">✎</a>
     : null;
 }
 
@@ -400,7 +399,7 @@ function HealthSubTab() {
             action={
               r.broken_internal_links.length > 0 && (
                 <button
-                  className="btn btn--crit text-xs py-0.5 px-1.5"
+                  className="btn btn--compact btn--crit"
                   onClick={() => setBulkConfirmSection("internal")}
                 >
                   REMOVE ALL ({r.broken_internal_links.length})
@@ -452,10 +451,11 @@ function HealthSubTab() {
                     <WpEdit id={b.from_id} link={b.from} />
                     {b.from_id && (
                       <button
-                        className="btn btn--crit text-xs py-0.5 px-1 ml-2"
+                        className="seo-icon seo-icon--remove"
+                        title="Remove this broken link"
                         onClick={() => handleStartPreview(rowKey, b.from_id!, "link", b.href || b.to)}
                       >
-                        Remove
+                        ✗
                       </button>
                     )}
                     {b.href && b.href !== b.to && b.href !== safeOrigin(b.from) + b.to && (
@@ -518,7 +518,7 @@ function HealthSubTab() {
               hint="internal links that returned 403/5xx/timeout — verify by hand. ✕ dismisses from view."
               action={
                 dismissed.some((k) => k.startsWith("intmc-")) && (
-                  <button className="btn text-xs py-0.5 px-1.5" onClick={() => setShowDismissed((v) => !v)}>
+                  <button className="btn btn--compact" onClick={() => setShowDismissed((v) => !v)}>
                     {showDismissed ? "Hide Dismissed" : "Show Dismissed"}
                   </button>
                 )
@@ -536,8 +536,7 @@ function HealthSubTab() {
                       <a href={safeOrigin(b.from) + b.to} target="_blank" rel="noreferrer" style={{ color: "var(--color-hazard)" }}>{b.to}</a>
                       <WpEdit id={b.from_id} link={b.from} />
                       <button
-                        className="mono font-bold text-xs ml-2 hover:text-white"
-                        style={{ color: "var(--color-muted)" }}
+                        className="seo-icon seo-icon--dismiss"
                         title={isDismissed ? "Restore" : "Dismiss"}
                         onClick={() => setDismissed((prev) => isDismissed ? prev.filter((k) => k !== itemKey) : [...prev, itemKey])}
                       >
@@ -561,7 +560,7 @@ function HealthSubTab() {
             action={
               r.broken_external_links.length > 0 && (
                 <button
-                  className="btn btn--crit text-xs py-0.5 px-1.5"
+                  className="btn btn--compact btn--crit"
                   onClick={() => setBulkConfirmSection("external")}
                 >
                   REMOVE ALL ({r.broken_external_links.length})
@@ -618,10 +617,11 @@ function HealthSubTab() {
                     {src0 && <WpEdit id={src0.from_id} link={src0.from} />}
                     {src0?.from_id && (
                       <button
-                        className="btn btn--crit text-xs py-0.5 px-1 ml-2"
+                        className="seo-icon seo-icon--remove"
+                        title="Remove this broken link"
                         onClick={() => handleStartPreview(rowKey, src0.from_id!, "link", b.url)}
                       >
-                        Remove
+                        ✗
                       </button>
                     )}
                     {b.from && b.from.length > 1 && (
@@ -680,7 +680,7 @@ function HealthSubTab() {
             hint="blocked/timeout — verify by hand (NOT confirmed broken). ✕ dismisses from view."
             action={
               dismissed.some((k) => k.startsWith("mc-")) && (
-                <button className="btn text-xs py-0.5 px-1.5" onClick={() => setShowDismissed((v) => !v)}>
+                <button className="btn btn--compact" onClick={() => setShowDismissed((v) => !v)}>
                   {showDismissed ? "Hide Dismissed" : "Show Dismissed"}
                 </button>
               )
@@ -721,7 +721,7 @@ function HealthSubTab() {
             action={
               r.broken_internal_images.length > 0 && (
                 <button
-                  className="btn btn--crit text-xs py-0.5 px-1.5"
+                  className="btn btn--compact btn--crit"
                   onClick={() => setBulkConfirmSection("images")}
                 >
                   REMOVE ALL ({r.broken_internal_images.length})
@@ -773,10 +773,11 @@ function HealthSubTab() {
                     <WpEdit id={b.from_id} link={b.from} />
                     {b.from_id && (
                       <button
-                        className="btn btn--crit text-xs py-0.5 px-1 ml-2"
+                        className="seo-icon seo-icon--remove"
+                        title="Remove this broken image"
                         onClick={() => handleStartPreview(rowKey, b.from_id!, "image", b.src)}
                       >
-                        Remove
+                        ✗
                       </button>
                     )}
                   </div>
@@ -832,7 +833,7 @@ function HealthSubTab() {
             hint="image probe blocked/timeout — verify by hand (NOT confirmed broken). ✕ dismisses from view."
             action={
               dismissed.some((k) => k.startsWith("imgmc-")) && (
-                <button className="btn text-xs py-0.5 px-1.5" onClick={() => setShowDismissed((v) => !v)}>
+                <button className="btn btn--compact" onClick={() => setShowDismissed((v) => !v)}>
                   {showDismissed ? "Hide Dismissed" : "Show Dismissed"}
                 </button>
               )
