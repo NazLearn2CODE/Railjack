@@ -100,6 +100,10 @@ interface ArchiveMsg {
   reply: ArchiveReply;
 }
 
+// STORY SCOUT types
+type ScoutResult = { title: string; url: string; snippet: string; date: string; lang: string; source: string };
+type PitchReply = { pitch: { headline_en: string; headline_th: string; excerpt_en: string }; mode: string };
+
 // SEO HEALTH report (THAILAND NOW → SEO tab → HEALTH)
 interface HealthSource { from: string; from_id?: number; from_title?: string }
 interface HealthSuggestion { link: string; title: string }
@@ -870,7 +874,7 @@ function HealthSubTab() {
 }
 
 export default function ThailandNowPanel({ module: _module }: { module: ModuleConfig }) {
-  const [tab, setTab] = useState<"writers" | "events" | "archive" | "seo">("writers");
+  const [tab, setTab] = useState<"writers" | "events" | "archive" | "seo" | "story-scout">("writers");
   const { data, error } = usePolling<DesksResp>("/api/thailandnow/desks", 15000);
 
   return (
@@ -895,6 +899,12 @@ export default function ThailandNowPanel({ module: _module }: { module: ModuleCo
           ARCHIVE
         </button>
         <button
+          className={`btn btn--compact ${tab === "story-scout" ? "btn--signal" : ""}`}
+          onClick={() => setTab("story-scout")}
+        >
+          STORY SCOUT
+        </button>
+        <button
           className={`btn btn--compact ${tab === "seo" ? "btn--signal" : ""}`}
           onClick={() => setTab("seo")}
         >
@@ -907,6 +917,7 @@ export default function ThailandNowPanel({ module: _module }: { module: ModuleCo
       )}
       {tab === "events" && <EventsTab />}
       {tab === "archive" && <ArchiveTab />} {/* NEW: ArchiveTab render */}
+      {tab === "story-scout" && <StoryScoutTab />}
       {tab === "seo" && <SeoTab />}
     </div>
   );
@@ -1513,6 +1524,257 @@ function ArchiveTab() {
         </div>
       </section>
     </>
+  );
+}
+
+
+/* ------------------------------- STORY SCOUT ------------------------------ */
+
+function StoryScoutTab() {
+  const [query, setQuery]         = usePersistentState("tn.scout.query", "");
+  const [category, setCategory]   = usePersistentState("tn.scout.category", "");
+  const [days, setDays]           = usePersistentState("tn.scout.days", 7);
+  const [results, setResults]     = usePersistentState<ScoutResult[]>("tn.scout.results", []);
+  const [searching, setSearching] = useState(false);
+  const [err, setErr]             = useState<string | null>(null);
+  const [scoutJobId, setScoutJobId] = useState<string | null>(null);
+
+  const [pitches, setPitches]     = useState<Record<string, { data?: PitchReply; loading?: boolean; err?: string }>>({});
+  const [images, setImages]       = useState<Record<string, { data?: { images: { url: string; alt: string }[] }; loading?: boolean; err?: string }>>({});
+
+  const { data: jobsData } = usePolling<{ jobs: TnJob[] }>("/api/thailandnow/jobs", 2000);
+
+  const search = useCallback(async () => {
+    setErr(null);
+    const r = await post<{ id: string }>("/api/thailandnow/scout/search", { query, category, days });
+    if (!r.ok) {
+      setErr(r.error?.includes("already running") ? "A search is already running…" : (r.error || "search failed"));
+      return;
+    }
+    setResults([]);
+    setScoutJobId(r.data!.id);
+    setSearching(true);
+  }, [query, category, days, setResults]);
+
+  useEffect(() => {
+    if (!scoutJobId || !jobsData?.jobs) return;
+    const job = jobsData.jobs.find((j) => j.id === scoutJobId && j.kind === "scout-search");
+    if (!job) return;
+
+    if (job.status === "done") {
+      fetchJSON<{ results: ScoutResult[] }>(`/api/thailandnow/scout/report/${scoutJobId}`)
+        .then((data) => {
+          setResults(data.results || []);
+          setSearching(false);
+          setScoutJobId(null);
+        })
+        .catch((e) => {
+          setErr(String(e));
+          setSearching(false);
+          setScoutJobId(null);
+        });
+    } else if (job.status === "error" || job.status === "cancelled") {
+      setErr(job.error || `job ${job.status}`);
+      setSearching(false);
+      setScoutJobId(null);
+    }
+  }, [scoutJobId, jobsData, setResults]);
+
+  const handleKeyDown = useCallback(
+    (e: React.KeyboardEvent<HTMLInputElement>) => {
+      if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+        e.preventDefault();
+        search();
+      }
+    },
+    [search]
+  );
+
+  const findImages = useCallback(async (resUrl: string) => {
+    setImages((prev) => ({ ...prev, [resUrl]: { loading: true } }));
+    const r = await post<{ images: { url: string; alt: string }[] }>("/api/thailandnow/events/images", { url: resUrl });
+    if (r.ok && r.data) {
+      setImages((prev) => ({ ...prev, [resUrl]: { data: r.data } }));
+    } else {
+      setImages((prev) => ({ ...prev, [resUrl]: { err: r.error || "failed to load images" } }));
+    }
+  }, []);
+
+  const makePitch = useCallback(async (resUrl: string) => {
+    setPitches((prev) => ({ ...prev, [resUrl]: { loading: true } }));
+    const r = await post<PitchReply>("/api/thailandnow/scout/pitch", { url: resUrl });
+    if (r.ok && r.data) {
+      setPitches((prev) => ({ ...prev, [resUrl]: { data: r.data } }));
+    } else {
+      setPitches((prev) => ({ ...prev, [resUrl]: { err: r.error || "failed to make pitch" } }));
+    }
+  }, []);
+
+  return (
+    <section className="hud hud--bracket flex flex-col flex-grow reveal reveal-1 p-3">
+      <div className="label mb-2">STORY SCOUT</div>
+
+      {/* Pinned Input Row */}
+      <div className="flex flex-wrap items-center gap-2 shrink-0 mb-3">
+        <input
+          className="input"
+          style={{ flexGrow: 1, minWidth: 200 }}
+          placeholder="optional: Thailand visa, Songkran, …"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          onKeyDown={handleKeyDown}
+        />
+        <select
+          className="input"
+          value={category}
+          onChange={(e) => setCategory(e.target.value)}
+        >
+          <option value="">General</option>
+          <option value="expat-policy">Expat policy</option>
+          <option value="business-investment">Business &amp; investment</option>
+          <option value="lifestyle">Lifestyle</option>
+        </select>
+        <div className="flex items-center gap-2">
+          <input
+            type="range"
+            min={1}
+            max={30}
+            step={1}
+            value={days}
+            onChange={(e) => setDays(Number(e.target.value))}
+            style={{ width: 120 }}
+          />
+          <span className="mono text-xs" style={{ color: "var(--color-signal)", minWidth: 50 }}>
+            {days} {days === 1 ? "day" : "days"}
+          </span>
+        </div>
+        <button className="btn btn--signal" disabled={searching} onClick={search}>
+          {searching ? "SEARCHING…" : "SEARCH"}
+        </button>
+      </div>
+
+      {/* Scrollable Results Body */}
+      <div className="scroll-y flex-grow flex flex-col gap-3">
+        {err && <div className="mono text-xs" style={{ color: "var(--color-critical)" }}>{err}</div>}
+        {searching && results.length === 0 && (
+          <div className="mono text-xs" style={{ color: "var(--color-signal)" }}>SEARCHING…</div>
+        )}
+        {!searching && results.length === 0 && !err && (
+          <div className="mono" style={{ color: "var(--color-muted)" }}>
+            Search for Thailand news to pitch.
+          </div>
+        )}
+        {results.map((r, idx) => {
+          const pitchState = pitches[r.url];
+          const imageState = images[r.url];
+          return (
+            <div key={r.url || idx} className="border border-edge bg-void p-3 flex flex-col gap-2">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <a
+                  href={r.url}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="font-bold hover:underline"
+                  style={{ color: "var(--color-signal)" }}
+                >
+                  {r.title}
+                </a>
+                <div className="flex items-center gap-2">
+                  <span className="mono text-xs" style={{ color: "var(--color-muted)" }}>
+                    {r.source} {r.date ? `· ${r.date}` : ""} {r.lang ? `· ${r.lang.toUpperCase()}` : ""}
+                  </span>
+                  <button
+                    className="btn btn--compact"
+                    disabled={imageState?.loading}
+                    onClick={() => findImages(r.url)}
+                  >
+                    {imageState?.loading ? "LOADING…" : "FIND IMAGES"}
+                  </button>
+                  <button
+                    className="btn btn--compact"
+                    disabled={pitchState?.loading}
+                    onClick={() => makePitch(r.url)}
+                  >
+                    {pitchState?.loading ? "PITCHING…" : "MAKE PITCH"}
+                  </button>
+                </div>
+              </div>
+
+              {r.snippet && (
+                <div className="mono text-xs" style={{ color: "var(--color-muted)" }}>
+                  {r.snippet}
+                </div>
+              )}
+
+              {/* Pitch expansion */}
+              {pitchState && (
+                <div className="mt-1 border-t border-edge pt-2 flex flex-col gap-1">
+                  {pitchState.err && (
+                    <div className="mono text-xs" style={{ color: "var(--color-critical)" }}>{pitchState.err}</div>
+                  )}
+                  {pitchState.data && (
+                    pitchState.data.mode === "degraded" ? (
+                      <div className="mono text-xs" style={{ color: "var(--color-critical)" }}>
+                        LLM gateway unavailable — retry later
+                      </div>
+                    ) : (
+                      <div className="flex flex-col gap-1 bg-surface p-2 rounded">
+                        <div className="font-bold text-sm">{pitchState.data.pitch.headline_en}</div>
+                        <div className="text-sm" style={{ color: "var(--color-signal)" }}>{pitchState.data.pitch.headline_th}</div>
+                        <div className="text-xs italic" style={{ color: "var(--color-muted)" }}>{pitchState.data.pitch.excerpt_en}</div>
+                        <div className="mt-1 flex items-center justify-between">
+                          <span className="mono text-xs" style={{ color: "var(--color-muted)" }}>
+                            {pitchState.data.mode.toUpperCase()}
+                          </span>
+                          <button
+                            className="btn btn--compact"
+                            onClick={() => {
+                              const p = pitchState.data!.pitch;
+                              const block = `${p.headline_en}\n${p.headline_th}\n${p.excerpt_en}`;
+                              navigator.clipboard.writeText(block).catch(() => {});
+                            }}
+                          >
+                            COPY PITCH
+                          </button>
+                        </div>
+                      </div>
+                    )
+                  )}
+                </div>
+              )}
+
+              {/* Image expansion */}
+              {imageState && (
+                <div className="mt-1 border-t border-edge pt-2 flex flex-col gap-1">
+                  {imageState.err && (
+                    <div className="mono text-xs" style={{ color: "var(--color-critical)" }}>{imageState.err}</div>
+                  )}
+                  {imageState.data && (
+                    imageState.data.images.length === 0 ? (
+                      <div className="mono text-xs" style={{ color: "var(--color-muted)" }}>No candidate images found.</div>
+                    ) : (
+                      <div className="flex flex-wrap gap-2 pt-1">
+                        {imageState.data.images.map((img, imgIdx) => (
+                          <a
+                            key={imgIdx}
+                            href={img.url}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="block border border-edge hover:border-signal"
+                          >
+                            <img src={img.url} alt={img.alt || "Candidate"} style={{ height: 64, objectFit: "cover" }} />
+                          </a>
+                        ))}
+                      </div>
+                    )
+                  )}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </section>
   );
 }
 

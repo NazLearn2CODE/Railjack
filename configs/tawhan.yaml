@@ -61,6 +61,10 @@ modules:
       notebooklm_notebook_id: ""                                # R6: DEEP RESEARCH notebook (created + cached on first use)
       archive_gem_path: app/gems/event-archive-qa.md            # Stage 2: source-only Q&A gem
       archive_folder_id: 1MVYNNOaev_0P972YbwM01XGGLWPBP1vJ   # wider comprehensive Event archive (was: tian desk's event-docs folder)
+      # --- STORY SCOUT (news pitch discovery + make-a-pitch) ---
+      scout_llm:
+        model: glm-5      # /scout/pitch; routes through app/zai.py (same gateway/combo as publicity_llm)
+      scout_gem_path: app/gems/story-scout-pitch.md
       # --- SEO HEALTH (read-only link/image/orphan report) ---
       wordpress_url: https://www.thailandnow.in.th   # override of WORDPRESS_URL; user/password stay in ~/n8n/.secrets.env
       seo_media_cache_ttl_s: 86400                     # media library (~5750) pulled once/day

@@ -518,8 +518,8 @@ def _parse_date(text: str) -> str | None:
 
     text_lower = text.lower()
 
-    # Try ISO format first (e.g., 2026-07-15)
-    m = re.search(r"\b(\d{4})[-/](\d{1,2})[-/](\d{1,2})\b", text)
+    # Try ISO format first (e.g., 2026-07-15 or 2026-07-15T10:00:00Z)
+    m = re.search(r"\b(\d{4})[-/](\d{1,2})[-/](\d{1,2})(?=[T\s\D]|$)", text)
     if m:
         year, month, day = m.groups()
         try:
@@ -865,6 +865,282 @@ async def scout_events(payload: dict = Body(default={})):
     ordered = sorted(events.values(), key=lambda e: e.get("start_date") or "9999")
     return {"events": ordered, "count": len(ordered), "errors": errors,
             "window": {"from": today_iso, "to": window_end_iso, "weeks": weeks}}
+
+
+# --- STORY SCOUT (news pitch discovery + make-a-pitch) ---
+
+# Domains never surfaced as pitch candidates (the outlet's own site + known noise).
+_SCOUT_EXCLUDE_DOMAINS = {"thailandnow.in.th"}
+
+
+def _scout_domain_excluded(domain: str) -> bool:
+    """True if the domain is the outlet's own site (or a subdomain of it)."""
+    return any(domain == ex or domain.endswith("." + ex) for ex in _SCOUT_EXCLUDE_DOMAINS)
+
+
+def _scout_date_in_range(date_str: str, cutoff_iso: str, today_iso: str) -> bool:
+    """True only for a parsed date within [cutoff, today]. Strict policy: undated
+    (empty) is False → dropped. Recency is guaranteed; the list is short because
+    Jina exposes no date for ~80% of pages — widen by improving date-capture, not
+    by loosening this filter."""
+    return bool(date_str) and cutoff_iso <= date_str <= today_iso
+
+
+def _scout_gem_path() -> Path:
+    """Resolve the STORY SCOUT pitch gem path (relative paths anchor at the repo root).
+    Mirrors _archive_gem_path()."""
+    p = Path(_opts().get("scout_gem_path", "app/gems/story-scout-pitch.md"))
+    if not p.is_absolute():
+        p = Path(__file__).resolve().parent.parent / p
+    return p
+
+
+def _extract_news(md: str, url: str) -> dict | None:
+    """Walk Jina markdown of ONE news article, pulling news fields."""
+    if not md:
+        return None
+    lines = [line.strip() for line in md.split("\n")]
+    non_blank = [l for l in lines if l]
+    if not non_blank:
+        return None
+
+    # Jina prepends metadata lines (Title:/URL Source:/Markdown Content:) and
+    # bot-check pages expose a challenge heading — clean the title, drop junk pages.
+    jina_meta = ("title:", "url source:", "markdown content:", "published time:", "description:")
+    botcheck = ("just a moment", "security checkpoint", "attention required",
+                "vercel security", "enable javascript", "checking your browser",
+                "forbidden", "warning: target url")
+    title = ""
+    for l in lines:
+        if l.startswith("#"):
+            title = l.lstrip("#").strip()
+            if title:
+                break
+    if not title:
+        title = non_blank[0]
+    if title.lower().startswith(jina_meta):
+        title = title.split(":", 1)[1].strip()
+    low = title.lower()
+    if not title or any(b in low for b in botcheck):
+        return None
+    title = re.sub(r"!\[[^\]]*\]\([^)]*\)", "", title)      # ![alt](url) → drop
+    title = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", title)  # [text](url) → text
+    title = title.strip(" #")
+    if not title:
+        return None
+    if len(title) > 200:
+        title = title[:200]
+
+    snippet = ""
+    for l in lines:
+        if not l:
+            continue
+        if l.startswith("#") or l.startswith(">"):
+            continue
+        if l.startswith("![") or ("![" in l and "](" in l):
+            continue
+        if l.lower().startswith(jina_meta):
+            continue
+        if l == title or l == f"# {title}":
+            continue
+        snippet = l[:300]
+        break
+
+    date = ""
+    for l in lines:  # Jina's "Published Time: <ISO>" is the reliable publish date
+        if l.lower().startswith("published time:"):
+            d = _parse_date(l.split(":", 1)[1])
+            if d:
+                date = d
+                break
+    if not date:  # fallback: regex-scan the top of the content
+        for l in lines[:20]:
+            d = _parse_date(l)
+            if d:
+                date = d
+                break
+
+    lang = "th" if re.search(r"[ก-๙]", title + " " + snippet) else "en"
+
+    try:
+        host = urllib.parse.urlparse(url).hostname or ""
+        source = host.removeprefix("www.")
+    except Exception:
+        source = url
+
+    return {
+        "title": title,
+        "url": url,
+        "snippet": snippet,
+        "date": date,
+        "lang": lang,
+        "source": source,
+    }
+
+
+async def _scout_news(query: str | None = None, category: str | None = None, days: int = 7) -> dict:
+    """News-pitch search (PITCH mode discovery). Free-first multi-source sweep
+    (DDG + Brave + GNews + Jina read + regex extraction)."""
+    days = max(1, min(30, int(days or 7)))
+    today = datetime.now()
+    span = today.strftime("%B %Y")
+    cutoff_dt = today - timedelta(days=days)
+    cutoff_iso = cutoff_dt.strftime("%Y-%m-%d")
+    today_iso = today.strftime("%Y-%m-%d")
+
+    cat_clauses = {
+        "expat-policy": "visa OR immigration OR work permit OR regulation",
+        "business-investment": "business OR investment OR economy OR property",
+        "lifestyle": "lifestyle OR cost of living OR travel OR healthcare",
+    }
+    cat_clause = cat_clauses.get((category or "").strip(), "")
+    cat_clause_thai = {
+        "expat-policy": "วีซ่า OR ตรวจคนเข้าเมือง OR ใบอนุญาตทำงาน OR กฎระเบียบ",
+        "business-investment": "ธุรกิจ OR การลงทุน OR เศรษฐกิจ OR อสังหาริมทรัพย์",
+        "lifestyle": "การดำเนินชีวิต OR ค่าครองชีพ OR การท่องเที่ยว OR การดูแลสุขภาพ",
+    }.get((category or "").strip(), "")
+
+    q_clean = (query or "").strip()
+    if q_clean:
+        queries = [
+            f"{q_clean} {span}",
+            f"Thailand {q_clean} news {span}",
+            f"ประเทศไทย {q_clean} {span}",
+            f"{q_clean} site:thairath.co.th OR site:khaosod.co.th OR site:matichon.co.th OR site:prachachat.net",
+        ]
+    else:
+        c_en = f" {cat_clause}" if cat_clause else ""
+        c_th = f" {cat_clause_thai}" if cat_clause_thai else ""
+        queries = [
+            f"Thailand{c_en} {span}".strip(),
+            f"Thailand{c_en} news {span}".strip(),
+            f"ประเทศไทย{c_th} {span}".strip(),
+            f"Thailand{c_en} site:thairath.co.th OR site:khaosod.co.th OR site:matichon.co.th OR site:prachachat.net".strip(),
+        ]
+
+    errors: list[str] = []
+    ddg_urls: list[str] = []
+    for q in queries:
+        try:
+            md = await _jina_read(f"https://duckduckgo.com/html/?q={urllib.parse.quote(q)}")
+            for ev in _parse_ddg(md):
+                ddg_urls.append(ev["url"])
+        except Exception as e:
+            errors.append(f"ddg {q!r}: {e}")
+
+    brave_results = await asyncio.gather(*[_brave_urls(q) for q in queries])
+    brave_urls = [u for batch in brave_results for u in batch]
+
+    gnews_q = f"{q_clean} news" if q_clean else (f"Thailand {cat_clause} news".strip() if cat_clause else f"Thailand news {span}")
+    gnews_urls = await _gnews_urls(gnews_q)
+
+    all_urls = [*ddg_urls, *brave_urls, *gnews_urls]
+    seen_domains: set[str] = set()
+    urls: list[str] = []
+    for u in all_urls:
+        try:
+            host = urllib.parse.urlparse(u).hostname or ""
+            domain = host.removeprefix("www.")
+        except Exception:
+            domain = u
+        if _scout_domain_excluded(domain):
+            continue
+        if domain and domain not in seen_domains:
+            seen_domains.add(domain)
+            urls.append(u)
+        if len(urls) >= 20:
+            break
+
+    async def _fetch_and_extract(u: str) -> tuple[dict | None, str | None]:
+        try:
+            md = await _jina_read(u)
+            return _extract_news(md, u), None
+        except Exception as e:
+            return None, f"extract {u}: {e}"
+
+    extract_results = await asyncio.gather(*[_fetch_and_extract(u) for u in urls])
+    ordered: list[dict] = []
+    for res, err in extract_results:
+        if err:
+            errors.append(err)
+        elif res:
+            d_str = res.get("date") or ""
+            if not _scout_date_in_range(d_str, cutoff_iso, today_iso):
+                continue  # strict: undated or out-of-window dropped
+            ordered.append(res)
+
+    return {
+        "results": ordered,
+        "count": len(ordered),
+        "errors": errors,
+        "query": query,
+        "category": category,
+        "days": days,
+    }
+
+
+async def _flow_scout_search(job: TnJob, query: str | None, category: str | None, days: int) -> None:
+    job.result = await _scout_news(query=query, category=category, days=days)
+
+
+@router.post("/api/thailandnow/scout/search")
+async def scout_search(payload: dict = Body(default={})):
+    """STORY SCOUT — news pitch search route (async job)."""
+    body = payload or {}
+    query = body.get("query")
+    category = body.get("category")
+    days = int(body.get("days") or 7)
+    if any(j.kind == "scout-search" and j.status in _TN_RUNNING for j in _TN_JOBS.values()):
+        raise HTTPException(409, "a STORY SCOUT search is already running")
+    label = f"scout: {(query or category or 'general')[:40]}"
+    return _tn_spawn("scout-search", label,
+                     lambda j: _flow_scout_search(j, query, category, days))
+
+
+@router.get("/api/thailandnow/scout/report/{jid}")
+async def scout_report(jid: str):
+    """Fetch results of a completed STORY SCOUT search job."""
+    job = _TN_JOBS.get(jid)
+    if not job or job.kind != "scout-search":
+        raise HTTPException(404, "no such STORY SCOUT job")
+    if job.status != "done":
+        raise HTTPException(409, f"job is {job.status}; not ready")
+    return job.result
+
+
+@router.post("/api/thailandnow/scout/pitch")
+async def scout_pitch(payload: dict = Body(default={})):
+    """STORY SCOUT — make a pitch for a news article URL."""
+    body = payload or {}
+    url = (body.get("url") or "").strip()
+    if not url:
+        raise HTTPException(400, "url is required")
+
+    md = await _jina_read(url)
+    lines = [l.strip() for l in md.split("\n")]
+    title = ""
+    for l in lines:
+        if l.startswith("#"):
+            title = l.lstrip("#").strip()
+            if title:
+                break
+    if not title:
+        non_blank = [l for l in lines if l]
+        title = non_blank[0] if non_blank else ""
+
+    system = _load_gem(_scout_gem_path())
+    opts = _opts()
+    model = (opts.get("scout_llm") or {}).get("model") or "glm-5"
+    user = f"Title: {title}\nSource URL: {url}\n\nArticle:\n{md[:20000]}"
+
+    try:
+        raw = await zai_message(user, max_tokens=8192, system=system, model=model, timeout=180)
+        pitch = _parse_json_lenient(raw) or {"headline_en": raw.strip()}
+        mode = "direct"
+    except (HTTPException, Exception):
+        pitch, mode = {}, "degraded"
+
+    return {"pitch": pitch, "url": url, "model": model, "mode": mode}
 
 
 # --- EVENTS radar Tier 2 (R6): NotebookLM deep web research ---
@@ -2524,4 +2800,29 @@ if __name__ == "__main__":
     _u = _archive_union([_dupe_a, _dupe_b])
     assert len(_u) == 2, "dedupe by id failed"
     assert _u[0]["id"] == "2", "newest-first sort failed (B is later than A)"
-    print("OK archive: tokenize + title score + presence/detail classify + recursive union")
+    # STORY SCOUT — news extraction + gem resolves
+    _nmd = "# Bangkok rail extension opens December 2026\n\nThe new rail line links Suvarnabhumi to the city center, cutting taxi costs for arrivals.\n\nMore text here."
+    _n = _extract_news(_nmd, "https://www.thairath.co.th/news/foreign/123")
+    assert _n and _n["title"].startswith("Bangkok rail"), "news title parse failed"
+    assert "rail" in _n["snippet"].lower() and len(_n["snippet"]) <= 300, "news snippet failed"
+    assert _n["lang"] == "en" and _n["source"] == "thairath.co.th", "news meta failed"
+    # bot-check pages drop; Jina metadata prefixes strip from title + snippet
+    assert _extract_news("# Just a moment...\n\nChecking your browser before continuing.", "https://x.example/cf") is None, "bot-check page should drop"
+    _jm = _extract_news("Title: Real Headline\nURL Source: https://x.example\nMarkdown Content:\n\nFirst paragraph here.", "https://x.example")
+    assert _jm and _jm["title"] == "Real Headline" and "first paragraph" in _jm["snippet"].lower(), "jina meta not stripped / snippet"
+    _pt = _extract_news("# Headline\n\nPublished Time: 2026-07-15T10:00:00Z\n\nBody text here.", "https://x.example")
+    assert _pt and _pt["date"] == "2026-07-15", "published-time date not parsed"
+    assert _extract_news("# 403 Forbidden\n\nWarning: Target URL returned error 403: Forbidden.", "https://x.example/403") is None, "jina error page should drop"
+    # scout domain exclusion + strict date-range bounds
+    assert _scout_domain_excluded("thailandnow.in.th") and _scout_domain_excluded("blog.thailandnow.in.th"), "own-site exclude failed"
+    assert not _scout_domain_excluded("bangkokpost.com"), "false domain exclude"
+    assert _scout_date_in_range("2026-07-15", "2026-06-27", "2026-07-27"), "in-range date should keep"
+    assert not _scout_date_in_range("2025-04-22", "2026-06-27", "2026-07-27"), "stale date should drop"
+    assert not _scout_date_in_range("2026-12-01", "2026-06-27", "2026-07-27"), "future date should drop"
+    assert not _scout_date_in_range("", "2026-06-27", "2026-07-27"), "undated not in-range"
+    # markdown link/image syntax stripped from titles
+    assert _extract_news("# [Thairath Website](https://thairath.co.th)\n\nBody text.", "https://thairath.co.th").get("title") == "Thairath Website", "markdown link in title not stripped"
+    _sgp = _scout_gem_path()
+    assert _sgp.name == "story-scout-pitch.md" and _sgp.exists(), "scout gem path missing"
+    assert "headline_en" in _load_gem(_sgp), "scout gem extract failed"
+    print("OK archive + story scout: tokenize + title score + presence/detail classify + recursive union + news extract")
