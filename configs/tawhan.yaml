@@ -61,6 +61,11 @@ modules:
       notebooklm_notebook_id: ""                                # R6: DEEP RESEARCH notebook (created + cached on first use)
       archive_gem_path: app/gems/event-archive-qa.md            # Stage 2: source-only Q&A gem
       # archive_folder_id: <override>                           # optional; defaults to the tian desk's drive_folder_id
+      # --- SEO HEALTH (read-only link/image/orphan report) ---
+      wordpress_url: https://www.thailandnow.in.th   # override of WORDPRESS_URL; user/password stay in ~/n8n/.secrets.env
+      seo_media_cache_ttl_s: 86400                     # media library (~5750) pulled once/day
+      seo_external_concurrency: 8                       # polite outbound HEAD concurrency (S2)
+      seo_external_timeout_s: 10                        # per-external-link HEAD timeout (S2)
       desks:
         - {id: paul,   kind: article, drive_folder_id: 1w8ESeKzvW-Er36qjMjgfLU7fMwa8KSu6, trello_list_name: "To draft (Paul)",   doc_name: "[{yyyymm}] [CAT] #{nn}",               card_name: "Article | {mon} #{nn}", count: 12, labels: ["Quota", "Happening NOW"]}
         - {id: teerin, kind: blog,    drive_folder_id: 1jUTZ5qchpViAioBWfUpIdu5PQCwdSWSq, trello_list_name: "To draft (Teerin)", doc_name: "[{yyyymm}] [CAT] Working Title #{nn}", card_name: "Blog | #{nn}",            count: 5, labels: ["Quota", "Happening NOW"]}

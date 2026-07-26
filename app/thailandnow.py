@@ -23,6 +23,7 @@ import urllib.parse
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from html.parser import HTMLParser
 from pathlib import Path
 from uuid import uuid4
 
@@ -1539,6 +1540,321 @@ async def archive_ask(payload: dict = Body(default={})):
         }
 
 
+# --- SEO sub-module (HEALTH: read-only link/image/orphan report) ----------------
+# Authed WP REST (Basic auth, app password). The Sucuri WAF 403s *unauthenticated*
+# fetches but authed REST passes (verified). Creds in /home/NAZ/n8n/.secrets.env.
+# Phase 1 = detect-only report (this block); the fix (bulk-unlink / suggest-insert)
+# is Phase 2, later. Internal links/images are validated against the fetched
+# post/page/media sets (no fetching of thailandnow.in.th pages → Sucuri-proof);
+# only external links/images need real HTTP checks (S2).
+
+_WP_SECRETS = Path("/home/NAZ/n8n/.secrets.env")
+# WP-generated archive/asset paths — an internal href into one of these is NOT a
+# broken post link even though it isn't a post/page URL.
+_WP_ARCHIVE_PREFIXES = (
+    "/category/", "/tag/", "/author/", "/page/", "/feed/", "/wp-content/",
+    "/wp-admin/", "/wp-json/", "/wp-login", "/wp-includes/", "/?p=", "/?page_id=",
+    "/?cat=", "/?tag=", "/?author=",
+)
+_SEO_MEDIA_CACHE: tuple[set[str], float] | None = None  # (source_urls, fetched_epoch)
+_SEO_STOP = {  # generic + site words, stripped for orphan-suggestion token overlap
+    "the", "a", "an", "of", "in", "on", "for", "and", "or", "to", "with", "at",
+    "by", "from", "is", "are", "was", "were", "be", "as", "it", "its", "that",
+    "this", "thailand", "thai", "now", "news", "how", "what", "when", "where",
+}
+
+
+def _secret(key: str) -> str | None:
+    """Read a secret: env first, then /home/NAZ/n8n/.secrets.env (``KEY=value``
+    lines; values may be unquoted-with-spaces — split on first '=' + strip outer
+    whitespace only, embedded spaces survive). Mirrors zai._resolve_key(); no
+    shell-out."""
+    v = os.environ.get(key)
+    if v:
+        return v
+    if _WP_SECRETS.is_file():
+        for line in _WP_SECRETS.read_text().splitlines():
+            line = line.strip()
+            if line.startswith(f"{key}="):
+                val = line.split("=", 1)[1].strip().strip("'\"")
+                if val:
+                    return val
+    return None
+
+
+def _wp_creds() -> tuple[str, str, str]:
+    """(base_url, user, app-password). URL overridable via options.wordpress_url;
+    user/password via _secret(). HTTPException(503) if incomplete."""
+    opts = _opts()
+    url = (opts.get("wordpress_url") or _secret("WORDPRESS_URL") or "").rstrip("/")
+    user = _secret("WORDPRESS_USERNAME") or ""
+    pwd = _secret("WORDPRESS_PASSWORD") or ""
+    if not (url and user and pwd):
+        raise HTTPException(
+            503, "WordPress creds not configured (WORDPRESS_URL/USERNAME/PASSWORD "
+                 "in env or /home/NAZ/n8n/.secrets.env)",
+        )
+    return url, user, pwd
+
+
+def _wp_site_host() -> str:
+    """Bare host (no leading www.) of the WP site, for internal-link classification."""
+    h = urllib.parse.urlparse(_wp_creds()[0]).netloc
+    return h[4:] if h.startswith("www.") else h
+
+
+async def _wp(method: str, path: str, params: dict | None = None):
+    """Authed WP REST call (Basic auth via httpx). Returns parsed JSON or None."""
+    url, user, pwd = _wp_creds()
+    async with httpx.AsyncClient(timeout=30, auth=(user, pwd)) as c:
+        r = await c.request(method, f"{url}/wp-json/wp/v2{path}", params=params or {})
+        if r.status_code >= 400:
+            raise HTTPException(502, f"WP {method} {path}: {r.status_code} {r.text[:200]}")
+        return r.json() if r.content else None
+
+
+async def _wp_list_all(endpoint: str, fields: str) -> list[dict]:
+    """Page through a WP REST collection at per_page=100 (?page=N). Stops on a
+    short/empty page; hard cap 200 pages."""
+    out: list[dict] = []
+    for page in range(1, 201):
+        batch = await _wp("GET", endpoint, {"per_page": 100, "page": page, "_fields": fields})
+        if not batch:
+            break
+        out.extend(batch)
+        if len(batch) < 100:
+            break
+    return out
+
+
+async def _seo_media_set() -> set[str]:
+    """Cached set of media source_urls (TTL options.seo_media_cache_ttl_s, default
+    24h). ~5750 items — pulled once, reused across scans. Module-global cache."""
+    global _SEO_MEDIA_CACHE
+    ttl = float(_opts().get("seo_media_cache_ttl_s", 86400))
+    now = time.time()
+    if _SEO_MEDIA_CACHE and (now - _SEO_MEDIA_CACHE[1]) < ttl:
+        return _SEO_MEDIA_CACHE[0]
+    items = await _wp_list_all("/media", "id,source_url")
+    urls = {it.get("source_url", "") for it in items if it.get("source_url")}
+    _SEO_MEDIA_CACHE = (urls, now)
+    return urls
+
+
+class _SeoLinkImgParser(HTMLParser):
+    """Collect ``<a href>`` and ``<img>`` source URLs from rendered WP content,
+    skipping ``data:``/``blob:`` lazy-load placeholders. Captures src +
+    data-src/data-lazy-src + srcset so the *real* (non-placeholder) image URL is
+    recorded even when ``src`` is a 1x1 gif."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.links: list[str] = []
+        self.imgs: list[str] = []
+
+    def handle_starttag(self, tag, attrs):
+        a = dict(attrs)
+        if tag == "a":
+            h = a.get("href")
+            if h:
+                self.links.append(h)
+        elif tag == "img":
+            seen: set[str] = set()
+            for k in ("data-src", "data-lazy-src", "data-lazy", "src"):
+                v = (a.get(k) or "").strip()
+                if v and not v.startswith(("data:", "blob:")) and v not in seen:
+                    self.imgs.append(v)
+                    seen.add(v)
+            for k in ("srcset", "data-srcset"):
+                ss = a.get(k)
+                if not ss:
+                    continue
+                for cand in ss.split(","):
+                    url = cand.strip().split(" ")[0]
+                    if url and not url.startswith(("data:", "blob:")) and url not in seen:
+                        self.imgs.append(url)
+                        seen.add(url)
+
+
+def _seo_host_eq(a: str, b: str) -> bool:
+    a = a[4:] if a.startswith("www.") else a
+    b = b[4:] if b.startswith("www.") else b
+    return a == b
+
+
+def _seo_classify(url: str, site_host: str) -> str | None:
+    """'internal' | 'external' | None (skip anchors / mailto / tel / javascript /
+    data / blob). Site-relative ("/path", "//host/path", bare "foo.html") → internal."""
+    u = (url or "").strip()
+    if not u or u[0] == "#" or u.startswith(("mailto:", "tel:", "javascript:", "data:", "blob:")):
+        return None
+    if u.startswith("//"):
+        host = urllib.parse.urlparse("https:" + u).netloc
+    elif u.startswith("/"):
+        return "internal"
+    else:
+        host = urllib.parse.urlparse(u).netloc
+        if not host:  # bare relative ("foo.html") — treat as site-relative
+            return "internal"
+    return "internal" if _seo_host_eq(host, site_host) else "external"
+
+
+def _seo_path(url: str) -> str:
+    """Path component (no query/fragment), trailing slash trimmed, for matching."""
+    return urllib.parse.urlparse(url).path.rstrip("/") or "/"
+
+
+def _seo_extract(html: str, site_host: str) -> dict:
+    """Parse rendered WP HTML → deduped {internal_links, external_links,
+    internal_imgs, external_imgs}. Pure (no network)."""
+    p = _SeoLinkImgParser()
+    try:
+        p.feed(html or "")
+    except Exception:  # malformed HTML — keep what we parsed
+        pass
+    out = {"internal_links": [], "external_links": [], "internal_imgs": [], "external_imgs": []}
+    seen_l: set[str] = set()
+    for h in p.links:
+        c = _seo_classify(h, site_host)
+        if c in ("internal", "external") and h not in seen_l:
+            out[c + "_links"].append(h)
+            seen_l.add(h)
+    seen_i: set[str] = set()
+    for s in p.imgs:
+        c = _seo_classify(s, site_host)
+        if c in ("internal", "external") and s not in seen_i:
+            out[c + "_imgs"].append(s)
+            seen_i.add(s)
+    return out
+
+
+def _seo_tokens(title: str) -> set[str]:
+    return {w for w in re.findall(r"[a-z0-9]+", (title or "").lower())
+            if len(w) > 2 and w not in _SEO_STOP}
+
+
+def _seo_suggest(orphan_title: str, candidates: list[tuple[str, str]], n: int = 3) -> list[dict]:
+    """Top-n ``{link,title}`` by title-token overlap with the orphan. ``candidates``
+    is (link, title) pairs excluding the orphan itself. Pure + deterministic."""
+    ot = _seo_tokens(orphan_title)
+    scored: list[tuple[int, str, str]] = []
+    for link, title in candidates:
+        if not link:
+            continue
+        ov = len(ot & _seo_tokens(title))
+        if ov > 0:
+            scored.append((ov, link, title))
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [{"link": l, "title": t} for _, l, t in scored[:n]]
+
+
+def _seo_img_base(url: str) -> str:
+    """Strip a WP size suffix (-WxH) before the extension so a content crop matches
+    its media-library original: '.../khon-09-1024x683.jpg' -> '.../khon-09.jpg'."""
+    return re.sub(r"-\d+x\d+(?=\.[a-zA-Z]{2,4}$)", "", url)
+
+
+def _seo_img_has_ext(url: str) -> bool:
+    """True if the URL ends in a recognisable image extension (else it's an
+    unvalidatable edit/placeholder ref — skip rather than false-flag)."""
+    return bool(re.search(r"\.(jpe?g|png|webp|gif|svg|avif)(?:$|\?)", url, re.I))
+
+
+async def _seo_fetch_all() -> tuple[list[dict], list[dict], list[dict], set[str], set[str]]:
+    """Fetch content-bearing types (posts + pages + the ``event`` CPT, full content)
+    + the media set + category/tag archive paths. Content types feed parsing; their
+    paths plus the taxonomy paths form the valid-internal-path set. Soft on the
+    optional types — event/categories/tags that aren't REST-enabled are skipped."""
+    posts = await _wp_list_all("/posts", "id,link,slug,title,content")
+    pages = await _wp_list_all("/pages", "id,link,slug,title,content")
+    try:
+        events = await _wp_list_all("/event", "id,link,slug,title,content")
+    except HTTPException:
+        events = []
+    media = await _seo_media_set()
+    extra: set[str] = set()
+    for ep in ("/categories", "/tags"):
+        try:
+            terms = await _wp_list_all(ep, "id,link")
+        except HTTPException:
+            continue
+        for t in terms:
+            if t.get("link"):
+                extra.add(_seo_path(t["link"]))
+    return posts, pages, events, media, extra
+
+
+def _seo_internal_report(
+    posts: list[dict], pages: list[dict], events: list[dict], media_urls: set[str],
+    extra_paths: set[str], site_host: str,
+) -> dict:
+    """Pure: from content-bearing WP records (posts + pages + event CPT; each with
+    ``link``, ``title.rendered``, ``content.rendered``) + the media source_url set
+    + extra valid paths (category/tag archives), compute broken internal links,
+    broken internal images, orphan posts/events, and the external link/image sets
+    (handed to S2's HTTP check). No network. Image crops are matched to their
+    media original by stripping the -WxH suffix; extensionless refs are skipped."""
+    media_bases = {_seo_img_base(m) for m in media_urls}
+
+    def parse(rec: dict) -> dict:
+        html = (rec.get("content") or {}).get("rendered", "")
+        ex = _seo_extract(html, site_host)
+        return {
+            "link": rec.get("link", ""),
+            "title": (rec.get("title") or {}).get("rendered", ""),
+            "path": _seo_path(rec.get("link", "")),
+            "internal_link_paths": {_seo_path(u) for u in ex["internal_links"]},
+            "internal_imgs": ex["internal_imgs"],
+            "external_links": ex["external_links"],
+            "external_imgs": ex["external_imgs"],
+        }
+
+    p_items = [parse(r) for r in posts]
+    e_items = [parse(r) for r in events]
+    g_items = [parse(r) for r in pages]
+    article_items = p_items + e_items            # orphan-eligible
+    all_items = article_items + g_items          # everything that bears links
+    valid_paths = {it["path"] for it in all_items if it["link"]} | set(extra_paths)
+
+    broken_internal: list[dict] = []
+    for it in all_items:
+        for tgt in it["internal_link_paths"]:
+            if tgt in valid_paths or tgt == it["path"]:
+                continue
+            if any(tgt.startswith(pfx) for pfx in _WP_ARCHIVE_PREFIXES):
+                continue
+            broken_internal.append({"from": it["link"], "from_title": it["title"], "to": tgt})
+
+    broken_images: list[dict] = []
+    for it in all_items:
+        for src in it["internal_imgs"]:
+            if not _seo_img_has_ext(src):
+                continue  # extensionless edit/placeholder ref — unvalidatable, skip
+            if _seo_img_base(src) not in media_bases:
+                broken_images.append({"from": it["link"], "from_title": it["title"], "src": src})
+
+    # orphan ARTICLES (posts + events): zero inbound internal links from anywhere
+    inbound = {it["path"]: 0 for it in article_items}
+    for src_it in all_items:
+        for tgt in src_it["internal_link_paths"]:
+            if tgt != src_it["path"] and tgt in inbound:
+                inbound[tgt] += 1
+    orphans = [{"link": it["link"], "title": it["title"]}
+               for it in article_items if inbound.get(it["path"], 0) == 0]
+
+    return {
+        "post_count": len(posts),
+        "page_count": len(pages),
+        "event_count": len(events),
+        "valid_paths": len(valid_paths),
+        "broken_internal_links": broken_internal,
+        "broken_internal_images": broken_images,
+        "orphans": orphans,
+        "external_links": sorted({u for it in all_items for u in it["external_links"]}),
+        "external_imgs": sorted({u for it in all_items for u in it["external_imgs"]}),
+    }
+
+
 if __name__ == "__main__":
     # Self-check the non-trivial pure logic (no network, no creds).
     # R5: LLM-JSON parsing + date normalization / window filtering.
@@ -1577,6 +1893,70 @@ if __name__ == "__main__":
     assert _next_nn("[{yyyymm}] [CAT] #{nn}", "202607", "JUL", None,
                     ["[202607] [CAT] #01", "[202607] [CAT] #07", "[202605] [CAT] #09"]) == 8
     assert _next_nn("[{yyyymm}] [CAT] #{nn}", "202607", "JUL", None, []) == 1
+    # SEO HEALTH (S1): classify / parse / orphan graph / suggest.
+    sh = "thailandnow.in.th"
+    assert _seo_classify("/arts/x/", sh) == "internal"
+    assert _seo_classify("https://www.thailandnow.in.th/y", sh) == "internal"
+    assert _seo_classify("https://thailandnow.in.th/y", sh) == "internal"  # non-www matches
+    assert _seo_classify("//thailandnow.in.th/y", sh) == "internal"        # schemeless
+    assert _seo_classify("foo.html", sh) == "internal"                     # bare relative
+    assert _seo_classify("https://youtube.com/w", sh) == "external"
+    for u in ("#frag", "mailto:a@b.com", "tel:+66", "javascript:void(0)",
+              "data:image/gif;base64,AAA", ""):
+        assert _seo_classify(u, sh) is None, u
+    assert _seo_path("https://www.thailandnow.in.th/arts/x/?q=1#t") == "/arts/x"
+    assert _seo_img_base("https://x/khon-09-1024x683.jpg") == "https://x/khon-09.jpg"
+    assert _seo_img_has_ext("https://x/y.jpg") and not _seo_img_has_ext("https://x/edit-no-ext")
+    # parser: data: placeholder skipped; real URL from data-src + srcset captured
+    ex = _seo_extract(
+        '<a href="/good/">g</a><a href="https://youtube.com/w">y</a><a href="#skip">s</a>'
+        '<img src="data:image/gif;base64,AAA" data-src="https://www.thailandnow.in.th/wp-content/uploads/a.jpg">'
+        '<img src="https://www.thailandnow.in.th/wp-content/uploads/b.jpg"'
+        ' srcset="https://www.thailandnow.in.th/wp-content/uploads/b-768.jpg 768w">',
+        sh,
+    )
+    assert ex["internal_links"] == ["/good/"], ex["internal_links"]
+    assert ex["external_links"] == ["https://youtube.com/w"], ex["external_links"]
+    assert "data:image/gif" not in str(ex["internal_imgs"]) + str(ex["external_imgs"])
+    assert any(u.endswith("/a.jpg") for u in ex["internal_imgs"]), ex["internal_imgs"]
+    assert any(u.endswith("/b-768.jpg") for u in ex["internal_imgs"]), ex["internal_imgs"]
+    # internal report: whitelisted category link excluded; sized image matched to media
+    # original; extensionless ref skipped; orphan among post AND event.
+    posts = [
+        {"link": "https://www.thailandnow.in.th/p1/", "title": {"rendered": "Post One"},
+         "content": {"rendered": '<a href="/p2/">two</a><a href="/gone/">gone</a>'
+                     '<a href="/current-affairs/">cat</a>'
+                     '<img src="https://www.thailandnow.in.th/wp-content/uploads/img1-1024x683.jpg">'
+                     '<img src="https://www.thailandnow.in.th/wp-content/uploads/img-broken.jpg">'
+                     '<img src="https://www.thailandnow.in.th/wp-content/uploads/edit-no-ext">'}},
+        {"link": "https://www.thailandnow.in.th/p2/", "title": {"rendered": "Post Two"},
+         "content": {"rendered": ""}},
+        {"link": "https://www.thailandnow.in.th/p3/", "title": {"rendered": "Post Three"},
+         "content": {"rendered": '<a href="https://youtube.com/w">yt</a>'}},
+    ]
+    pages = [{"link": "https://www.thailandnow.in.th/about/", "title": {"rendered": "About"},
+              "content": {"rendered": '<a href="/p1/">p1</a>'}}]
+    events = [{"link": "https://www.thailandnow.in.th/event/e1/", "title": {"rendered": "Event One"},
+               "content": {"rendered": ""}}]
+    rep = _seo_internal_report(
+        posts, pages, events,
+        {"https://www.thailandnow.in.th/wp-content/uploads/img1.jpg"},  # original → matches the -1024x683 crop
+        {"/current-affairs"}, sh)
+    assert rep["post_count"] == 3 and rep["page_count"] == 1 and rep["event_count"] == 1, rep
+    assert rep["valid_paths"] == 6, rep["valid_paths"]  # /p1,/p2,/p3,/about,/event/e1 + /current-affairs
+    assert len(rep["broken_internal_links"]) == 1, rep["broken_internal_links"]  # only /gone/
+    assert rep["broken_internal_links"][0]["to"] == "/gone", rep["broken_internal_links"]
+    assert len(rep["broken_internal_images"]) == 1, rep["broken_internal_images"]  # img-broken only
+    assert len(rep["orphans"]) == 2, rep["orphans"]  # post3 + event1
+    assert {o["link"].split("/")[-2] for o in rep["orphans"]} == {"p3", "e1"}, rep["orphans"]
+    assert rep["external_links"] == ["https://youtube.com/w"], rep["external_links"]
+    # suggest: token overlap ranks + filters
+    sugg = _seo_suggest("Khon epic festival", [
+        ("https://www.thailandnow.in.th/khon/", "Record youth turnout for Khon epic"),
+        ("https://www.thailandnow.in.th/songkran/", "Songkran water festival"),
+        ("https://www.thailandnow.in.th/food/", "Best street food"),
+    ], n=2)
+    assert sugg and sugg[0]["link"].endswith("/khon/") and len(sugg) == 2, sugg
     # R1: month override
     assert _mon_for("202608") == "AUG"
     assert _mon_for("202613") is None and _mon_for("garbage") is None
