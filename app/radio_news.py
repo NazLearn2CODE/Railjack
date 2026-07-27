@@ -82,6 +82,17 @@ async def api_docs(parent: str | None = None, limit: int | None = None):
     return await _script(argv)
 
 
+@router.get("/api/newsroom/radio/news/browse")
+async def api_browse(parent: str | None = None):
+    """Folder browser: one level of the Drive tree under ``?parent=`` (default
+    RT-2026). Returns ``{parent, folders, docs}`` — the panel drills folder by
+    folder instead of loading every script doc at once."""
+    argv = [PY, str(RNEWS), "browse"]
+    if parent:
+        argv += ["--parent", parent]
+    return await _script(argv)
+
+
 @router.get("/api/newsroom/radio/news/report")
 async def api_report():
     """Read the scout handoff JSON the CONVERT button feeds the panel."""

@@ -375,6 +375,34 @@ def test_rn_docs_argv_and_limit(monkeypatch):
     assert argv2[-3:] == ["list-docs", "--limit", "5"]
 
 
+def test_rn_browse_argv_and_parent(monkeypatch):
+    c, calls, _ = _rn_client(monkeypatch, out=b'{"folders":[],"docs":[]}')
+    assert c.get("/api/newsroom/radio/news/browse").status_code == 200
+    assert calls[0][-1] == "browse"  # default parent handled by the script
+
+    c2, calls2, _ = _rn_client(monkeypatch, out=b'{"folders":[],"docs":[]}')
+    assert c2.get("/api/newsroom/radio/news/browse?parent=FOLDERID").status_code == 200
+    assert calls2[0][-3:] == ["browse", "--parent", "FOLDERID"]
+
+
+def test_rn_split_children_partitions_and_sorts():
+    rn = _load_radio_news()
+    children = [
+        {"id": "d1", "name": "20260901_Weekday Script", "mimeType": "application/vnd.google-apps.document"},
+        {"id": "d2", "name": "20260903_Weekend Script", "mimeType": "application/vnd.google-apps.document"},
+        {"id": "noise", "name": "random notes", "mimeType": "application/vnd.google-apps.document"},
+        {"id": "fB", "name": "202608 August", "mimeType": "application/vnd.google-apps.folder"},
+        {"id": "fA", "name": "202607 July", "mimeType": "application/vnd.google-apps.folder"},
+    ]
+    folders, docs = rn.split_children(children)
+    # folders sorted by name (YYYYMM prefix → chronological)
+    assert [f["name"] for f in folders] == ["202607 July", "202608 August"]
+    # only NAME_RE docs kept, newest-first, kind parsed
+    assert [d["id"] for d in docs] == ["d2", "d1"]
+    assert docs[0]["kind"] == "weekend" and docs[1]["kind"] == "weekday"
+    assert "noise" not in [d["id"] for d in docs]
+
+
 def test_rn_apply_requires_fields(monkeypatch):
     c, calls, _ = _rn_client(monkeypatch)
     assert c.post("/api/newsroom/radio/news/apply",

@@ -75,7 +75,19 @@ weekend business = 6 (MIDDAY 2-5 / EVE 3,5), AM untouched. Idempotent re-run →
 NOTE: freshly Drive-copied docs 401 on `batchUpdate` for ~30-60s while ACLs propagate — irrelevant in
 prod (Document Generator makes the docs days ahead); only bit the scratch-copy test flow.
 
+## Doc picker revision (2026-07-28) — flat dropdown → folder browser
+Naz: the flat 60-doc `<select>` was unusable. Replaced with a **one-level folder browser**
+(RT 2026 ▸ month ▸ day), his pick over URL-paste / month+day dropdowns.
+- **Backend:** new `browse` subcommand (`split_children` pure helper partitions a folder's children
+  into sorted subfolders + NAME_RE script-docs, one Drive call per level, no recursion) +
+  `GET /api/newsroom/radio/news/browse?parent=`. `list-docs` kept (harmless). Live-verified on
+  `:8700`: root→13 folders/0 docs, September→30 docs newest-first, Daily Recordings→0 script-docs.
+- **Frontend:** `selectedDocId`+flat `newsDocs` → `browseStack` breadcrumbs + `selectedDoc` object;
+  drill via `enterFolder`, back via `jumpToCrumb`; ⟳ reloads level. `tsc`+`vite` exit 0.
+- **Tests:** +2 (`test_rn_browse_argv_and_parent`, `test_rn_split_children_partitions_and_sorts`) → **28 pass**.
+- Skill byte-identical vault + `~/.claude` (md5 `987d9ced…`).
+
 ## Remaining
-- **Human gate only:** browser panel click-through (SCOUT → CONVERT → tick → CONFIRM) on a real doc —
-  can't be host-driven. Backend + all 4 endpoints proven; frontend build-verified (tsc+vite exit 0).
-- Ship: commit Railjack + vault (skill fix) + module note + vault-check + memory-log.
+- **Human gate only:** browser panel click-through (browse → pick doc → SCOUT → CONVERT → tick →
+  CONFIRM) on a real doc — can't be host-driven. Backend + all 5 endpoints proven; frontend
+  build-verified (tsc+vite exit 0).

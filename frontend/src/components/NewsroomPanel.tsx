@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { fetchJSON } from "../api";
 import type { ModuleConfig } from "../store";
 
@@ -87,7 +87,14 @@ interface NewsDoc {
   date: string;
 }
 
-interface NewsDocsResponse {
+interface BrowseFolder {
+  id: string;
+  name: string;
+}
+
+interface NewsBrowseResponse {
+  parent: string;
+  folders: BrowseFolder[];
   docs: NewsDoc[];
 }
 
@@ -155,10 +162,16 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
   const [radioLoading, setRadioLoading] = useState<boolean>(false);
   const [radioGenerating, setRadioGenerating] = useState<boolean>(false);
 
-  // RADIO News Fill state
-  const [newsDocs, setNewsDocs] = useState<NewsDoc[]>([]);
-  const [newsDocsLoading, setNewsDocsLoading] = useState<boolean>(false);
-  const [selectedDocId, setSelectedDocId] = useState<string>("");
+  // RADIO News Fill state — folder browser (RT-2026 → month → day)
+  const RRT_PARENT = "1LSw5NwDhwg7PE9pJUO6jKPcd3yFBCOI9";
+  const [browseStack, setBrowseStack] = useState<BrowseFolder[]>([
+    { id: RRT_PARENT, name: "RT 2026" },
+  ]);
+  const [browseFolders, setBrowseFolders] = useState<BrowseFolder[]>([]);
+  const [browseDocs, setBrowseDocs] = useState<NewsDoc[]>([]);
+  const [browseLoading, setBrowseLoading] = useState<boolean>(false);
+  const [selectedDoc, setSelectedDoc] = useState<NewsDoc | null>(null);
+  const browseInit = useRef<boolean>(false);
   const [newsCategory, setNewsCategory] = useState<"global" | "business">("global");
   const [newsScouting, setNewsScouting] = useState<boolean>(false);
   const [newsReportLoading, setNewsReportLoading] = useState<boolean>(false);
@@ -231,27 +244,40 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
     }
   };
 
-  const fetchNewsDocs = useCallback(async () => {
-    setNewsDocsLoading(true);
+  const loadBrowse = useCallback(async (folderId: string) => {
+    setBrowseLoading(true);
     try {
-      const data = await fetchJSON<NewsDocsResponse>("/api/newsroom/radio/news/docs");
-      const docs = Array.isArray(data?.docs) ? data.docs : [];
-      setNewsDocs(docs);
-      if (docs.length > 0 && !selectedDocId) {
-        setSelectedDocId(docs[0].id);
-      }
+      const data = await fetchJSON<NewsBrowseResponse>(
+        `/api/newsroom/radio/news/browse?parent=${encodeURIComponent(folderId)}`,
+      );
+      setBrowseFolders(Array.isArray(data?.folders) ? data.folders : []);
+      setBrowseDocs(Array.isArray(data?.docs) ? data.docs : []);
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
-      setNewsDocsLoading(false);
+      setBrowseLoading(false);
     }
-  }, [selectedDocId]);
+  }, []);
+
+  // Drill into a subfolder: push a breadcrumb, load its children.
+  const enterFolder = (f: BrowseFolder) => {
+    setBrowseStack((s) => [...s, f]);
+    void loadBrowse(f.id);
+  };
+
+  // Breadcrumb click: pop back to that level, reload it.
+  const jumpToCrumb = (idx: number) => {
+    const target = browseStack[idx];
+    setBrowseStack((s) => s.slice(0, idx + 1));
+    void loadBrowse(target.id);
+  };
 
   useEffect(() => {
-    if (tab === "radio" && radioMode === "newsfill" && newsDocs.length === 0) {
-      void fetchNewsDocs();
+    if (tab === "radio" && radioMode === "newsfill" && !browseInit.current) {
+      browseInit.current = true;
+      void loadBrowse(RRT_PARENT);
     }
-  }, [tab, radioMode, newsDocs.length, fetchNewsDocs]);
+  }, [tab, radioMode, loadBrowse, RRT_PARENT]);
 
   const handleNewsScout = async () => {
     setNewsScouting(true);
@@ -285,7 +311,6 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
     }
   };
 
-  const selectedDoc = newsDocs.find((d) => d.id === selectedDocId) || null;
   const targetHardCount = selectedDoc?.kind === "weekend" ? (newsCategory === "global" ? 7 : 6) : 10;
   const isWeekdayGlobal = selectedDoc?.kind === "weekday" && newsCategory === "global";
 
@@ -637,10 +662,7 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
               </button>
               <button
                 className={`btn btn--compact ${radioMode === "newsfill" ? "btn--signal" : ""}`}
-                onClick={() => {
-                  setRadioMode("newsfill");
-                  if (newsDocs.length === 0) void fetchNewsDocs();
-                }}
+                onClick={() => setRadioMode("newsfill")}
               >
                 News Fill
               </button>
@@ -829,42 +851,6 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
             <div className="flex min-h-0 flex-1 flex-col gap-3">
               {/* Step 0 & 1 Controls */}
               <div className="flex flex-wrap items-center gap-3 border-b border-edge pb-2">
-                {/* Working doc select */}
-                <label className="flex items-center gap-1.5 mono text-xs flex-1" style={{ minWidth: 220 }}>
-                  <span className="label">Target Doc</span>
-                  <select
-                    className="mono label flex-1 truncate"
-                    style={{
-                      background: "var(--color-panel-2)",
-                      color: "var(--color-phosphor)",
-                      border: "1px solid var(--color-edge)",
-                      padding: "4px 6px",
-                      fontSize: "11px",
-                    }}
-                    value={selectedDocId}
-                    onChange={(e) => {
-                      setSelectedDocId(e.target.value);
-                      setSelectedArticles([]);
-                      setSlicePick(null);
-                      setNewsApplyResult(null);
-                    }}
-                  >
-                    {newsDocs.map((doc) => (
-                      <option key={doc.id} value={doc.id}>
-                        {doc.name} [{doc.kind.toUpperCase()}] ({doc.date})
-                      </option>
-                    ))}
-                  </select>
-                  <button
-                    className="btn btn--compact"
-                    onClick={() => void fetchNewsDocs()}
-                    disabled={newsDocsLoading}
-                    title="Refresh working script docs list"
-                  >
-                    {newsDocsLoading ? "…" : "⟳"}
-                  </button>
-                </label>
-
                 {/* Category select */}
                 <label className="flex items-center gap-1.5 mono text-xs">
                   <span className="label">Category</span>
@@ -907,6 +893,113 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
                   >
                     {newsReportLoading ? "LOADING…" : "CONVERT"}
                   </button>
+                </div>
+
+                {/* Folder browser: RT 2026 ▸ month ▸ day */}
+                <div className="flex w-full flex-col gap-1">
+                  {/* Breadcrumb trail */}
+                  <div className="flex flex-wrap items-center gap-1 mono text-xs">
+                    <span className="label">Target Doc</span>
+                    {browseStack.map((crumb, idx) => (
+                      <span key={crumb.id} className="flex items-center gap-1">
+                        {idx > 0 && <span style={{ color: "var(--color-muted)" }}>▸</span>}
+                        <button
+                          className="mono"
+                          onClick={() => jumpToCrumb(idx)}
+                          disabled={idx === browseStack.length - 1}
+                          style={{
+                            background: "none",
+                            border: "none",
+                            padding: 0,
+                            cursor: idx === browseStack.length - 1 ? "default" : "pointer",
+                            color:
+                              idx === browseStack.length - 1
+                                ? "var(--color-phosphor)"
+                                : "var(--color-signal)",
+                          }}
+                          title={idx === browseStack.length - 1 ? "" : `Back to ${crumb.name}`}
+                        >
+                          {crumb.name}
+                        </button>
+                      </span>
+                    ))}
+                    <button
+                      className="btn btn--compact ml-auto"
+                      onClick={() => void loadBrowse(browseStack[browseStack.length - 1].id)}
+                      disabled={browseLoading}
+                      title="Reload this folder"
+                    >
+                      {browseLoading ? "…" : "⟳"}
+                    </button>
+                  </div>
+
+                  {/* Folder + doc list for the current level */}
+                  <div
+                    className="flex flex-col overflow-auto border border-edge"
+                    style={{ maxHeight: 150, background: "var(--color-void)" }}
+                  >
+                    {browseLoading ? (
+                      <span className="label mono text-xs p-2">— loading —</span>
+                    ) : browseFolders.length === 0 && browseDocs.length === 0 ? (
+                      <span className="label mono text-xs p-2">— empty folder —</span>
+                    ) : (
+                      <>
+                        {browseFolders.map((f) => (
+                          <button
+                            key={f.id}
+                            className="mono text-xs flex items-center gap-1.5 px-2 py-1 text-left"
+                            onClick={() => enterFolder(f)}
+                            style={{
+                              background: "none",
+                              border: "none",
+                              borderBottom: "1px solid var(--color-edge-soft)",
+                              color: "var(--color-phosphor-dim)",
+                              cursor: "pointer",
+                            }}
+                          >
+                            <span>📁</span>
+                            <span className="flex-1 truncate">{f.name}</span>
+                            <span style={{ color: "var(--color-muted)" }}>▸</span>
+                          </button>
+                        ))}
+                        {browseDocs.map((doc) => {
+                          const active = selectedDoc?.id === doc.id;
+                          return (
+                            <button
+                              key={doc.id}
+                              className="mono text-xs flex items-center gap-1.5 px-2 py-1 text-left"
+                              onClick={() => {
+                                setSelectedDoc(doc);
+                                setSelectedArticles([]);
+                                setSlicePick(null);
+                                setNewsApplyResult(null);
+                              }}
+                              style={{
+                                background: active ? "var(--color-panel-2)" : "none",
+                                border: "none",
+                                borderBottom: "1px solid var(--color-edge-soft)",
+                                color: active ? "var(--color-go)" : "var(--color-phosphor)",
+                                cursor: "pointer",
+                              }}
+                            >
+                              <span>{active ? "✓" : "📄"}</span>
+                              <span className="flex-1 truncate">{doc.name}</span>
+                              <span className="label" style={{ fontSize: "10px", color: "var(--color-muted)" }}>
+                                {doc.kind.toUpperCase()}
+                              </span>
+                            </button>
+                          );
+                        })}
+                      </>
+                    )}
+                  </div>
+
+                  {/* Current selection echo */}
+                  <span className="mono text-xs" style={{ color: "var(--color-muted)" }}>
+                    {selectedDoc
+                      ? `Selected: ${selectedDoc.name} [${selectedDoc.kind.toUpperCase()}]`
+                      : "— pick a script doc —"}
+                  </span>
                 </div>
               </div>
 
