@@ -895,6 +895,33 @@ def _scout_gem_path() -> Path:
     return p
 
 
+_JINA_META = ("title:", "url source:", "markdown content:", "published time:", "description:")
+_BOTCHECK = ("just a moment", "security checkpoint", "attention required",
+             "vercel security", "enable javascript", "checking your browser",
+             "forbidden", "warning: target url")
+
+
+def _extract_title(lines: list[str], non_blank: list[str]) -> str:
+    """Clean an article title from Jina-split lines: first #-heading (fallback
+    first non-blank), strip Jina metadata prefix + markdown link/image syntax,
+    drop bot-check/error pages (→ ""). Shared by _extract_news and scout_pitch."""
+    title = ""
+    for l in lines:
+        if l.startswith("#"):
+            title = l.lstrip("#").strip()
+            if title:
+                break
+    if not title and non_blank:
+        title = non_blank[0]
+    if title.lower().startswith(_JINA_META):
+        title = title.split(":", 1)[1].strip()
+    if any(b in title.lower() for b in _BOTCHECK):
+        return ""
+    title = re.sub(r"!\[[^\]]*\]\([^)]*\)", "", title)      # ![alt](url) → drop
+    title = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", title)  # [text](url) → text
+    return title.strip(" #")[:200]
+
+
 def _extract_news(md: str, url: str) -> dict | None:
     """Walk Jina markdown of ONE news article, pulling news fields."""
     if not md:
@@ -904,32 +931,9 @@ def _extract_news(md: str, url: str) -> dict | None:
     if not non_blank:
         return None
 
-    # Jina prepends metadata lines (Title:/URL Source:/Markdown Content:) and
-    # bot-check pages expose a challenge heading — clean the title, drop junk pages.
-    jina_meta = ("title:", "url source:", "markdown content:", "published time:", "description:")
-    botcheck = ("just a moment", "security checkpoint", "attention required",
-                "vercel security", "enable javascript", "checking your browser",
-                "forbidden", "warning: target url")
-    title = ""
-    for l in lines:
-        if l.startswith("#"):
-            title = l.lstrip("#").strip()
-            if title:
-                break
-    if not title:
-        title = non_blank[0]
-    if title.lower().startswith(jina_meta):
-        title = title.split(":", 1)[1].strip()
-    low = title.lower()
-    if not title or any(b in low for b in botcheck):
-        return None
-    title = re.sub(r"!\[[^\]]*\]\([^)]*\)", "", title)      # ![alt](url) → drop
-    title = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", title)  # [text](url) → text
-    title = title.strip(" #")
+    title = _extract_title(lines, non_blank)
     if not title:
         return None
-    if len(title) > 200:
-        title = title[:200]
 
     snippet = ""
     for l in lines:
@@ -939,7 +943,7 @@ def _extract_news(md: str, url: str) -> dict | None:
             continue
         if l.startswith("![") or ("![" in l and "](" in l):
             continue
-        if l.lower().startswith(jina_meta):
+        if l.lower().startswith(_JINA_META):
             continue
         if l == title or l == f"# {title}":
             continue
@@ -1118,15 +1122,8 @@ async def scout_pitch(payload: dict = Body(default={})):
 
     md = await _jina_read(url)
     lines = [l.strip() for l in md.split("\n")]
-    title = ""
-    for l in lines:
-        if l.startswith("#"):
-            title = l.lstrip("#").strip()
-            if title:
-                break
-    if not title:
-        non_blank = [l for l in lines if l]
-        title = non_blank[0] if non_blank else ""
+    non_blank = [l for l in lines if l]
+    title = _extract_title(lines, non_blank)
 
     system = _load_gem(_scout_gem_path())
     opts = _opts()
@@ -1623,7 +1620,7 @@ def _archive_union(doc_lists: list[list[dict]]) -> list[dict]:
 async def _drive_list_event_docs(token: str) -> list[dict]:
     """List the Event Drive's Google Docs (newest first), recursively walking
     subfolders up to depth 5, paginating on nextPageToken, 90s-TTL-cached.
-    Returns [{id,name,modifiedTime,webViewLink,folderName}]."""
+    Returns [{id,name,modifiedTime,webViewLink}]."""
     global _ARCHIVE_LIST_CACHE, _ARCHIVE_LIST_CACHE_AT
     if _ARCHIVE_LIST_CACHE is not None and \
             (time.monotonic() - _ARCHIVE_LIST_CACHE_AT) < _ARCHIVE_LIST_TTL_S:
@@ -1634,18 +1631,10 @@ async def _drive_list_event_docs(token: str) -> list[dict]:
     doc_lists: list[list[dict]] = []
 
     async with httpx.AsyncClient(timeout=30) as c:
-        root_name = ""
-        r_root = await c.get(
-            f"https://www.googleapis.com/drive/v3/files/{folder}",
-            headers=hdr, params={"fields": "name", "supportsAllDrives": "true"},
-        )
-        if r_root.status_code == 200:
-            root_name = r_root.json().get("name", "")
-
-        folder_queue: list[tuple[str, str, int]] = [(folder, root_name, 0)]
+        folder_queue: list[tuple[str, int]] = [(folder, 0)]
 
         while folder_queue:
-            cur_folder_id, cur_folder_name, depth = folder_queue.pop(0)
+            cur_folder_id, depth = folder_queue.pop(0)
 
             # 1. Fetch Docs in cur_folder_id
             cur_docs: list[dict] = []
@@ -1671,7 +1660,6 @@ async def _drive_list_event_docs(token: str) -> list[dict]:
                         "id": f.get("id", ""), "name": f.get("name", ""),
                         "modifiedTime": f.get("modifiedTime", ""),
                         "webViewLink": f.get("webViewLink", ""),
-                        "folderName": cur_folder_name,
                     })
                 page_token = data.get("nextPageToken")
                 if not page_token:
@@ -1700,9 +1688,8 @@ async def _drive_list_event_docs(token: str) -> list[dict]:
                     sub_data = r_sub.json()
                     for sf in sub_data.get("files", []):
                         sf_id = sf.get("id")
-                        sf_name = sf.get("name", "")
                         if sf_id:
-                            folder_queue.append((sf_id, sf_name, depth + 1))
+                            folder_queue.append((sf_id, depth + 1))
                     sub_token = sub_data.get("nextPageToken")
                     if not sub_token:
                         break
@@ -1755,13 +1742,6 @@ def _archive_content_tokens(question: str) -> set[str]:
     return toks - _ARCHIVE_STOP
 
 
-def _archive_is_presence(question: str) -> bool:
-    """General listing intent (no specific event named) → list-all response.
-    True when no content tokens survive stripping (e.g. 'do we have any events?',
-    'what's coming up?', '2026'). 'do we have Songkran?' leaves 'songkran' → False."""
-    return not _archive_content_tokens(question)
-
-
 def _archive_is_detail(question: str) -> bool:
     """Synthesis/detail intent — wants specific info about an event (when/where/
     how much). Stage 2 answers these via LLM synthesis over the top docs."""
@@ -1799,8 +1779,9 @@ async def archive_ask(payload: dict = Body(default={})):
         return {"answer": "No event docs in the Event Drive yet.",
                 "sources": [], "mode": "direct"}
 
+    content = _archive_content_tokens(question)  # presence = empty; also feeds title scoring
     # general listing (no specific event named) → all names + links
-    if _archive_is_presence(question):
+    if not content:
         top = docs[:30]
         return {
             "answer": "\n".join(f"• {d['name']} — {d['webViewLink']}" for d in top),
@@ -1812,7 +1793,6 @@ async def archive_ask(payload: dict = Body(default={})):
     # pool feeds BOTH the direct-match return and the synthesis branch, so the
     # scoring runs once. Detail questions (when/where/how much) go to synthesis;
     # plain name lookups return the matched titles directly (no LLM cost).
-    content = _archive_content_tokens(question)
     year_m = re.search(r"\b(20\d{2})\b", question)
     pool = docs
     if year_m:
@@ -1863,13 +1843,12 @@ async def archive_ask(payload: dict = Body(default={})):
         return {
             "answer": answer,
             "sources": [
-                {"name": d["name"], "url": d["webViewLink"],
-                 "snippet": bodies[i][:160] if i < len(bodies) else ""}
-                for i, d in enumerate(top)
+                {"name": d["name"], "url": d["webViewLink"]}
+                for d in top
             ],
             "mode": "synthesized",
         }
-    except HTTPException as e:
+    except HTTPException:
         # Gateway 503/502 → degrade to a fixed message + the candidate sources.
         # NEVER let a gateway failure surface as HTTP 500.
         return {
@@ -1878,7 +1857,6 @@ async def archive_ask(payload: dict = Body(default={})):
                       "gateway is down). See the sources below.",
             "sources": [{"name": d["name"], "url": d["webViewLink"]} for d in matched_docs],
             "mode": "degraded",
-            "note": "gateway: " + str(e.detail),
         }
 
 
@@ -2784,11 +2762,11 @@ if __name__ == "__main__":
     assert _archive_tokenize("a I 1") == set(), "single-char tokens dropped"
     assert _archive_score_title({"songkran"}, '[202604] [EN] "Songkran Festival"') >= 3, "substring hit"
     assert _archive_score_title({"songkran"}, "Loi Krathong") == 0, "no overlap"
-    assert _archive_is_presence("do we have any events lined up for 2026?") is True
-    assert _archive_is_presence("show me what's coming up") is True
-    assert _archive_is_presence("2026") is True
-    assert _archive_is_presence("Songkran") is False, "bare event name not presence"
-    assert _archive_is_presence("do we have Songkran?") is False, "specific presence → title search, not list-all"
+    assert not _archive_content_tokens("do we have any events lined up for 2026?"), "presence → no content tokens"
+    assert not _archive_content_tokens("show me what's coming up"), "presence"
+    assert not _archive_content_tokens("2026"), "bare year → presence (year stripped)"
+    assert _archive_content_tokens("Songkran"), "bare event name → has content tokens"
+    assert _archive_content_tokens("do we have Songkran?"), "specific → has content tokens (title search)"
     assert _archive_content_tokens("do we have Songkran lined up?") == {"songkran"}, _archive_content_tokens("do we have Songkran lined up?")
     assert _archive_is_detail("when is Songkran?") is True
     assert _archive_is_detail("where is it held") is True

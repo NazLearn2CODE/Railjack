@@ -87,13 +87,11 @@ const CT = { "content-type": "application/json" } as const;
 interface ArchiveSource {
   name: string;
   url: string;
-  snippet?: string;
 }
 interface ArchiveReply {
   answer: string;
   sources: ArchiveSource[];
   mode: "direct" | "synthesized" | "degraded";
-  note?: string;
 }
 interface ArchiveMsg {
   q: string;
