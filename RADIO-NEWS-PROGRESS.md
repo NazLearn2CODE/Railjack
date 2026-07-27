@@ -112,9 +112,9 @@ Tawhan's suggestions (Naz invited; unadopted, decide at build):
   re-fetch (paywall risk) + breaks the "scout ships content, no re-fetch" design. Reserve for if #1
   alone doesn't fix the bill.
 
-## Cheap lane + SEA fill — backend DONE + host-verified (2026-07-28)
+## Cheap lane + SEA fill — DONE + host-verified (2026-07-28)
 Two features Naz added on top of the refinements, both for max token economy. **Backend shipped
-+ tested (33 pass); frontend (2 buttons) is the only pending piece → Antigravity brief written.**
++ tested (33 pass); frontend (2 buttons) built by host + build-verified — Naz: "I LOVE IT".**
 
 ### SEA-lead placement (#2 fill layer 2 — the engine)
 - New pure `assign_pieces(slotmap, pieces, category)` in `radio_news.py`: global runs reserve
@@ -141,8 +141,21 @@ Two features Naz added on top of the refinements, both for max token economy. **
   verified: empty body → **400** guard, route loaded (not 405) after `systemctl --user restart`.
 - Idempotent (skips already-filled slots), same as manual fill.
 
+### Frontend — DONE (host-built, not Antigravity, 2026-07-28)
+- `NewsroomPanel.tsx` gains a **CHEAP LANE** block under the folder browser (shares doc + category
+  with the curated flow): **CHEAP SCOUT** injects `/radio-news-scout <cat> --results N --sea M
+  --slice K` (N/M/K from the count table, caption shows the exact numbers), **AUTOPILOT** POSTs
+  `…/news/autofill {doc_id,kind,category}` and renders through the APPLY result panel. Result header
+  reads `AUTOPILOT FILLED (N picked)` vs `APPLIED`; SEA-led slots get a `SEA` badge. Both disabled
+  until a doc is picked. `tsc --noEmit` + `vite build` exit 0.
+
 ### Pending
-- **Frontend (Antigravity):** CHEAP SCOUT + AUTOPILOT buttons in the News Fill cheap lane — brief in
-  `RADIO-CHEAP-LANE-IDE-BRIEF.md`.
-- **Human gate:** live end-to-end auto-fill of a real doc (CHEAP SCOUT → AUTOPILOT) — can't be host-driven.
+- **Human gate:** live end-to-end auto-fill of a real doc (CHEAP SCOUT → Enter → AUTOPILOT) — can't
+  be host-driven.
 - **Still deferred:** the glm-5 content rewrite in `process()` (the "big fish").
+
+### Backlog — ULTRA CHEAP mode (after the rewrite; Naz, 2026-07-28)
+- Offload the scout itself off the metered Claude session: send the scout **or** cheap-scout
+  instruction to **Antigravity IDE**, which does the scouting + writes the handoff JSON that
+  CONVERT/AUTOPILOT already consume (same `/tmp/railjack-radio-news/latest.json` report shape).
+  Net effect: zero scouting tokens on the Claude side. Sits behind the content-rewrite big fish.

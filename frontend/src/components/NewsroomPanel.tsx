@@ -119,6 +119,7 @@ interface NewsFillWritten {
   tab: string;
   slot: number;
   title: string;
+  region?: string;
 }
 
 interface NewsFillSkipped {
@@ -132,6 +133,8 @@ interface NewsFillApplyResponse {
   category: string;
   written: NewsFillWritten[];
   skipped: NewsFillSkipped[];
+  auto?: boolean;
+  picked?: number;
 }
 
 const CT: Record<string, string> = { "content-type": "application/json" };
@@ -180,6 +183,9 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
   const [slicePick, setSlicePick] = useState<NewsArticle | null>(null);
   const [newsApplying, setNewsApplying] = useState<boolean>(false);
   const [newsApplyResult, setNewsApplyResult] = useState<NewsFillApplyResponse | null>(null);
+  // Cheap lane: exact-count scout + one-click autopilot (no human curation)
+  const [newsCheapScouting, setNewsCheapScouting] = useState<boolean>(false);
+  const [newsAutopiloting, setNewsAutopiloting] = useState<boolean>(false);
 
   const handleRadioPreview = async () => {
     setRadioLoading(true);
@@ -314,6 +320,16 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
   const targetHardCount = selectedDoc?.kind === "weekend" ? (newsCategory === "global" ? 7 : 6) : 10;
   const isWeekdayGlobal = selectedDoc?.kind === "weekday" && newsCategory === "global";
 
+  // Cheap-lane exact-fill counts: N results / M SEA / K slice, keyed on
+  // category + kind (matches the backend fill-map — no headroom, AUTOPILOT
+  // takes all). A doc with no kind yet is treated as weekday (the default).
+  const cheapCounts = (() => {
+    if (newsCategory === "global") {
+      return selectedDoc?.kind === "weekend" ? { N: 7, M: 2, K: 0 } : { N: 10, M: 3, K: 1 };
+    }
+    return selectedDoc?.kind === "weekend" ? { N: 6, M: 0, K: 0 } : { N: 10, M: 0, K: 0 };
+  })();
+
   const toggleArticleSelect = (article: NewsArticle) => {
     const existsIndex = selectedArticles.findIndex((a) => a.url === article.url);
     if (existsIndex >= 0) {
@@ -360,6 +376,57 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setNewsApplying(false);
+    }
+  };
+
+  // CHEAP SCOUT — inject an exact-count scout invocation into the ttyd pane
+  // (same mechanism as SCOUT; the human presses Enter, then AUTOPILOT reads
+  // the handoff). Counts come from cheapCounts, so a doc must be picked first.
+  const handleCheapScout = async () => {
+    if (!selectedDoc) return;
+    setNewsCheapScouting(true);
+    setError(null);
+    try {
+      const { N, M, K } = cheapCounts;
+      await post("/api/terminal/insert", {
+        text: `/radio-news-scout ${newsCategory} --results ${N} --sea ${M} --slice ${K}`,
+      });
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setNewsCheapScouting(false);
+    }
+  };
+
+  // AUTOPILOT — one click: backend reads the handoff itself, places every
+  // piece deterministically (SEA → GLOBAL slot 1 of each broadcast), fills.
+  // No stdin, no pieces payload. Result renders through the APPLY renderer.
+  const handleAutopilot = async () => {
+    if (!selectedDoc) return;
+    setNewsAutopiloting(true);
+    setError(null);
+    setNewsApplyResult(null);
+    try {
+      const res = await fetch("/api/newsroom/radio/news/autofill", {
+        method: "POST",
+        headers: CT,
+        body: JSON.stringify({
+          doc_id: selectedDoc.id,
+          kind: selectedDoc.kind,
+          category: newsCategory,
+        }),
+      });
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({ detail: res.statusText }));
+        setError(typeof d.detail === "string" ? d.detail : JSON.stringify(d.detail));
+      } else {
+        const data: NewsFillApplyResponse = await res.json();
+        setNewsApplyResult(data);
+      }
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setNewsAutopiloting(false);
     }
   };
 
@@ -1001,6 +1068,54 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
                       : "— pick a script doc —"}
                   </span>
                 </div>
+
+                {/* Cheap lane — exact-count scout → one-click autopilot (no ticking, max token save) */}
+                <div
+                  className="flex w-full flex-col gap-1.5 border border-edge px-2 py-1.5"
+                  style={{ background: "var(--color-void)" }}
+                >
+                  <div className="flex items-center gap-2">
+                    <span className="label" style={{ color: "var(--color-hazard)" }}>
+                      CHEAP LANE
+                    </span>
+                    <span className="mono text-xs" style={{ color: "var(--color-muted)" }}>
+                      no review · max token save
+                    </span>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2 mono text-xs">
+                    <button
+                      className="btn btn--compact"
+                      onClick={() => void handleCheapScout()}
+                      disabled={!selectedDoc || newsCheapScouting}
+                      title={
+                        selectedDoc
+                          ? `Inject scout for exactly ${cheapCounts.N} results (${cheapCounts.M} SEA, ${cheapCounts.K} slice)`
+                          : "Pick a script doc first"
+                      }
+                    >
+                      {newsCheapScouting ? "SCOUTING…" : "CHEAP SCOUT"}
+                    </button>
+                    <span style={{ color: "var(--color-muted)" }}>
+                      {selectedDoc
+                        ? `gather exactly ${cheapCounts.N} · ${cheapCounts.M} SEA · ${cheapCounts.K} slice`
+                        : "pick a doc"}
+                    </span>
+                    <span style={{ color: "var(--color-muted)" }}>→</span>
+                    <button
+                      className="btn btn--compact btn--signal"
+                      onClick={() => void handleAutopilot()}
+                      disabled={!selectedDoc || newsAutopiloting}
+                      title={
+                        selectedDoc
+                          ? "Convert + place + fill deterministically, no ticking"
+                          : "Pick a script doc first"
+                      }
+                    >
+                      {newsAutopiloting ? "AUTOPILOT…" : "AUTOPILOT"}
+                    </button>
+                    <span style={{ color: "var(--color-muted)" }}>convert + place + fill, no hands</span>
+                  </div>
+                </div>
               </div>
 
               {/* Status Header / Target Summary & CONFIRM Button */}
@@ -1036,7 +1151,11 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
                 {newsApplyResult ? (
                   <div className="flex flex-col gap-2">
                     <span className="label" style={{ color: "var(--color-go)" }}>
-                      ✓ APPLIED TO DOC — {newsApplyResult.written.length} SLOTS WRITTEN
+                      ✓ {newsApplyResult.auto ? "AUTOPILOT FILLED" : "APPLIED TO DOC"} —{" "}
+                      {newsApplyResult.written.length} SLOTS WRITTEN
+                      {typeof newsApplyResult.picked === "number"
+                        ? ` (${newsApplyResult.picked} picked)`
+                        : ""}
                     </span>
                     <div className="flex flex-col gap-1">
                       {newsApplyResult.written.map((w, idx) => (
@@ -1045,6 +1164,15 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
                           <span className="label" style={{ color: "var(--color-signal)" }}>
                             [{w.tab} SLOT {w.slot}]
                           </span>
+                          {w.region === "SEA" && (
+                            <span
+                              className="label"
+                              style={{ fontSize: "9px", color: "var(--color-hazard)" }}
+                              title="Southeast-Asia lead piece"
+                            >
+                              SEA
+                            </span>
+                          )}
                           <span className="flex-1 truncate" style={{ color: "var(--color-phosphor)" }}>
                             {w.title}
                           </span>
