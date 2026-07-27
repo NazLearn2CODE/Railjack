@@ -6,7 +6,9 @@ feeds back a canned (rc, stdout, stderr).
 """
 
 import json
+from pathlib import Path
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -110,3 +112,120 @@ def test_probe_ok_and_down(monkeypatch):
     assert c.get("/api/newsroom/probe").json() == {"ok": True}
     c2, _ = _client(monkeypatch, rc=3)
     assert c2.get("/api/newsroom/probe").json() == {"ok": False}
+
+
+# ---------------------------------------------------------------- radio
+# `radio.py` lives in the newsroom skill dir (vault copy = the deployed one),
+# so load it by path rather than importing a repo module. The two skill dirs
+# are kept byte-identical — accept either.
+
+
+def _load_radio():
+    import importlib.util
+
+    for p in (newsroom.SCRIPTS / "radio.py",
+              Path.home() / ".claude" / "skills" / "newsroom" / "scripts" / "radio.py"):
+        if p.exists():
+            spec = importlib.util.spec_from_file_location("radio_mod", p)
+            mod = importlib.util.module_from_spec(spec)
+            assert spec.loader is not None
+            spec.loader.exec_module(mod)
+            return mod
+    pytest.skip("radio.py not on a skill path yet (canonical writes pending)")
+
+
+def test_radio_build_plan_aug2026():
+    radio = _load_radio()
+    plan = radio.build_plan(2026, 8, "202608 August")
+    # sheet first, named after the folder.
+    assert plan[0] == {"template_id": radio.TEMPLATE_SHEET,
+                       "name": "202608 August", "kind": "sheet"}
+    by_name = {it["name"]: it["kind"] for it in plan}
+    # 2026-08-01 is Saturday, 2026-08-03 is Monday.
+    assert by_name["20260801_Weekend Script"] == "weekend"
+    assert by_name["20260803_Weekday Script"] == "weekday"
+    counts = {}
+    for it in plan:
+        counts[it["kind"]] = counts.get(it["kind"], 0) + 1
+    assert counts == {"sheet": 1, "weekend": 10, "weekday": 21}  # Aug 2026 = 31 days
+
+
+def test_radio_dry_run_makes_no_network_calls(monkeypatch, capsys):
+    radio = _load_radio()
+
+    def boom(*a, **k):
+        raise AssertionError("dry-run touched the network")
+
+    # find/existing are stubbed (the only calls dry-run makes); google_token +
+    # copy_file explode if hit — proving dry-run neither auths nor writes.
+    monkeypatch.setattr(radio, "google_token", boom)
+    monkeypatch.setattr(radio, "copy_file", boom)
+    monkeypatch.setattr(radio, "find_month_folder",
+                        lambda *a, **k: ("FOLDER_ID", "202608 August"))
+    monkeypatch.setattr(radio, "existing_names", lambda *a, **k: set())
+
+    radio.main(["--year", "2026", "--month", "8", "--dry-run"])
+    out = json.loads(capsys.readouterr().out)
+    assert out["dry_run"] is True
+    assert out["folder"] == {"id": "FOLDER_ID", "name": "202608 August"}
+    assert out["counts"] == {"sheet": 1, "weekend": 10, "weekday": 21,
+                             "planned": 32, "to_create": 32, "skipped": 0}
+    assert out["created"] == []
+    assert out["to_create"][0] == {"name": "202608 August", "kind": "sheet"}
+    assert len(out["to_create"]) == 32
+
+
+def test_radio_dry_run_skips_existing(monkeypatch, capsys):
+    radio = _load_radio()
+    monkeypatch.setattr(radio, "google_token", lambda *a, **k: pytest.fail("net"))
+    monkeypatch.setattr(radio, "copy_file", lambda *a, **k: pytest.fail("write"))
+    monkeypatch.setattr(radio, "find_month_folder",
+                        lambda *a, **k: ("F", "202608 August"))
+    # the sheet already exists → idempotent skip.
+    monkeypatch.setattr(radio, "existing_names",
+                        lambda *a, **k: {"202608 August"})
+    radio.main(["--year", "2026", "--month", "8", "--dry-run"])
+    out = json.loads(capsys.readouterr().out)
+    assert out["counts"]["to_create"] == 31
+    assert out["counts"]["skipped"] == 1
+
+
+def test_radio_preview_argv(monkeypatch):
+    c, calls = _client(monkeypatch, out=b'{"dry_run": true}')
+    assert c.post("/api/newsroom/radio/preview",
+                  json={"year": 2026, "month": 8}).status_code == 200
+    argv = calls[0]
+    assert argv[0] == "python3"
+    assert argv[1].endswith("radio.py")
+    assert argv[2:8] == ["--year", "2026", "--month", "8", "--dry-run"]
+    assert "--sheet-name" not in argv
+
+
+def test_radio_preview_passes_sheet_name(monkeypatch):
+    c, calls = _client(monkeypatch, out=b'{"dry_run": true}')
+    c.post("/api/newsroom/radio/preview",
+           json={"year": 2026, "month": 8, "sheet_name": "Aug Rundown"})
+    argv = calls[0]
+    # preview appends --dry-run after the sheet-name pair, so assert the pair by
+    # position rather than expecting it to be the final two args.
+    i = argv.index("--sheet-name")
+    assert argv[i + 1] == "Aug Rundown"
+    assert "--dry-run" in argv
+
+
+def test_radio_generate_omits_dry_run(monkeypatch):
+    c, calls = _client(monkeypatch, out=b'{"created": []}')
+    assert c.post("/api/newsroom/radio/generate",
+                  json={"year": 2026, "month": 8}).status_code == 200
+    argv = calls[0]
+    assert "--dry-run" not in argv
+    assert argv[1].endswith("radio.py")
+
+
+def test_radio_requires_year_and_month(monkeypatch):
+    c, calls = _client(monkeypatch)
+    assert c.post("/api/newsroom/radio/preview", json={"year": 2026}).status_code == 400
+    assert c.post("/api/newsroom/radio/preview", json={"month": 8}).status_code == 400
+    assert c.post("/api/newsroom/radio/preview", json={}).status_code == 400
+    assert c.post("/api/newsroom/radio/generate", json={}).status_code == 400
+    assert calls == []  # nothing exec'd on a bad body

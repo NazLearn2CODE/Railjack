@@ -48,10 +48,41 @@ interface LedgerEntry {
   processed_at: string;
 }
 
+interface RadioFolder {
+  id?: string;
+  name: string;
+}
+
+interface RadioCounts {
+  weekend: number;
+  weekday: number;
+  sheet: number;
+  planned: number;
+  to_create: number;
+  skipped: number;
+}
+
+interface RadioItem {
+  name: string;
+  kind?: string;
+  id?: string;
+  link?: string;
+}
+
+interface RadioResponse {
+  folder?: RadioFolder;
+  dry_run?: boolean;
+  counts?: RadioCounts;
+  to_create?: RadioItem[];
+  created?: RadioItem[];
+  skipped?: RadioItem[];
+  _fatal?: string;
+}
+
 const CT: Record<string, string> = { "content-type": "application/json" };
 
 export default function NewsroomPanel({ module: _module }: { module: ModuleConfig }) {
-  const [tab, setTab] = useState<"queue" | "ledger">("queue");
+  const [tab, setTab] = useState<"queue" | "ledger" | "radio">("queue");
   const [queue, setQueue] = useState<Queue | null>(null);
   const [ledger, setLedger] = useState<LedgerEntry[]>([]);
   const [selected, setSelected] = useState<Story | null>(null);
@@ -62,6 +93,79 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
   const [loading, setLoading] = useState(false);
   const [rewritten, setRewritten] = useState("");
   const [rewriting, setRewriting] = useState(false);
+
+  // RADIO sub-module state
+  const now = new Date();
+  const [radioYear, setRadioYear] = useState<number>(now.getFullYear());
+  const [radioMonth, setRadioMonth] = useState<number>(now.getMonth() + 1);
+  const [radioSheetName, setRadioSheetName] = useState<string>("");
+  const [radioPreview, setRadioPreview] = useState<RadioResponse | null>(null);
+  const [radioResult, setRadioResult] = useState<RadioResponse | null>(null);
+  const [radioLoading, setRadioLoading] = useState<boolean>(false);
+  const [radioGenerating, setRadioGenerating] = useState<boolean>(false);
+
+  const handleRadioPreview = async () => {
+    setRadioLoading(true);
+    setError(null);
+    setRadioPreview(null);
+    setRadioResult(null);
+    try {
+      const body: { year: number; month: number; sheet_name?: string } = {
+        year: radioYear,
+        month: radioMonth,
+      };
+      if (radioSheetName.trim()) {
+        body.sheet_name = radioSheetName.trim();
+      }
+      const res = await fetch("/api/newsroom/radio/preview", {
+        method: "POST",
+        headers: CT,
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({ detail: res.statusText }));
+        setError(typeof d.detail === "string" ? d.detail : JSON.stringify(d.detail));
+      } else {
+        const data: RadioResponse = await res.json();
+        setRadioPreview(data);
+      }
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setRadioLoading(false);
+    }
+  };
+
+  const handleRadioGenerate = async () => {
+    if (!radioPreview) return;
+    setRadioGenerating(true);
+    setError(null);
+    try {
+      const body: { year: number; month: number; sheet_name?: string } = {
+        year: radioYear,
+        month: radioMonth,
+      };
+      if (radioSheetName.trim()) {
+        body.sheet_name = radioSheetName.trim();
+      }
+      const res = await fetch("/api/newsroom/radio/generate", {
+        method: "POST",
+        headers: CT,
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({ detail: res.statusText }));
+        setError(typeof d.detail === "string" ? d.detail : JSON.stringify(d.detail));
+      } else {
+        const data: RadioResponse = await res.json();
+        setRadioResult(data);
+      }
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setRadioGenerating(false);
+    }
+  };
 
   const refreshQueue = useCallback(() => {
     setLoading(true);
@@ -161,6 +265,12 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
           }}
         >
           LEDGER
+        </button>
+        <button
+          className={`btn btn--compact ${tab === "radio" ? "btn--signal" : ""}`}
+          onClick={() => setTab("radio")}
+        >
+          RADIO
         </button>
         {tab === "queue" && (
           <>
@@ -339,6 +449,188 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
                 </span>
               </div>
             ))}
+          </div>
+        </div>
+      )}
+
+      {tab === "radio" && (
+        <div className="hud hud--bracket reveal reveal-1 flex min-h-0 flex-1 flex-col gap-3 p-3">
+          <div className="flex items-center justify-between">
+            <span className="label">RADIO — MONTHLY BATCH GENERATOR</span>
+          </div>
+
+          {/* Form controls */}
+          <div className="flex flex-wrap items-center gap-3">
+            <label className="flex items-center gap-1.5 mono text-xs">
+              <span className="label">Year</span>
+              <input
+                type="number"
+                className="input mono px-2 py-1 text-xs"
+                style={{ width: 80 }}
+                value={radioYear}
+                onChange={(e) => {
+                  setRadioYear(Number(e.target.value));
+                  setRadioPreview(null);
+                  setRadioResult(null);
+                }}
+              />
+            </label>
+
+            <label className="flex items-center gap-1.5 mono text-xs">
+              <span className="label">Month</span>
+              <select
+                className="mono label"
+                style={{
+                  background: "var(--color-panel-2)",
+                  color: "var(--color-phosphor-dim)",
+                  border: "1px solid var(--color-edge)",
+                  padding: "4px 6px",
+                  fontSize: "11px",
+                }}
+                value={radioMonth}
+                onChange={(e) => {
+                  setRadioMonth(Number(e.target.value));
+                  setRadioPreview(null);
+                  setRadioResult(null);
+                }}
+              >
+                {Array.from({ length: 12 }, (_, i) => i + 1).map((m) => (
+                  <option key={m} value={m}>
+                    {m < 10 ? `0${m}` : m} — {new Date(2000, m - 1, 1).toLocaleString("en-US", { month: "long" })}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <label className="flex flex-1 items-center gap-1.5 mono text-xs" style={{ minWidth: 200 }}>
+              <span className="label">Sheet Name</span>
+              <input
+                type="text"
+                placeholder="(default: folder name)"
+                className="input mono flex-1 px-2 py-1 text-xs"
+                value={radioSheetName}
+                onChange={(e) => {
+                  setRadioSheetName(e.target.value);
+                  setRadioPreview(null);
+                  setRadioResult(null);
+                }}
+              />
+            </label>
+
+            <div className="ml-auto flex gap-2">
+              <button
+                className="btn btn--compact"
+                onClick={() => void handleRadioPreview()}
+                disabled={radioLoading || radioGenerating}
+              >
+                {radioLoading ? "PREVIEWING…" : "PREVIEW"}
+              </button>
+              <button
+                className="btn btn--compact btn--signal"
+                onClick={() => void handleRadioGenerate()}
+                disabled={!radioPreview || radioLoading || radioGenerating}
+                title={!radioPreview ? "Run PREVIEW first" : "Generate files in Google Drive"}
+              >
+                {radioGenerating ? "GENERATING…" : "GENERATE"}
+              </button>
+            </div>
+          </div>
+
+          {/* Folder & Counts summary */}
+          {(radioPreview || radioResult) && (
+            <div className="flex flex-col gap-1.5 border border-edge px-3 py-2 text-xs mono" style={{ background: "var(--color-void)" }}>
+              {radioPreview?.folder && (
+                <div className="flex items-center gap-2">
+                  <span className="label" style={{ color: "var(--color-signal)" }}>TARGET FOLDER:</span>
+                  <span style={{ color: "var(--color-phosphor)" }}>{radioPreview.folder.name}</span>
+                  {radioPreview.folder.id && (
+                    <span style={{ color: "var(--color-muted)" }}>({radioPreview.folder.id})</span>
+                  )}
+                </div>
+              )}
+
+              {(radioResult?.counts || radioPreview?.counts) && (() => {
+                const c = radioResult?.counts || radioPreview?.counts!;
+                return (
+                  <div className="flex items-center gap-2 text-xs">
+                    <span className="label">SUMMARY:</span>
+                    <span style={{ color: "var(--color-phosphor-dim)" }}>
+                      {c.sheet} sheet · {c.weekday} weekday · {c.weekend} weekend · {c.to_create} to create · {c.skipped} skip
+                    </span>
+                  </div>
+                );
+              })()}
+            </div>
+          )}
+
+          {/* Output items list */}
+          <div className="flex min-h-0 flex-1 flex-col gap-1 overflow-auto border border-edge p-2" style={{ background: "var(--color-void)" }}>
+            {radioResult ? (
+              <>
+                <span className="label mb-1" style={{ color: "var(--color-go)" }}>
+                  CREATED FILES ({radioResult.created?.length || 0})
+                </span>
+                {radioResult.created?.map((item, idx) => (
+                  <div key={idx} className="mono flex items-center gap-2 border-b border-edge-soft py-1 text-xs">
+                    <span className="pip pip--go" />
+                    <span className="flex-1 truncate" style={{ color: "var(--color-phosphor)" }}>
+                      {item.name}
+                    </span>
+                    {item.kind && (
+                      <span className="label" style={{ fontSize: "10px", color: "var(--color-muted)" }}>
+                        {item.kind}
+                      </span>
+                    )}
+                    {item.link ? (
+                      <a
+                        href={item.link}
+                        target="_blank"
+                        rel="noreferrer"
+                        style={{ color: "var(--color-signal)" }}
+                      >
+                        open ↗
+                      </a>
+                    ) : null}
+                  </div>
+                ))}
+                {radioResult.skipped && radioResult.skipped.length > 0 && (
+                  <div className="mt-2 flex flex-col gap-1">
+                    <span className="label" style={{ color: "var(--color-hazard)" }}>
+                      SKIPPED FILES ({radioResult.skipped.length})
+                    </span>
+                    {radioResult.skipped.map((item, idx) => (
+                      <div key={idx} className="mono flex items-center gap-2 py-0.5 text-xs">
+                        <span className="pip pip--hazard" />
+                        <span style={{ color: "var(--color-muted)" }}>{item.name}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </>
+            ) : radioPreview ? (
+              <>
+                <span className="label mb-1" style={{ color: "var(--color-signal)" }}>
+                  PLAN TO CREATE ({radioPreview.to_create?.length || 0})
+                </span>
+                {radioPreview.to_create?.map((item, idx) => (
+                  <div key={idx} className="mono flex items-center gap-2 border-b border-edge-soft py-1 text-xs">
+                    <span className="pip pip--signal" />
+                    <span className="flex-1 truncate" style={{ color: "var(--color-phosphor-dim)" }}>
+                      {item.name}
+                    </span>
+                    {item.kind && (
+                      <span className="label" style={{ fontSize: "10px", color: "var(--color-muted)" }}>
+                        {item.kind}
+                      </span>
+                    )}
+                  </div>
+                ))}
+              </>
+            ) : (
+              <div className="flex flex-1 items-center justify-center">
+                <span className="label">— Select year & month, then click PREVIEW —</span>
+              </div>
+            )}
           </div>
         </div>
       )}

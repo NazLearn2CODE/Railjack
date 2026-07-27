@@ -27,6 +27,7 @@ router = APIRouter()
 SCRIPTS = Path.home() / "Cephalon" / "10-knowledge" / "skills" / "newsroom" / "scripts"
 QUEUE = SCRIPTS / "queue.py"
 APPEND = SCRIPTS / "nl_append.py"
+RADIO = SCRIPTS / "radio.py"
 # The Rules Gem drives REWRITE (news-producer prompt → two-layer broadcast
 # script). ~/Gems is the office canonical copy; home has no ~/Gems, so the
 # vault-synced gem is the source here — _gem_text falls through to it.
@@ -133,6 +134,36 @@ async def api_append(body: dict = Body(...)):
         argv.append("--today")
     argv += ["--text", text]
     return await _script(argv, timeout=60)
+
+
+# ---------------------------------------------------------------- radio
+# Monthly Drive batch generator (RADIO): copies the spreadsheet + per-day script
+# templates into the pre-existing month folder. `radio.py` is the contract —
+# this panel only builds argv and surfaces `_fatal` (→ 400) vs stderr (→ 502).
+
+
+def _radio_argv(body: dict) -> list[str]:
+    """Year/month required; sheet-name optional. Raises 400 on a missing
+    year/month so the user gets a clear field error, not a 502."""
+    year, month = body.get("year"), body.get("month")
+    if year is None or month is None:
+        raise HTTPException(400, "year and month required")
+    argv = [PY, str(RADIO), "--year", str(year), "--month", str(month)]
+    if body.get("sheet_name"):
+        argv += ["--sheet-name", str(body["sheet_name"])]
+    return argv
+
+
+@router.post("/api/newsroom/radio/preview")
+async def api_radio_preview(body: dict = Body(...)):
+    """Dry-run plan (no writes): folder + counts + the to_create list."""
+    return await _script(_radio_argv(body) + ["--dry-run"])
+
+
+@router.post("/api/newsroom/radio/generate")
+async def api_radio_generate(body: dict = Body(...)):
+    """Real run — copies every planned file (~31 calls), hence the longer cap."""
+    return await _script(_radio_argv(body), timeout=180)
 
 
 # ---------------------------------------------------------------- rewrite
