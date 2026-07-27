@@ -886,6 +886,72 @@ def _scout_date_in_range(date_str: str, cutoff_iso: str, today_iso: str) -> bool
     return bool(date_str) and cutoff_iso <= date_str <= today_iso
 
 
+def _looks_like_url(s: str | None) -> bool:
+    return bool(s) and bool(re.match(r"^https?://\S+$", s.strip()))
+
+
+def _scout_dedup(urls: list[str], by_domain: bool, limit: int = 20) -> list[str]:
+    """Dedup a URL list. by_domain=True keeps one per registrable host (discovery);
+    by_domain=False dedups only exact-duplicate URLs (lookup keeps siblings)."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for u in urls:
+        if by_domain:
+            try:
+                host = urllib.parse.urlparse(u).hostname or ""
+                key = host.removeprefix("www.")
+            except Exception:
+                key = u
+        else:
+            key = u
+        if _scout_domain_excluded(key if by_domain else (urllib.parse.urlparse(u).hostname or "").removeprefix("www.")):
+            continue
+        if key and key not in seen:
+            seen.add(key)
+            out.append(u)
+        if len(out) >= limit:
+            break
+    return out
+
+
+async def _scout_lookup_url(url: str) -> dict:
+    """LOOKUP-URL: fetch exactly the pasted article. No search, no dedup, no date drop."""
+    try:
+        md = await _jina_read(url)
+        res = _extract_news(md, url)
+    except Exception as e:
+        return {"results": [], "count": 0, "errors": [f"lookup {url}: {e}"], "query": url, "category": None, "days": 0}
+    return {"results": [res] if res else [], "count": 1 if res else 0,
+            "errors": [] if res else ["could not extract article (bot-check or empty page)"],
+            "query": url, "category": None, "days": 0}
+
+
+async def _scout_lookup_title(query: str, days: int) -> dict:
+    """LOOKUP-TITLE: one tight search on the raw title. No scaffolding, no domain-dedup,
+    no date drop. Reranked so the closest match floats up."""
+    q = query.strip()
+    ddg = []
+    try:
+        md = await _jina_read(f"https://duckduckgo.com/html/?q={urllib.parse.quote(q)}")
+        ddg = [ev["url"] for ev in _parse_ddg(md)]
+    except Exception:
+        pass
+    brave = await _brave_urls(q)
+    gnews = await _gnews_urls(q)
+    urls = _scout_dedup([*ddg, *brave, *gnews], by_domain=False, limit=20)
+
+    async def _fx(u):
+        try:
+            return _extract_news(await _jina_read(u), u)
+        except Exception:
+            return None
+    extracted = await asyncio.gather(*[_fx(u) for u in urls])
+    ordered = [r for r in extracted if r]           # keep undated — no date drop on lookup
+    ordered = await _scout_rerank(ordered)
+    return {"results": ordered, "count": len(ordered), "errors": [],
+            "query": query, "category": None, "days": days}
+
+
 def _resolve_gem(opt_key: str, default: str) -> Path:
     """Resolve a gem path from options; relative paths anchor at the repo root.
     Shared by the publicity/archive/scout gem-path resolvers."""
@@ -987,10 +1053,14 @@ def _extract_news(md: str, url: str) -> dict | None:
     }
 
 
-async def _scout_news(query: str | None = None, category: str | None = None, days: int = 7) -> dict:
+async def _scout_news(query: str | None = None, category: str | None = None, days: int = 7, exact: bool = False) -> dict:
     """News-pitch search (PITCH mode discovery). Free-first multi-source sweep
     (DDG + Brave + GNews + Jina read + regex extraction)."""
     days = max(1, min(30, int(days or 7)))
+    if _looks_like_url(query):
+        return await _scout_lookup_url((query or "").strip())
+    if exact and (query or "").strip():
+        return await _scout_lookup_title((query or "").strip(), days)
     today = datetime.now()
     span = today.strftime("%B %Y")
     cutoff_dt = today - timedelta(days=days)
@@ -1043,22 +1113,7 @@ async def _scout_news(query: str | None = None, category: str | None = None, day
     gnews_q = f"{q_clean} news" if q_clean else (f"Thailand {cat_clause} news".strip() if cat_clause else f"Thailand news {span}")
     gnews_urls = await _gnews_urls(gnews_q)
 
-    all_urls = [*ddg_urls, *brave_urls, *gnews_urls]
-    seen_domains: set[str] = set()
-    urls: list[str] = []
-    for u in all_urls:
-        try:
-            host = urllib.parse.urlparse(u).hostname or ""
-            domain = host.removeprefix("www.")
-        except Exception:
-            domain = u
-        if _scout_domain_excluded(domain):
-            continue
-        if domain and domain not in seen_domains:
-            seen_domains.add(domain)
-            urls.append(u)
-        if len(urls) >= 20:
-            break
+    urls = _scout_dedup([*ddg_urls, *brave_urls, *gnews_urls], by_domain=True, limit=20)
 
     async def _fetch_and_extract(u: str) -> tuple[dict | None, str | None]:
         try:
@@ -1284,8 +1339,8 @@ async def _scout_images_content(url: str) -> dict:
     }
 
 
-async def _flow_scout_search(job: TnJob, query: str | None, category: str | None, days: int) -> None:
-    job.result = await _scout_news(query=query, category=category, days=days)
+async def _flow_scout_search(job: TnJob, query: str | None, category: str | None, days: int, exact: bool) -> None:
+    job.result = await _scout_news(query=query, category=category, days=days, exact=exact)
 
 
 @router.post("/api/thailandnow/scout/search")
@@ -1295,11 +1350,12 @@ async def scout_search(payload: dict = Body(default={})):
     query = body.get("query")
     category = body.get("category")
     days = int(body.get("days") or 7)
+    exact = bool(body.get("exact", False))
     if any(j.kind == "scout-search" and j.status in _TN_RUNNING for j in _TN_JOBS.values()):
         raise HTTPException(409, "a STORY SCOUT search is already running")
     label = f"scout: {(query or category or 'general')[:40]}"
     return _tn_spawn("scout-search", label,
-                     lambda j: _flow_scout_search(j, query, category, days))
+                     lambda j: _flow_scout_search(j, query, category, days, exact))
 
 
 @router.get("/api/thailandnow/scout/report/{jid}")

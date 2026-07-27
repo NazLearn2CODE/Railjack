@@ -1499,6 +1499,7 @@ function StoryScoutTab() {
   const [query, setQuery]         = usePersistentState("tn.scout.query", "");
   const [category, setCategory]   = usePersistentState("tn.scout.category", "");
   const [days, setDays]           = usePersistentState("tn.scout.days", 7);
+  const [exact, setExact]         = usePersistentState("tn.scout.exact", false);
   const [results, setResults]     = usePersistentState<ScoutResult[]>("tn.scout.results", []);
   const [searching, setSearching] = useState(false);
   const [err, setErr]             = useState<string | null>(null);
@@ -1517,7 +1518,7 @@ function StoryScoutTab() {
 
   const search = useCallback(async () => {
     setErr(null);
-    const r = await post<{ id: string }>("/api/thailandnow/scout/search", { query, category, days });
+    const r = await post<{ id: string }>("/api/thailandnow/scout/search", { query, category, days, exact });
     if (!r.ok) {
       setErr(r.error?.includes("already running") ? "A search is already running…" : (r.error || "search failed"));
       return;
@@ -1525,7 +1526,7 @@ function StoryScoutTab() {
     setResults([]);
     setScoutJobId(r.data!.id);
     setSearching(true);
-  }, [query, category, days, setResults]);
+  }, [query, category, days, exact, setResults]);
 
   useEffect(() => {
     if (!scoutJobId || !jobsData?.jobs) return;
@@ -1620,7 +1621,7 @@ function StoryScoutTab() {
             <input
               className="input"
               style={{ flexGrow: 1, minWidth: 200 }}
-              placeholder="optional: Thailand visa, Songkran, …"
+              placeholder="topic, exact headline, or paste an article URL"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               onKeyDown={handleKeyDown}
@@ -1649,6 +1650,10 @@ function StoryScoutTab() {
                 {days} {days === 1 ? "day" : "days"}
               </span>
             </div>
+            <label className="mono text-xs flex items-center gap-1" style={{ color: "var(--color-muted)" }}>
+              <input type="checkbox" checked={exact} onChange={(e) => setExact(e.target.checked)} />
+              Exact article
+            </label>
             <button className="btn btn--signal" disabled={searching} onClick={search}>
               {searching ? "SEARCHING…" : "SEARCH"}
             </button>
