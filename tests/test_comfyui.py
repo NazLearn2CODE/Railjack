@@ -275,7 +275,7 @@ def test_download_404_unknown_entry(comfy_opts, monkeypatch):
 
 
 def test_expand_503_without_key(monkeypatch):
-    monkeypatch.delenv("ZAI_API_KEY", raising=False)
+    monkeypatch.setattr("app.zai._resolve_key", lambda: None)
     with pytest.raises(HTTPException) as ex:
         asyncio.run(comfyui.expand(comfyui.ExpandBody(idea="cat")))
     assert ex.value.status_code == 503

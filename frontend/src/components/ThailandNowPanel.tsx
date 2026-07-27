@@ -1508,9 +1508,9 @@ function StoryScoutTab() {
 
   // IMAGE MODE state
   const [imgUrl, setImgUrl]       = usePersistentState("tn.scout.img_url", "");
-  const [scoutImgData, setScoutImgData] = useState<{ tier1: any[]; tier2: any[]; ai_prompts: string[]; url: string; error?: string } | null>(null);
+  const [scoutImgData, setScoutImgData] = usePersistentState<{ tier1: any[]; tier2: any[]; ai_prompts: string[]; url: string; error?: string } | null>("tn.scout.img_data", null);
   const [scoutImgLoading, setScoutImgLoading] = useState(false);
-  const [scoutImgErr, setScoutImgErr] = useState<string | null>(null);
+  const [scoutImgErr, setScoutImgErr] = usePersistentState<string | null>("tn.scout.img_err", null);
   const [copyFeedback, setCopyFeedback] = useState<string | null>(null);
 
   const { data: jobsData } = usePolling<{ jobs: TnJob[] }>("/api/thailandnow/jobs", 2000);
