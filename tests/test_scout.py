@@ -1,4 +1,5 @@
 import asyncio
+import json
 from app import thailandnow
 
 
@@ -96,3 +97,29 @@ def test_wp_upload_media(monkeypatch):
         "alt_text": "A scenic test view",
         "caption": "Source: pexels.com / Website",
     }
+
+
+def test_scout_terminal_report(tmp_path, monkeypatch):
+    handoff_file = tmp_path / "latest.json"
+    data = [
+        {"title": "Story 1", "url": "https://example.com/1", "excerpt": "Excerpt summary 1", "date": "2026-07-27", "lang": "en", "source": "example.com"},
+        {"title": "Story 2 (no url)", "url": "", "snippet": "No url row"},
+        {"title": "Story 1 Duplicate", "url": "https://example.com/1", "snippet": "Dup url row"},
+        {"title": "Story 3", "url": "https://example.com/3", "snippet": "Snippet 3"},
+    ]
+    handoff_file.write_text(json.dumps(data), encoding="utf-8")
+    monkeypatch.setattr(thailandnow, "_SCOUT_HANDOFF", handoff_file)
+
+    res = asyncio.run(thailandnow.scout_terminal_report())
+
+    assert res["count"] == 2
+    results = res["results"]
+    assert len(results) == 2
+
+    # Check mapping excerpt -> snippet for Story 1
+    assert results[0]["url"] == "https://example.com/1"
+    assert results[0]["snippet"] == "Excerpt summary 1"
+
+    # Check url-less row dropped and duplicate url deduped
+    assert results[1]["url"] == "https://example.com/3"
+    assert results[1]["snippet"] == "Snippet 3"

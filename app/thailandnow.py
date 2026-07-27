@@ -1426,6 +1426,46 @@ async def scout_wp_media(payload: dict = Body(default={})):
     )
 
 
+_SCOUT_HANDOFF = Path("/tmp/railjack-scout/latest.json")
+
+
+@router.get("/api/thailandnow/scout/terminal-report")
+async def scout_terminal_report():
+    """CONVERT — read the JSON the /f5-story-scout skill wrote to disk. Returns
+    {results, count, mtime}. 404 until the skill has written a file."""
+    p = _SCOUT_HANDOFF
+    if not p.exists():
+        raise HTTPException(404, "no scout handoff yet — run SCOUT, let Claude finish (writes /tmp/railjack-scout/latest.json)")
+    try:
+        raw = json.loads(p.read_text(encoding="utf-8"))
+    except Exception as e:
+        raise HTTPException(422, f"handoff isn't valid JSON: {e}")
+    if not isinstance(raw, list):
+        raise HTTPException(422, "handoff must be a JSON array")
+    results = []
+    for it in raw:
+        if not isinstance(it, dict):
+            continue
+        u = str(it.get("url") or "").strip()
+        if not u:
+            continue  # url is the React key + pitch key — must be present & unique
+        results.append({
+            "title":   str(it.get("title") or u).strip(),
+            "url":     u,
+            "snippet": str(it.get("snippet") or it.get("excerpt") or "").strip(),
+            "date":    str(it.get("date") or "").strip(),
+            "lang":    str(it.get("lang") or "").strip(),
+            "source":  str(it.get("source") or "").strip(),
+        })
+    # dedup on url, preserve order (dup urls would collide as React keys)
+    seen, deduped = set(), []
+    for r in results:
+        if r["url"] not in seen:
+            seen.add(r["url"])
+            deduped.append(r)
+    return {"results": deduped, "count": len(deduped), "mtime": p.stat().st_mtime}
+
+
 # --- EVENTS radar Tier 2 (R6): NotebookLM deep web research ---
 
 

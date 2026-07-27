@@ -1539,6 +1539,34 @@ function StoryScoutTab() {
   const [selected, setSelected]   = useState<Record<string, WpDraft>>({});
   const [wpSending, setWpSending] = useState(false);
   const [wpStatus, setWpStatus]   = useState<Record<string, string>>({});
+  const [lastScoutAt, setLastScoutAt] = useState<number>(0);
+
+  const scoutViaClaude = useCallback(async () => {
+    const q = query.trim();
+    if (!q) { setErr("type a topic first"); return; }
+    const cmd = `/f5-story-scout pitch "${q.replace(/["\n\r]/g, "'")}"`;   // no quotes/newlines: insert is type-only, <500 chars
+    const r = await post<{ status: string }>("/api/terminal/insert", { text: cmd });
+    if (!r.ok) { setErr(r.error || "couldn't reach the terminal — is ttyd/tmux up?"); return; }
+    setLastScoutAt(Date.now());
+    setErr("Typed into the LIVE terminal. Open the LIVE dock, press Enter to run, wait for it to finish, then click CONVERT.");
+  }, [query]);
+
+  const convertFromClaude = useCallback(async () => {
+    const res = await fetch("/api/thailandnow/scout/terminal-report");
+    if (!res.ok) {
+      const d = await res.json().catch(() => ({ detail: res.statusText }));
+      setErr(typeof d.detail === "string" ? d.detail : "nothing to convert yet");
+      return;
+    }
+    const data = (await res.json()) as { results: ScoutResult[]; count: number; mtime: number };
+    if (lastScoutAt && data.mtime * 1000 < lastScoutAt) {
+      setErr(`Handoff is older than your last SCOUT — did the Claude run finish? Showing ${data.count} anyway.`);
+    } else {
+      setErr(null);
+    }
+    setResults(data.results);       // persisted (tn.scout.results) + renders existing cards
+    setScoutJobId(null);            // no async job — don't leave a poller hanging
+  }, [lastScoutAt, setResults]);
 
   const sendSelectedToWp = useCallback(async () => {
     setWpSending(true);
@@ -1703,6 +1731,12 @@ function StoryScoutTab() {
             <button className="btn btn--signal" disabled={searching} onClick={search}>
               {searching ? "SEARCHING…" : "SEARCH"}
             </button>
+            <button className="btn btn--compact" onClick={scoutViaClaude}>SCOUT ▸ CLAUDE</button>
+            <button className="btn btn--compact" onClick={convertFromClaude}>CONVERT ◂ JSON</button>
+          </div>
+          <div className="mono text-xs mb-3" style={{ color: "var(--color-muted)" }}>
+            SCOUT types the command into the LIVE terminal — open the LIVE dock, press Enter there,
+            wait for Claude to finish, then CONVERT. (SEARCH is still the instant URL / exact-headline path.)
           </div>
 
           {/* Scrollable Results Body */}
