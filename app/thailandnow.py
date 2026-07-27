@@ -2493,20 +2493,14 @@ def _seo_strip_target(html: str, kind: str, target: str) -> tuple[str, int, str,
     return new_html, matches, snippet_before, snippet_after
 
 
-class SeoPreviewFixReq(BaseModel):
-    post_id: int
-    kind: str  # "link" | "image"
-    target: str
-
-
-class SeoApplyFixReq(BaseModel):
+class SeoFixReq(BaseModel):
     post_id: int
     kind: str  # "link" | "image"
     target: str
 
 
 class SeoApplyFixBulkReq(BaseModel):
-    items: list[SeoApplyFixReq]
+    items: list[SeoFixReq]
 
 
 @router.post("/api/thailandnow/seo/scan")
@@ -2531,7 +2525,7 @@ async def seo_report(jid: str):
 
 
 @router.post("/api/thailandnow/seo/preview-fix")
-async def seo_preview_fix(req: SeoPreviewFixReq):
+async def seo_preview_fix(req: SeoFixReq):
     """Preview removing a broken link or image from a WP post.
     Reads content.raw via GET /wp/v2/posts/{post_id}?context=edit.
     Does NOT modify WP. Returns {post_id, matches, before, after}."""
@@ -2557,7 +2551,7 @@ async def seo_preview_fix(req: SeoPreviewFixReq):
 
 
 @router.post("/api/thailandnow/seo/apply-fix")
-async def seo_apply_fix(req: SeoApplyFixReq):
+async def seo_apply_fix(req: SeoFixReq):
     """Apply fix: remove broken link or image from WP post.
     Reads content.raw, strips target, POSTs {content: new_raw} to /wp/v2/posts/{post_id}.
     Idempotent: 0 matches -> returns {ok: true, matches: 0}, no PUT/POST."""

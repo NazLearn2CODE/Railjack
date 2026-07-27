@@ -196,18 +196,15 @@ function usePersistentState<T>(key: string, initial: T) {
 // exactly like EVENTS DEEP: SCAN → poll → CANCEL → on done fetch /seo/report/{id}.
 
 function SeoTab() {
-  const [sub, setSub] = usePersistentState<"health">("tn.seo.tab", "health");
   return (
     <>
       <div className="flex items-center gap-2 mb-2">
-        <button className={`btn ${sub === "health" ? "btn--signal" : ""}`} onClick={() => setSub("health")}>
-          HEALTH
-        </button>
+        <span className="label">HEALTH</span>
         <span className="mono" style={{ color: "var(--color-muted)" }}>
-          read-only link/image/orphan report — Phase 1 (detect); fixes are Phase 2
+          link/image/orphan report &amp; 1-click fixes
         </span>
       </div>
-      {sub === "health" && <HealthSubTab />}
+      <HealthSubTab />
     </>
   );
 }
@@ -257,27 +254,145 @@ function HealthList({ title, count, accent, hint, action, children }: {
   );
 }
 
+interface ActivePreview {
+  key: string;
+  postId: number;
+  kind: "link" | "image";
+  target: string;
+  loading: boolean;
+  data?: { matches: number; before: string; after: string };
+  error?: string;
+  applied?: boolean;
+}
+
+interface SeoFixItem {
+  post_id: number;
+  kind: "link" | "image";
+  target: string;
+}
+
+function PreviewBlock({
+  activePreview,
+  onApply,
+  onClose,
+}: {
+  activePreview: ActivePreview;
+  onApply: () => void;
+  onClose: () => void;
+}) {
+  return (
+    <div className="mt-1.5 p-2 border border-edge bg-shade flex flex-col gap-1.5 rounded">
+      <div className="mono text-xs font-bold" style={{ color: "var(--color-phosphor)" }}>
+        FIX PREVIEW — Post #{activePreview.postId}
+      </div>
+      {activePreview.loading && <div className="mono text-xs" style={{ color: "var(--color-muted)" }}>Loading preview...</div>}
+      {activePreview.error && <div className="mono text-xs" style={{ color: "var(--color-critical)" }}>{activePreview.error}</div>}
+      {activePreview.applied && (
+        <div className="mono text-xs font-bold" style={{ color: "var(--color-go)" }}>
+          ✓ Removed from WP content! Re-scan to update report.
+        </div>
+      )}
+      {!activePreview.loading && !activePreview.applied && activePreview.data && (
+        <>
+          <div className="mono text-xs">Matches found in raw HTML: {activePreview.data.matches}</div>
+          {activePreview.data.matches === 0 ? (
+            <div className="mono text-xs" style={{ color: "var(--color-hazard)" }}>
+              0 matches found in content.raw (may already be removed).
+            </div>
+          ) : (
+            <div className="flex flex-col gap-1">
+              <div className="mono text-xs text-muted">BEFORE:</div>
+              <pre
+                className="mono text-xs p-1.5 overflow-x-auto whitespace-pre-wrap"
+                style={{ background: "rgba(255,0,0,0.1)", border: "1px solid var(--color-critical)" }}
+              >
+                {activePreview.data.before}
+              </pre>
+              <div className="mono text-xs text-muted">AFTER:</div>
+              <pre
+                className="mono text-xs p-1.5 overflow-x-auto whitespace-pre-wrap"
+                style={{ background: "rgba(0,255,0,0.1)", border: "1px solid var(--color-go)" }}
+              >
+                {activePreview.data.after}
+              </pre>
+            </div>
+          )}
+          <div className="flex items-center gap-2 mt-1">
+            <button
+              className="btn btn--crit"
+              disabled={activePreview.loading || activePreview.data.matches === 0}
+              onClick={onApply}
+            >
+              CONFIRM REMOVE
+            </button>
+            <button className="btn" onClick={onClose}>
+              CANCEL
+            </button>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function BulkConfirm({
+  title,
+  description,
+  getItems,
+  bulkProgress,
+  setBulkProgress,
+  onClose,
+}: {
+  title: string;
+  description: string;
+  getItems: () => SeoFixItem[];
+  bulkProgress: string | null;
+  setBulkProgress: (s: string | null) => void;
+  onClose: () => void;
+}) {
+  return (
+    <div className="p-2 border border-critical bg-shade flex flex-col gap-2 my-1">
+      <div className="mono text-xs font-bold" style={{ color: "var(--color-critical)" }}>
+        {title}
+      </div>
+      <div className="mono text-xs text-muted">{description}</div>
+      {bulkProgress && <div className="mono text-xs" style={{ color: "var(--color-signal)" }}>{bulkProgress}</div>}
+      <div className="flex gap-2">
+        <button
+          className="btn btn--crit"
+          disabled={!!bulkProgress}
+          onClick={async () => {
+            setBulkProgress("Applying bulk removal...");
+            const items = getItems();
+            const res = await post<{ successful: number; total: number }>("/api/thailandnow/seo/apply-fix-bulk", { items });
+            if (res.ok && res.data) {
+              setBulkProgress(`Finished: ${res.data.successful} / ${res.data.total} successful. Re-scan to verify.`);
+            } else {
+              setBulkProgress(`Error: ${res.error || "failed"}`);
+            }
+          }}
+        >
+          CONFIRM BULK REMOVE
+        </button>
+        <button className="btn" onClick={onClose}>
+          CANCEL
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function HealthSubTab() {
+  const { data: jobsData, refetch: refetchJobs } = usePolling<{ jobs: TnJob[] }>("/api/thailandnow/jobs", 2000);
   const [report, setReport] = usePersistentState<HealthReport | null>("tn.seo.health.report", null);
   const [err, setErr] = useState<string | null>(null);
-  const { data: jobsData, refetch: refetchJobs } = usePolling<{ jobs: TnJob[] }>(
-    "/api/thailandnow/jobs", 1500,
-  );
+  
   const jobs = jobsData?.jobs ?? [];
   const scanJob = jobs.find((j) => j.kind === "seo-health") ?? null;
   const scanning = !!scanJob && (scanJob.status === "queued" || scanJob.status === "running");
 
   // Slice 2: Preview / Fix / Dismiss / Bulk states
-  const [activePreview, setActivePreview] = useState<{
-    key: string;
-    postId: number;
-    kind: "link" | "image";
-    target: string;
-    loading: boolean;
-    data?: { matches: number; before: string; after: string };
-    error?: string;
-    applied?: boolean;
-  } | null>(null);
+  const [activePreview, setActivePreview] = useState<ActivePreview | null>(null);
 
   const [dismissed, setDismissed] = usePersistentState<string[]>("tn.seo.dismissed", []);
   const [showDismissed, setShowDismissed] = useState(false);
@@ -410,36 +525,18 @@ function HealthSubTab() {
             }
           >
             {bulkConfirmSection === "internal" && (
-              <div className="p-2 border border-critical bg-shade flex flex-col gap-2 my-1">
-                <div className="mono text-xs font-bold" style={{ color: "var(--color-critical)" }}>
-                  CONFIRM BULK REMOVE ({r.broken_internal_links.length} Broken Internal Links)
-                </div>
-                <div className="mono text-xs text-muted">
-                  Strips all matching broken internal links across source posts, preserving inner text.
-                </div>
-                {bulkProgress && <div className="mono text-xs" style={{ color: "var(--color-signal)" }}>{bulkProgress}</div>}
-                <div className="flex gap-2">
-                  <button
-                    className="btn btn--crit"
-                    disabled={!!bulkProgress}
-                    onClick={async () => {
-                      setBulkProgress("Applying bulk removal...");
-                      const items = r.broken_internal_links
-                        .filter((b) => b.from_id)
-                        .map((b) => ({ post_id: b.from_id!, kind: "link" as const, target: b.href || b.to }));
-                      const res = await post<{ successful: number; total: number }>("/api/thailandnow/seo/apply-fix-bulk", { items });
-                      if (res.ok && res.data) {
-                        setBulkProgress(`Finished: ${res.data.successful} / ${res.data.total} successful. Re-scan to verify.`);
-                      } else {
-                        setBulkProgress(`Error: ${res.error || "failed"}`);
-                      }
-                    }}
-                  >
-                    CONFIRM BULK REMOVE
-                  </button>
-                  <button className="btn" onClick={() => { setBulkConfirmSection(null); setBulkProgress(null); }}>CANCEL</button>
-                </div>
-              </div>
+              <BulkConfirm
+                title={`CONFIRM BULK REMOVE (${r.broken_internal_links.length} Broken Internal Links)`}
+                description="Strips all matching broken internal links across source posts, preserving inner text."
+                getItems={() =>
+                  r.broken_internal_links
+                    .filter((b) => b.from_id)
+                    .map((b) => ({ post_id: b.from_id!, kind: "link" as const, target: b.href || b.to }))
+                }
+                bulkProgress={bulkProgress}
+                setBulkProgress={setBulkProgress}
+                onClose={() => { setBulkConfirmSection(null); setBulkProgress(null); }}
+              />
             )}
 
             {r.broken_internal_links.map((b, i) => {
@@ -469,43 +566,11 @@ function HealthSubTab() {
                   )}
 
                   {activePreview && activePreview.key === rowKey && (
-                    <div className="mt-1.5 p-2 border border-edge bg-shade flex flex-col gap-1.5 rounded">
-                      <div className="mono text-xs font-bold" style={{ color: "var(--color-phosphor)" }}>
-                        FIX PREVIEW — Post #{activePreview.postId}
-                      </div>
-                      {activePreview.loading && <div className="mono text-xs" style={{ color: "var(--color-muted)" }}>Loading preview...</div>}
-                      {activePreview.error && <div className="mono text-xs" style={{ color: "var(--color-critical)" }}>{activePreview.error}</div>}
-                      {activePreview.applied && <div className="mono text-xs font-bold" style={{ color: "var(--color-go)" }}>✓ Removed from WP content! Re-scan to update report.</div>}
-                      {!activePreview.loading && !activePreview.applied && activePreview.data && (
-                        <>
-                          <div className="mono text-xs">Matches found in raw HTML: {activePreview.data.matches}</div>
-                          {activePreview.data.matches === 0 ? (
-                            <div className="mono text-xs" style={{ color: "var(--color-hazard)" }}>0 matches found in content.raw (may already be removed).</div>
-                          ) : (
-                            <div className="flex flex-col gap-1">
-                              <div className="mono text-xs text-muted">BEFORE:</div>
-                              <pre className="mono text-xs p-1.5 overflow-x-auto whitespace-pre-wrap" style={{ background: "rgba(255,0,0,0.1)", border: "1px solid var(--color-critical)" }}>
-                                {activePreview.data.before}
-                              </pre>
-                              <div className="mono text-xs text-muted">AFTER:</div>
-                              <pre className="mono text-xs p-1.5 overflow-x-auto whitespace-pre-wrap" style={{ background: "rgba(0,255,0,0.1)", border: "1px solid var(--color-go)" }}>
-                                {activePreview.data.after}
-                              </pre>
-                            </div>
-                          )}
-                          <div className="flex items-center gap-2 mt-1">
-                            <button
-                              className="btn btn--crit"
-                              disabled={activePreview.loading || activePreview.data.matches === 0}
-                              onClick={handleApplyFix}
-                            >
-                              CONFIRM REMOVE
-                            </button>
-                            <button className="btn" onClick={() => setActivePreview(null)}>CANCEL</button>
-                          </div>
-                        </>
-                      )}
-                    </div>
+                    <PreviewBlock
+                      activePreview={activePreview}
+                      onApply={handleApplyFix}
+                      onClose={() => setActivePreview(null)}
+                    />
                   )}
                 </div>
               );
@@ -571,41 +636,24 @@ function HealthSubTab() {
             }
           >
             {bulkConfirmSection === "external" && (
-              <div className="p-2 border border-critical bg-shade flex flex-col gap-2 my-1">
-                <div className="mono text-xs font-bold" style={{ color: "var(--color-critical)" }}>
-                  CONFIRM BULK REMOVE ({r.broken_external_links.length} Broken External Links)
-                </div>
-                <div className="mono text-xs text-muted">
-                  Strips all matching broken external links across source posts, preserving inner text.
-                </div>
-                {bulkProgress && <div className="mono text-xs" style={{ color: "var(--color-signal)" }}>{bulkProgress}</div>}
-                <div className="flex gap-2">
-                  <button
-                    className="btn btn--crit"
-                    disabled={!!bulkProgress}
-                    onClick={async () => {
-                      setBulkProgress("Applying bulk removal...");
-                      const items: { post_id: number; kind: "link"; target: string }[] = [];
-                      for (const b of r.broken_external_links) {
-                        if (b.from && b.from.length > 0) {
-                          for (const f of b.from) {
-                            if (f.from_id) items.push({ post_id: f.from_id, kind: "link", target: b.url });
-                          }
-                        }
+              <BulkConfirm
+                title={`CONFIRM BULK REMOVE (${r.broken_external_links.length} Broken External Links)`}
+                description="Strips all matching broken external links across source posts, preserving inner text."
+                getItems={() => {
+                  const items: SeoFixItem[] = [];
+                  for (const b of r.broken_external_links) {
+                    if (b.from && b.from.length > 0) {
+                      for (const f of b.from) {
+                        if (f.from_id) items.push({ post_id: f.from_id, kind: "link", target: b.url });
                       }
-                      const res = await post<{ successful: number; total: number }>("/api/thailandnow/seo/apply-fix-bulk", { items });
-                      if (res.ok && res.data) {
-                        setBulkProgress(`Finished: ${res.data.successful} / ${res.data.total} successful. Re-scan to verify.`);
-                      } else {
-                        setBulkProgress(`Error: ${res.error || "failed"}`);
-                      }
-                    }}
-                  >
-                    CONFIRM BULK REMOVE
-                  </button>
-                  <button className="btn" onClick={() => { setBulkConfirmSection(null); setBulkProgress(null); }}>CANCEL</button>
-                </div>
-              </div>
+                    }
+                  }
+                  return items;
+                }}
+                bulkProgress={bulkProgress}
+                setBulkProgress={setBulkProgress}
+                onClose={() => { setBulkConfirmSection(null); setBulkProgress(null); }}
+              />
             )}
 
             {r.broken_external_links.map((b, i) => {
@@ -632,43 +680,11 @@ function HealthSubTab() {
                   </div>
 
                   {activePreview && activePreview.key === rowKey && (
-                    <div className="mt-1.5 p-2 border border-edge bg-shade flex flex-col gap-1.5 rounded">
-                      <div className="mono text-xs font-bold" style={{ color: "var(--color-phosphor)" }}>
-                        FIX PREVIEW — Post #{activePreview.postId}
-                      </div>
-                      {activePreview.loading && <div className="mono text-xs" style={{ color: "var(--color-muted)" }}>Loading preview...</div>}
-                      {activePreview.error && <div className="mono text-xs" style={{ color: "var(--color-critical)" }}>{activePreview.error}</div>}
-                      {activePreview.applied && <div className="mono text-xs font-bold" style={{ color: "var(--color-go)" }}>✓ Removed from WP content! Re-scan to update report.</div>}
-                      {!activePreview.loading && !activePreview.applied && activePreview.data && (
-                        <>
-                          <div className="mono text-xs">Matches found in raw HTML: {activePreview.data.matches}</div>
-                          {activePreview.data.matches === 0 ? (
-                            <div className="mono text-xs" style={{ color: "var(--color-hazard)" }}>0 matches found in content.raw (may already be removed).</div>
-                          ) : (
-                            <div className="flex flex-col gap-1">
-                              <div className="mono text-xs text-muted">BEFORE:</div>
-                              <pre className="mono text-xs p-1.5 overflow-x-auto whitespace-pre-wrap" style={{ background: "rgba(255,0,0,0.1)", border: "1px solid var(--color-critical)" }}>
-                                {activePreview.data.before}
-                              </pre>
-                              <div className="mono text-xs text-muted">AFTER:</div>
-                              <pre className="mono text-xs p-1.5 overflow-x-auto whitespace-pre-wrap" style={{ background: "rgba(0,255,0,0.1)", border: "1px solid var(--color-go)" }}>
-                                {activePreview.data.after}
-                              </pre>
-                            </div>
-                          )}
-                          <div className="flex items-center gap-2 mt-1">
-                            <button
-                              className="btn btn--crit"
-                              disabled={activePreview.loading || activePreview.data.matches === 0}
-                              onClick={handleApplyFix}
-                            >
-                              CONFIRM REMOVE
-                            </button>
-                            <button className="btn" onClick={() => setActivePreview(null)}>CANCEL</button>
-                          </div>
-                        </>
-                      )}
-                    </div>
+                    <PreviewBlock
+                      activePreview={activePreview}
+                      onApply={handleApplyFix}
+                      onClose={() => setActivePreview(null)}
+                    />
                   )}
                 </div>
               );
@@ -732,36 +748,18 @@ function HealthSubTab() {
             }
           >
             {bulkConfirmSection === "images" && (
-              <div className="p-2 border border-critical bg-shade flex flex-col gap-2 my-1">
-                <div className="mono text-xs font-bold" style={{ color: "var(--color-critical)" }}>
-                  CONFIRM BULK REMOVE ({r.broken_internal_images.length} Broken Images)
-                </div>
-                <div className="mono text-xs text-muted">
-                  Drops all matching broken img tags across source posts.
-                </div>
-                {bulkProgress && <div className="mono text-xs" style={{ color: "var(--color-signal)" }}>{bulkProgress}</div>}
-                <div className="flex gap-2">
-                  <button
-                    className="btn btn--crit"
-                    disabled={!!bulkProgress}
-                    onClick={async () => {
-                      setBulkProgress("Applying bulk removal...");
-                      const items = r.broken_internal_images
-                        .filter((b) => b.from_id)
-                        .map((b) => ({ post_id: b.from_id!, kind: "image" as const, target: b.src }));
-                      const res = await post<{ successful: number; total: number }>("/api/thailandnow/seo/apply-fix-bulk", { items });
-                      if (res.ok && res.data) {
-                        setBulkProgress(`Finished: ${res.data.successful} / ${res.data.total} successful. Re-scan to verify.`);
-                      } else {
-                        setBulkProgress(`Error: ${res.error || "failed"}`);
-                      }
-                    }}
-                  >
-                    CONFIRM BULK REMOVE
-                  </button>
-                  <button className="btn" onClick={() => { setBulkConfirmSection(null); setBulkProgress(null); }}>CANCEL</button>
-                </div>
-              </div>
+              <BulkConfirm
+                title={`CONFIRM BULK REMOVE (${r.broken_internal_images.length} Broken Images)`}
+                description="Drops all matching broken img tags across source posts."
+                getItems={() =>
+                  r.broken_internal_images
+                    .filter((b) => b.from_id)
+                    .map((b) => ({ post_id: b.from_id!, kind: "image" as const, target: b.src }))
+                }
+                bulkProgress={bulkProgress}
+                setBulkProgress={setBulkProgress}
+                onClose={() => { setBulkConfirmSection(null); setBulkProgress(null); }}
+              />
             )}
 
             {r.broken_internal_images.map((b, i) => {
@@ -785,43 +783,11 @@ function HealthSubTab() {
                   </div>
 
                   {activePreview && activePreview.key === rowKey && (
-                    <div className="mt-1.5 p-2 border border-edge bg-shade flex flex-col gap-1.5 rounded">
-                      <div className="mono text-xs font-bold" style={{ color: "var(--color-phosphor)" }}>
-                        FIX PREVIEW — Post #{activePreview.postId}
-                      </div>
-                      {activePreview.loading && <div className="mono text-xs" style={{ color: "var(--color-muted)" }}>Loading preview...</div>}
-                      {activePreview.error && <div className="mono text-xs" style={{ color: "var(--color-critical)" }}>{activePreview.error}</div>}
-                      {activePreview.applied && <div className="mono text-xs font-bold" style={{ color: "var(--color-go)" }}>✓ Removed from WP content! Re-scan to update report.</div>}
-                      {!activePreview.loading && !activePreview.applied && activePreview.data && (
-                        <>
-                          <div className="mono text-xs">Matches found in raw HTML: {activePreview.data.matches}</div>
-                          {activePreview.data.matches === 0 ? (
-                            <div className="mono text-xs" style={{ color: "var(--color-hazard)" }}>0 matches found in content.raw (may already be removed).</div>
-                          ) : (
-                            <div className="flex flex-col gap-1">
-                              <div className="mono text-xs text-muted">BEFORE:</div>
-                              <pre className="mono text-xs p-1.5 overflow-x-auto whitespace-pre-wrap" style={{ background: "rgba(255,0,0,0.1)", border: "1px solid var(--color-critical)" }}>
-                                {activePreview.data.before}
-                              </pre>
-                              <div className="mono text-xs text-muted">AFTER:</div>
-                              <pre className="mono text-xs p-1.5 overflow-x-auto whitespace-pre-wrap" style={{ background: "rgba(0,255,0,0.1)", border: "1px solid var(--color-go)" }}>
-                                {activePreview.data.after}
-                              </pre>
-                            </div>
-                          )}
-                          <div className="flex items-center gap-2 mt-1">
-                            <button
-                              className="btn btn--crit"
-                              disabled={activePreview.loading || activePreview.data.matches === 0}
-                              onClick={handleApplyFix}
-                            >
-                              CONFIRM REMOVE
-                            </button>
-                            <button className="btn" onClick={() => setActivePreview(null)}>CANCEL</button>
-                          </div>
-                        </>
-                      )}
-                    </div>
+                    <PreviewBlock
+                      activePreview={activePreview}
+                      onApply={handleApplyFix}
+                      onClose={() => setActivePreview(null)}
+                    />
                   )}
                 </div>
               );
