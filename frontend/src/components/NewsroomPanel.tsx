@@ -79,6 +79,54 @@ interface RadioResponse {
   _fatal?: string;
 }
 
+interface NewsDoc {
+  id: string;
+  name: string;
+  link?: string;
+  kind: "weekday" | "weekend";
+  date: string;
+}
+
+interface NewsDocsResponse {
+  docs: NewsDoc[];
+}
+
+interface NewsArticle {
+  title: string;
+  url: string;
+  source: string;
+  date: string;
+  content: string;
+  words: number;
+}
+
+interface NewsReportResponse {
+  category: "global" | "business";
+  results: NewsArticle[];
+  count: number;
+  slice_of_life: NewsArticle[];
+  mtime: number;
+}
+
+interface NewsFillWritten {
+  tab: string;
+  slot: number;
+  title: string;
+}
+
+interface NewsFillSkipped {
+  tab: string;
+  slot: number;
+  reason: string;
+}
+
+interface NewsFillApplyResponse {
+  doc_id: string;
+  category: string;
+  written: NewsFillWritten[];
+  skipped: NewsFillSkipped[];
+}
+
 const CT: Record<string, string> = { "content-type": "application/json" };
 
 export default function NewsroomPanel({ module: _module }: { module: ModuleConfig }) {
@@ -94,7 +142,10 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
   const [rewritten, setRewritten] = useState("");
   const [rewriting, setRewriting] = useState(false);
 
-  // RADIO sub-module state
+  // RADIO mode toggle: Document Generator (docgen) vs News Fill (newsfill)
+  const [radioMode, setRadioMode] = useState<"docgen" | "newsfill">("docgen");
+
+  // RADIO Document Generator state
   const now = new Date();
   const [radioYear, setRadioYear] = useState<number>(now.getFullYear());
   const [radioMonth, setRadioMonth] = useState<number>(now.getMonth() + 1);
@@ -103,6 +154,19 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
   const [radioResult, setRadioResult] = useState<RadioResponse | null>(null);
   const [radioLoading, setRadioLoading] = useState<boolean>(false);
   const [radioGenerating, setRadioGenerating] = useState<boolean>(false);
+
+  // RADIO News Fill state
+  const [newsDocs, setNewsDocs] = useState<NewsDoc[]>([]);
+  const [newsDocsLoading, setNewsDocsLoading] = useState<boolean>(false);
+  const [selectedDocId, setSelectedDocId] = useState<string>("");
+  const [newsCategory, setNewsCategory] = useState<"global" | "business">("global");
+  const [newsScouting, setNewsScouting] = useState<boolean>(false);
+  const [newsReportLoading, setNewsReportLoading] = useState<boolean>(false);
+  const [newsReport, setNewsReport] = useState<NewsReportResponse | null>(null);
+  const [selectedArticles, setSelectedArticles] = useState<NewsArticle[]>([]);
+  const [slicePick, setSlicePick] = useState<NewsArticle | null>(null);
+  const [newsApplying, setNewsApplying] = useState<boolean>(false);
+  const [newsApplyResult, setNewsApplyResult] = useState<NewsFillApplyResponse | null>(null);
 
   const handleRadioPreview = async () => {
     setRadioLoading(true);
@@ -164,6 +228,113 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setRadioGenerating(false);
+    }
+  };
+
+  const fetchNewsDocs = useCallback(async () => {
+    setNewsDocsLoading(true);
+    try {
+      const data = await fetchJSON<NewsDocsResponse>("/api/newsroom/radio/news/docs");
+      const docs = Array.isArray(data?.docs) ? data.docs : [];
+      setNewsDocs(docs);
+      if (docs.length > 0 && !selectedDocId) {
+        setSelectedDocId(docs[0].id);
+      }
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setNewsDocsLoading(false);
+    }
+  }, [selectedDocId]);
+
+  useEffect(() => {
+    if (tab === "radio" && radioMode === "newsfill" && newsDocs.length === 0) {
+      void fetchNewsDocs();
+    }
+  }, [tab, radioMode, newsDocs.length, fetchNewsDocs]);
+
+  const handleNewsScout = async () => {
+    setNewsScouting(true);
+    setError(null);
+    try {
+      await post("/api/terminal/insert", { text: `/radio-news-scout ${newsCategory}` });
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setNewsScouting(false);
+    }
+  };
+
+  const handleNewsConvert = async () => {
+    setNewsReportLoading(true);
+    setError(null);
+    setNewsReport(null);
+    setSelectedArticles([]);
+    setSlicePick(null);
+    setNewsApplyResult(null);
+    try {
+      const data = await fetchJSON<NewsReportResponse>("/api/newsroom/radio/news/report");
+      setNewsReport(data);
+      if (data?.category && (data.category === "global" || data.category === "business")) {
+        setNewsCategory(data.category);
+      }
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setNewsReportLoading(false);
+    }
+  };
+
+  const selectedDoc = newsDocs.find((d) => d.id === selectedDocId) || null;
+  const targetHardCount = selectedDoc?.kind === "weekend" ? (newsCategory === "global" ? 7 : 6) : 10;
+  const isWeekdayGlobal = selectedDoc?.kind === "weekday" && newsCategory === "global";
+
+  const toggleArticleSelect = (article: NewsArticle) => {
+    const existsIndex = selectedArticles.findIndex((a) => a.url === article.url);
+    if (existsIndex >= 0) {
+      setSelectedArticles(selectedArticles.filter((_, idx) => idx !== existsIndex));
+    } else {
+      if (selectedArticles.length < targetHardCount) {
+        setSelectedArticles([...selectedArticles, article]);
+      }
+    }
+  };
+
+  const isConfirmEnabled =
+    Boolean(selectedDoc) &&
+    selectedArticles.length === targetHardCount &&
+    (!isWeekdayGlobal || slicePick !== null) &&
+    !newsApplying;
+
+  const handleNewsApply = async () => {
+    if (!selectedDoc || !isConfirmEnabled) return;
+    setNewsApplying(true);
+    setError(null);
+    setNewsApplyResult(null);
+    try {
+      const body = {
+        doc_id: selectedDoc.id,
+        kind: selectedDoc.kind,
+        category: newsCategory,
+        pieces: selectedArticles,
+        slice: isWeekdayGlobal ? slicePick : null,
+      };
+      const res = await fetch("/api/newsroom/radio/news/apply", {
+        method: "POST",
+        headers: CT,
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({ detail: res.statusText }));
+        setError(typeof d.detail === "string" ? d.detail : JSON.stringify(d.detail));
+      } else {
+        const data: NewsFillApplyResponse = await res.json();
+        setNewsApplyResult(data);
+      }
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setNewsApplying(false);
     }
   };
 
@@ -455,183 +626,482 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
 
       {tab === "radio" && (
         <div className="hud hud--bracket reveal reveal-1 flex min-h-0 flex-1 flex-col gap-3 p-3">
-          <div className="flex items-center justify-between">
-            <span className="label">RADIO — MONTHLY BATCH GENERATOR</span>
-          </div>
-
-          {/* Form controls */}
-          <div className="flex flex-wrap items-center gap-3">
-            <label className="flex items-center gap-1.5 mono text-xs">
-              <span className="label">Year</span>
-              <input
-                type="number"
-                className="input mono px-2 py-1 text-xs"
-                style={{ width: 80 }}
-                value={radioYear}
-                onChange={(e) => {
-                  setRadioYear(Number(e.target.value));
-                  setRadioPreview(null);
-                  setRadioResult(null);
-                }}
-              />
-            </label>
-
-            <label className="flex items-center gap-1.5 mono text-xs">
-              <span className="label">Month</span>
-              <select
-                className="mono label"
-                style={{
-                  background: "var(--color-panel-2)",
-                  color: "var(--color-phosphor-dim)",
-                  border: "1px solid var(--color-edge)",
-                  padding: "4px 6px",
-                  fontSize: "11px",
-                }}
-                value={radioMonth}
-                onChange={(e) => {
-                  setRadioMonth(Number(e.target.value));
-                  setRadioPreview(null);
-                  setRadioResult(null);
-                }}
-              >
-                {Array.from({ length: 12 }, (_, i) => i + 1).map((m) => (
-                  <option key={m} value={m}>
-                    {m < 10 ? `0${m}` : m} — {new Date(2000, m - 1, 1).toLocaleString("en-US", { month: "long" })}
-                  </option>
-                ))}
-              </select>
-            </label>
-
-            <label className="flex flex-1 items-center gap-1.5 mono text-xs" style={{ minWidth: 200 }}>
-              <span className="label">Sheet Name</span>
-              <input
-                type="text"
-                placeholder="(default: folder name)"
-                className="input mono flex-1 px-2 py-1 text-xs"
-                value={radioSheetName}
-                onChange={(e) => {
-                  setRadioSheetName(e.target.value);
-                  setRadioPreview(null);
-                  setRadioResult(null);
-                }}
-              />
-            </label>
-
-            <div className="ml-auto flex gap-2">
+          {/* Sub-mode navigation header */}
+          <div className="flex items-center justify-between border-b border-edge pb-2">
+            <div className="flex items-center gap-2">
               <button
-                className="btn btn--compact"
-                onClick={() => void handleRadioPreview()}
-                disabled={radioLoading || radioGenerating}
+                className={`btn btn--compact ${radioMode === "docgen" ? "btn--signal" : ""}`}
+                onClick={() => setRadioMode("docgen")}
               >
-                {radioLoading ? "PREVIEWING…" : "PREVIEW"}
+                Document Generator
               </button>
               <button
-                className="btn btn--compact btn--signal"
-                onClick={() => void handleRadioGenerate()}
-                disabled={!radioPreview || radioLoading || radioGenerating}
-                title={!radioPreview ? "Run PREVIEW first" : "Generate files in Google Drive"}
+                className={`btn btn--compact ${radioMode === "newsfill" ? "btn--signal" : ""}`}
+                onClick={() => {
+                  setRadioMode("newsfill");
+                  if (newsDocs.length === 0) void fetchNewsDocs();
+                }}
               >
-                {radioGenerating ? "GENERATING…" : "GENERATE"}
+                News Fill
               </button>
             </div>
+            <span className="label text-xs">RADIO ▸ {radioMode === "docgen" ? "DOCUMENT GENERATOR" : "NEWS FILL"}</span>
           </div>
 
-          {/* Folder & Counts summary */}
-          {(radioPreview || radioResult) && (
-            <div className="flex flex-col gap-1.5 border border-edge px-3 py-2 text-xs mono" style={{ background: "var(--color-void)" }}>
-              {radioPreview?.folder && (
-                <div className="flex items-center gap-2">
-                  <span className="label" style={{ color: "var(--color-signal)" }}>TARGET FOLDER:</span>
-                  <span style={{ color: "var(--color-phosphor)" }}>{radioPreview.folder.name}</span>
-                  {radioPreview.folder.id && (
-                    <span style={{ color: "var(--color-muted)" }}>({radioPreview.folder.id})</span>
+          {radioMode === "docgen" ? (
+            <>
+              {/* Document Generator Form controls */}
+              <div className="flex flex-wrap items-center gap-3">
+                <label className="flex items-center gap-1.5 mono text-xs">
+                  <span className="label">Year</span>
+                  <input
+                    type="number"
+                    className="input mono px-2 py-1 text-xs"
+                    style={{ width: 80 }}
+                    value={radioYear}
+                    onChange={(e) => {
+                      setRadioYear(Number(e.target.value));
+                      setRadioPreview(null);
+                      setRadioResult(null);
+                    }}
+                  />
+                </label>
+
+                <label className="flex items-center gap-1.5 mono text-xs">
+                  <span className="label">Month</span>
+                  <select
+                    className="mono label"
+                    style={{
+                      background: "var(--color-panel-2)",
+                      color: "var(--color-phosphor-dim)",
+                      border: "1px solid var(--color-edge)",
+                      padding: "4px 6px",
+                      fontSize: "11px",
+                    }}
+                    value={radioMonth}
+                    onChange={(e) => {
+                      setRadioMonth(Number(e.target.value));
+                      setRadioPreview(null);
+                      setRadioResult(null);
+                    }}
+                  >
+                    {Array.from({ length: 12 }, (_, i) => i + 1).map((m) => (
+                      <option key={m} value={m}>
+                        {m < 10 ? `0${m}` : m} — {new Date(2000, m - 1, 1).toLocaleString("en-US", { month: "long" })}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+
+                <label className="flex flex-1 items-center gap-1.5 mono text-xs" style={{ minWidth: 200 }}>
+                  <span className="label">Sheet Name</span>
+                  <input
+                    type="text"
+                    placeholder="(default: folder name)"
+                    className="input mono flex-1 px-2 py-1 text-xs"
+                    value={radioSheetName}
+                    onChange={(e) => {
+                      setRadioSheetName(e.target.value);
+                      setRadioPreview(null);
+                      setRadioResult(null);
+                    }}
+                  />
+                </label>
+
+                <div className="ml-auto flex gap-2">
+                  <button
+                    className="btn btn--compact"
+                    onClick={() => void handleRadioPreview()}
+                    disabled={radioLoading || radioGenerating}
+                  >
+                    {radioLoading ? "PREVIEWING…" : "PREVIEW"}
+                  </button>
+                  <button
+                    className="btn btn--compact btn--signal"
+                    onClick={() => void handleRadioGenerate()}
+                    disabled={!radioPreview || radioLoading || radioGenerating}
+                    title={!radioPreview ? "Run PREVIEW first" : "Generate files in Google Drive"}
+                  >
+                    {radioGenerating ? "GENERATING…" : "GENERATE"}
+                  </button>
+                </div>
+              </div>
+
+              {/* Folder & Counts summary */}
+              {(radioPreview || radioResult) && (
+                <div className="flex flex-col gap-1.5 border border-edge px-3 py-2 text-xs mono" style={{ background: "var(--color-void)" }}>
+                  {radioPreview?.folder && (
+                    <div className="flex items-center gap-2">
+                      <span className="label" style={{ color: "var(--color-signal)" }}>TARGET FOLDER:</span>
+                      <span style={{ color: "var(--color-phosphor)" }}>{radioPreview.folder.name}</span>
+                      {radioPreview.folder.id && (
+                        <span style={{ color: "var(--color-muted)" }}>({radioPreview.folder.id})</span>
+                      )}
+                    </div>
                   )}
+
+                  {(radioResult?.counts || radioPreview?.counts) && (() => {
+                    const c = radioResult?.counts || radioPreview?.counts!;
+                    return (
+                      <div className="flex items-center gap-2 text-xs">
+                        <span className="label">SUMMARY:</span>
+                        <span style={{ color: "var(--color-phosphor-dim)" }}>
+                          {c.sheet} sheet · {c.weekday} weekday · {c.weekend} weekend · {c.to_create} to create · {c.skipped} skip
+                        </span>
+                      </div>
+                    );
+                  })()}
                 </div>
               )}
 
-              {(radioResult?.counts || radioPreview?.counts) && (() => {
-                const c = radioResult?.counts || radioPreview?.counts!;
-                return (
-                  <div className="flex items-center gap-2 text-xs">
-                    <span className="label">SUMMARY:</span>
-                    <span style={{ color: "var(--color-phosphor-dim)" }}>
-                      {c.sheet} sheet · {c.weekday} weekday · {c.weekend} weekend · {c.to_create} to create · {c.skipped} skip
+              {/* Output items list */}
+              <div className="flex min-h-0 flex-1 flex-col gap-1 overflow-auto border border-edge p-2" style={{ background: "var(--color-void)" }}>
+                {radioResult ? (
+                  <>
+                    <span className="label mb-1" style={{ color: "var(--color-go)" }}>
+                      CREATED FILES ({radioResult.created?.length || 0})
                     </span>
-                  </div>
-                );
-              })()}
-            </div>
-          )}
-
-          {/* Output items list */}
-          <div className="flex min-h-0 flex-1 flex-col gap-1 overflow-auto border border-edge p-2" style={{ background: "var(--color-void)" }}>
-            {radioResult ? (
-              <>
-                <span className="label mb-1" style={{ color: "var(--color-go)" }}>
-                  CREATED FILES ({radioResult.created?.length || 0})
-                </span>
-                {radioResult.created?.map((item, idx) => (
-                  <div key={idx} className="mono flex items-center gap-2 border-b border-edge-soft py-1 text-xs">
-                    <span className="pip pip--go" />
-                    <span className="flex-1 truncate" style={{ color: "var(--color-phosphor)" }}>
-                      {item.name}
-                    </span>
-                    {item.kind && (
-                      <span className="label" style={{ fontSize: "10px", color: "var(--color-muted)" }}>
-                        {item.kind}
-                      </span>
-                    )}
-                    {item.link ? (
-                      <a
-                        href={item.link}
-                        target="_blank"
-                        rel="noreferrer"
-                        style={{ color: "var(--color-signal)" }}
-                      >
-                        open ↗
-                      </a>
-                    ) : null}
-                  </div>
-                ))}
-                {radioResult.skipped && radioResult.skipped.length > 0 && (
-                  <div className="mt-2 flex flex-col gap-1">
-                    <span className="label" style={{ color: "var(--color-hazard)" }}>
-                      SKIPPED FILES ({radioResult.skipped.length})
-                    </span>
-                    {radioResult.skipped.map((item, idx) => (
-                      <div key={idx} className="mono flex items-center gap-2 py-0.5 text-xs">
-                        <span className="pip pip--hazard" />
-                        <span style={{ color: "var(--color-muted)" }}>{item.name}</span>
+                    {radioResult.created?.map((item, idx) => (
+                      <div key={idx} className="mono flex items-center gap-2 border-b border-edge-soft py-1 text-xs">
+                        <span className="pip pip--go" />
+                        <span className="flex-1 truncate" style={{ color: "var(--color-phosphor)" }}>
+                          {item.name}
+                        </span>
+                        {item.kind && (
+                          <span className="label" style={{ fontSize: "10px", color: "var(--color-muted)" }}>
+                            {item.kind}
+                          </span>
+                        )}
+                        {item.link ? (
+                          <a
+                            href={item.link}
+                            target="_blank"
+                            rel="noreferrer"
+                            style={{ color: "var(--color-signal)" }}
+                          >
+                            open ↗
+                          </a>
+                        ) : null}
                       </div>
                     ))}
+                    {radioResult.skipped && radioResult.skipped.length > 0 && (
+                      <div className="mt-2 flex flex-col gap-1">
+                        <span className="label" style={{ color: "var(--color-hazard)" }}>
+                          SKIPPED FILES ({radioResult.skipped.length})
+                        </span>
+                        {radioResult.skipped.map((item, idx) => (
+                          <div key={idx} className="mono flex items-center gap-2 py-0.5 text-xs">
+                            <span className="pip pip--hazard" />
+                            <span style={{ color: "var(--color-muted)" }}>{item.name}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </>
+                ) : radioPreview ? (
+                  <>
+                    <span className="label mb-1" style={{ color: "var(--color-signal)" }}>
+                      PLAN TO CREATE ({radioPreview.to_create?.length || 0})
+                    </span>
+                    {radioPreview.to_create?.map((item, idx) => (
+                      <div key={idx} className="mono flex items-center gap-2 border-b border-edge-soft py-1 text-xs">
+                        <span className="pip pip--signal" />
+                        <span className="flex-1 truncate" style={{ color: "var(--color-phosphor-dim)" }}>
+                          {item.name}
+                        </span>
+                        {item.kind && (
+                          <span className="label" style={{ fontSize: "10px", color: "var(--color-muted)" }}>
+                            {item.kind}
+                          </span>
+                        )}
+                      </div>
+                    ))}
+                  </>
+                ) : (
+                  <div className="flex flex-1 items-center justify-center">
+                    <span className="label">— Select year & month, then click PREVIEW —</span>
                   </div>
                 )}
-              </>
-            ) : radioPreview ? (
-              <>
-                <span className="label mb-1" style={{ color: "var(--color-signal)" }}>
-                  PLAN TO CREATE ({radioPreview.to_create?.length || 0})
-                </span>
-                {radioPreview.to_create?.map((item, idx) => (
-                  <div key={idx} className="mono flex items-center gap-2 border-b border-edge-soft py-1 text-xs">
-                    <span className="pip pip--signal" />
-                    <span className="flex-1 truncate" style={{ color: "var(--color-phosphor-dim)" }}>
-                      {item.name}
+              </div>
+            </>
+          ) : (
+            /* News Fill UI */
+            <div className="flex min-h-0 flex-1 flex-col gap-3">
+              {/* Step 0 & 1 Controls */}
+              <div className="flex flex-wrap items-center gap-3 border-b border-edge pb-2">
+                {/* Working doc select */}
+                <label className="flex items-center gap-1.5 mono text-xs flex-1" style={{ minWidth: 220 }}>
+                  <span className="label">Target Doc</span>
+                  <select
+                    className="mono label flex-1 truncate"
+                    style={{
+                      background: "var(--color-panel-2)",
+                      color: "var(--color-phosphor)",
+                      border: "1px solid var(--color-edge)",
+                      padding: "4px 6px",
+                      fontSize: "11px",
+                    }}
+                    value={selectedDocId}
+                    onChange={(e) => {
+                      setSelectedDocId(e.target.value);
+                      setSelectedArticles([]);
+                      setSlicePick(null);
+                      setNewsApplyResult(null);
+                    }}
+                  >
+                    {newsDocs.map((doc) => (
+                      <option key={doc.id} value={doc.id}>
+                        {doc.name} [{doc.kind.toUpperCase()}] ({doc.date})
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    className="btn btn--compact"
+                    onClick={() => void fetchNewsDocs()}
+                    disabled={newsDocsLoading}
+                    title="Refresh working script docs list"
+                  >
+                    {newsDocsLoading ? "…" : "⟳"}
+                  </button>
+                </label>
+
+                {/* Category select */}
+                <label className="flex items-center gap-1.5 mono text-xs">
+                  <span className="label">Category</span>
+                  <select
+                    className="mono label"
+                    style={{
+                      background: "var(--color-panel-2)",
+                      color: "var(--color-phosphor)",
+                      border: "1px solid var(--color-edge)",
+                      padding: "4px 6px",
+                      fontSize: "11px",
+                    }}
+                    value={newsCategory}
+                    onChange={(e) => {
+                      setNewsCategory(e.target.value as "global" | "business");
+                      setSelectedArticles([]);
+                      setSlicePick(null);
+                    }}
+                  >
+                    <option value="global">GLOBAL</option>
+                    <option value="business">BUSINESS</option>
+                  </select>
+                </label>
+
+                {/* SCOUT & CONVERT buttons */}
+                <div className="flex items-center gap-2 ml-auto">
+                  <button
+                    className="btn btn--compact"
+                    onClick={() => void handleNewsScout()}
+                    disabled={newsScouting}
+                    title="Type /radio-news-scout command into terminal pane"
+                  >
+                    {newsScouting ? "SCOUTING…" : "SCOUT"}
+                  </button>
+                  <button
+                    className="btn btn--compact btn--signal"
+                    onClick={() => void handleNewsConvert()}
+                    disabled={newsReportLoading}
+                    title="Fetch and convert latest scout handoff report"
+                  >
+                    {newsReportLoading ? "LOADING…" : "CONVERT"}
+                  </button>
+                </div>
+              </div>
+
+              {/* Status Header / Target Summary & CONFIRM Button */}
+              <div className="flex items-center justify-between px-2 py-1.5 text-xs mono border border-edge gap-2" style={{ background: "var(--color-void)" }}>
+                <div className="flex items-center gap-3">
+                  <div className="flex items-center gap-1.5">
+                    <span className="label" style={{ color: "var(--color-signal)" }}>HARD PICKS:</span>
+                    <span style={{ color: selectedArticles.length === targetHardCount ? "var(--color-go)" : "var(--color-hazard)" }}>
+                      {selectedArticles.length} / {targetHardCount} selected
                     </span>
-                    {item.kind && (
-                      <span className="label" style={{ fontSize: "10px", color: "var(--color-muted)" }}>
-                        {item.kind}
+                  </div>
+                  {isWeekdayGlobal && (
+                    <div className="flex items-center gap-1.5">
+                      <span className="label" style={{ color: "var(--color-signal)" }}>SLICE OF LIFE:</span>
+                      <span style={{ color: slicePick ? "var(--color-go)" : "var(--color-hazard)" }}>
+                        {slicePick ? "1 picked" : "0 picked"}
                       </span>
+                    </div>
+                  )}
+                </div>
+                <button
+                  className="btn btn--compact btn--signal ml-auto"
+                  onClick={() => void handleNewsApply()}
+                  disabled={!isConfirmEnabled}
+                  title={!isConfirmEnabled ? "Target hard picks and required slice pick must be met" : "Apply selected pieces to target document"}
+                >
+                  {newsApplying ? "APPLYING…" : "CONFIRM & APPLY TO DOC"}
+                </button>
+              </div>
+
+              {/* News Fill Content Area (Checklist & Results) */}
+              <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-auto border border-edge p-2" style={{ background: "var(--color-void)" }}>
+                {newsApplyResult ? (
+                  <div className="flex flex-col gap-2">
+                    <span className="label" style={{ color: "var(--color-go)" }}>
+                      ✓ APPLIED TO DOC — {newsApplyResult.written.length} SLOTS WRITTEN
+                    </span>
+                    <div className="flex flex-col gap-1">
+                      {newsApplyResult.written.map((w, idx) => (
+                        <div key={idx} className="mono flex items-center gap-2 border-b border-edge-soft py-1 text-xs">
+                          <span className="pip pip--go" />
+                          <span className="label" style={{ color: "var(--color-signal)" }}>
+                            [{w.tab} SLOT {w.slot}]
+                          </span>
+                          <span className="flex-1 truncate" style={{ color: "var(--color-phosphor)" }}>
+                            {w.title}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                    {newsApplyResult.skipped.length > 0 && (
+                      <div className="mt-2 flex flex-col gap-1">
+                        <span className="label" style={{ color: "var(--color-hazard)" }}>
+                          SKIPPED SLOTS ({newsApplyResult.skipped.length})
+                        </span>
+                        {newsApplyResult.skipped.map((s, idx) => (
+                          <div key={idx} className="mono flex items-center gap-2 py-0.5 text-xs">
+                            <span className="pip pip--hazard" />
+                            <span className="label" style={{ color: "var(--color-muted)" }}>
+                              [{s.tab} SLOT {s.slot}]
+                            </span>
+                            <span style={{ color: "var(--color-muted)" }}>{s.reason}</span>
+                          </div>
+                        ))}
+                      </div>
                     )}
                   </div>
-                ))}
-              </>
-            ) : (
-              <div className="flex flex-1 items-center justify-center">
-                <span className="label">— Select year & month, then click PREVIEW —</span>
+                ) : newsReport ? (
+                  <div className="flex flex-col gap-3">
+                    {/* Hard News Checklist */}
+                    <div>
+                      <div className="flex items-center justify-between mb-1">
+                        <span className="label" style={{ color: "var(--color-signal)" }}>
+                          SCOUTED ARTICLES ({newsReport.results?.length || 0}) — PICK {targetHardCount}
+                        </span>
+                        {selectedArticles.length > 0 && (
+                          <button
+                            className="btn btn--compact"
+                            onClick={() => setSelectedArticles([])}
+                            style={{ fontSize: "10px", padding: "1px 6px" }}
+                          >
+                            Clear Picks
+                          </button>
+                        )}
+                      </div>
+                      <div className="flex flex-col gap-1">
+                        {newsReport.results?.map((article) => {
+                          const selectIndex = selectedArticles.findIndex((a) => a.url === article.url);
+                          const isSelected = selectIndex >= 0;
+                          return (
+                            <div
+                              key={article.url}
+                              onClick={() => toggleArticleSelect(article)}
+                              className="mono flex cursor-pointer items-start gap-2 border border-edge px-2 py-1.5 transition-colors"
+                              style={{
+                                background: isSelected
+                                  ? "color-mix(in srgb, var(--color-signal) 12%, var(--color-panel-2))"
+                                  : "var(--color-panel-2)",
+                                borderColor: isSelected ? "var(--color-signal)" : "var(--color-edge)",
+                              }}
+                            >
+                              <span
+                                className="label mt-0.5"
+                                style={{
+                                  color: isSelected ? "var(--color-signal)" : "var(--color-muted)",
+                                  minWidth: 28,
+                                }}
+                              >
+                                {isSelected ? `[#${selectIndex + 1}]` : "[  ]"}
+                              </span>
+                              <div className="flex flex-1 flex-col gap-0.5 min-w-0">
+                                <div className="flex items-center justify-between gap-2">
+                                  <span
+                                    className="font-semibold text-xs truncate"
+                                    style={{
+                                      color: isSelected ? "var(--color-phosphor)" : "var(--color-phosphor-dim)",
+                                    }}
+                                  >
+                                    {article.title}
+                                  </span>
+                                  <span className="label text-xs shrink-0" style={{ color: "var(--color-muted)", fontSize: "10px" }}>
+                                    {article.source} · {article.words}w · {article.date}
+                                  </span>
+                                </div>
+                                {article.content && (
+                                  <span className="text-xs truncate" style={{ color: "var(--color-muted)", fontSize: "11px" }}>
+                                    {article.content.slice(0, 140)}…
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+
+                    {/* Slice of Life Section (weekday global only) */}
+                    {isWeekdayGlobal && newsReport.slice_of_life && newsReport.slice_of_life.length > 0 && (
+                      <div className="border-t border-edge pt-2">
+                        <span className="label mb-1 block" style={{ color: "var(--color-hazard)" }}>
+                          SLICE OF LIFE (PICK EXACTLY 1)
+                        </span>
+                        <div className="flex flex-col gap-1">
+                          {newsReport.slice_of_life.map((slice) => {
+                            const isPicked = slicePick?.url === slice.url;
+                            return (
+                              <div
+                                key={slice.url}
+                                onClick={() => setSlicePick(isPicked ? null : slice)}
+                                className="mono flex cursor-pointer items-start gap-2 border border-edge px-2 py-1.5"
+                                style={{
+                                  background: isPicked
+                                    ? "color-mix(in srgb, var(--color-hazard) 15%, var(--color-panel-2))"
+                                    : "var(--color-panel-2)",
+                                  borderColor: isPicked ? "var(--color-hazard)" : "var(--color-edge)",
+                                }}
+                              >
+                                <input
+                                  type="radio"
+                                  name="slice_pick"
+                                  checked={isPicked}
+                                  onChange={() => setSlicePick(slice)}
+                                  className="mt-1"
+                                />
+                                <div className="flex flex-1 flex-col gap-0.5 min-w-0">
+                                  <div className="flex items-center justify-between gap-2">
+                                    <span
+                                      className="font-semibold text-xs truncate"
+                                      style={{
+                                        color: isPicked ? "var(--color-phosphor)" : "var(--color-phosphor-dim)",
+                                      }}
+                                    >
+                                      {slice.title}
+                                    </span>
+                                    <span className="label text-xs shrink-0" style={{ color: "var(--color-muted)", fontSize: "10px" }}>
+                                      {slice.source} · {slice.words}w
+                                    </span>
+                                  </div>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <div className="flex flex-1 flex-col items-center justify-center gap-2">
+                    <span className="label">— Click SCOUT to run terminal scout or CONVERT to load report —</span>
+                  </div>
+                )}
               </div>
-            )}
-          </div>
+            </div>
+          )}
         </div>
       )}
 

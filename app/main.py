@@ -21,6 +21,7 @@ from .health import router as health_router
 from .manage import router as manage_router
 from .newsroom import router as newsroom_router
 from .notebooklm import router as notebooklm_router
+from .radio_news import router as radio_news_router
 from .n8n_proxy import router as n8n_proxy_router
 from .session_stats import router as session_router
 from .terminal_input import router as terminal_router
@@ -33,6 +34,7 @@ app.include_router(ffmpeg_router)
 app.include_router(comfyui_router)
 app.include_router(notebooklm_router)
 app.include_router(newsroom_router)
+app.include_router(radio_news_router)
 app.include_router(catalog_router)
 app.include_router(session_router)
 app.include_router(terminal_router)

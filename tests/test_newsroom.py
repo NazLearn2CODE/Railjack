@@ -12,7 +12,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from app import newsroom
+from app import newsroom, radio_news
 
 
 def _client(monkeypatch, rc=0, out=b"{}", err=b""):
@@ -229,3 +229,175 @@ def test_radio_requires_year_and_month(monkeypatch):
     assert c.post("/api/newsroom/radio/preview", json={}).status_code == 400
     assert c.post("/api/newsroom/radio/generate", json={}).status_code == 400
     assert calls == []  # nothing exec'd on a bad body
+
+
+# ---------------------------------------------------------------- radio/news
+# RADIO ▸ News Fill: `radio_news.py` fronts the radio-news skill script.
+# `_rn_client` mirrors `_client` but mounts radio_news.router and captures the
+# stdin payload the apply route feeds the child (the write path is stdin-driven).
+
+
+def _rn_client(monkeypatch, rc=0, out=b"{}", err=b""):
+    """App with only the radio_news router; ``_run`` captures argv + stdin."""
+    calls: list[list[str]] = []
+    stdins: list[bytes | None] = []
+
+    async def fake_run(argv, timeout=90, stdin=None):
+        calls.append(list(argv))
+        stdins.append(stdin)
+        return rc, out, err
+
+    monkeypatch.setattr(radio_news, "_run", fake_run)
+    app = FastAPI()
+    app.include_router(radio_news.router)
+    return TestClient(app), calls, stdins
+
+
+def _load_radio_news():
+    import importlib.util
+
+    for p in (newsroom.SCRIPTS / "radio_news.py",
+              Path.home() / ".claude" / "skills" / "newsroom" / "scripts" / "radio_news.py"):
+        if p.exists():
+            spec = importlib.util.spec_from_file_location("radio_news_mod", p)
+            mod = importlib.util.module_from_spec(spec)
+            assert spec.loader is not None
+            spec.loader.exec_module(mod)
+            return mod
+    pytest.skip("radio_news.py not on a skill path yet (canonical writes pending)")
+
+
+# --- pure-function tests (skip if the deployed script isn't reachable) ---
+
+
+def test_rn_build_slotmap_sizes():
+    rn = _load_radio_news()
+    assert len(rn.build_slotmap("global", "weekday")) == 10
+    assert len(rn.build_slotmap("global", "weekend")) == 7
+    assert len(rn.build_slotmap("business", "weekday")) == 10
+    assert len(rn.build_slotmap("business", "weekend")) == 6
+
+
+def test_rn_locate_slots_label_anchored():
+    rn = _load_radio_news()
+
+    def para(text, style, start):
+        return {"startIndex": start, "paragraph": {
+            "paragraphStyle": {"namedStyleType": style},
+            "elements": [{"startIndex": start, "textRun": {"content": text}}]}}
+
+    paragraphs = [
+        para("Global/AM/CALENDAR\n", "NORMAL_TEXT", 1),
+        para("3.[]\n", "HEADING_2", 20),
+        para("National/AM/CALENDAR\n", "NORMAL_TEXT", 40),
+        para("1.[]\n", "HEADING_2", 60),
+    ]
+    slots = rn.locate_slots(paragraphs)
+    # Each slot heading binds to the label line above it, not across labels.
+    assert ("Global", 3) in slots
+    assert ("National", 1) in slots
+    assert ("Global", 1) not in slots  # no cross-label collision
+
+
+def test_rn_tab_bodies_documenttab_path():
+    """Regression: a native-tab Docs response nests body under
+    ``documentTab.body.content`` and every write needs the tab's ``tabId``.
+    Reading ``body.content`` (the old bug) yields zero paragraphs → every slot
+    'not found' → silent no-op fill."""
+    rn = _load_radio_news()
+    para = {"paragraph": {"elements": [{"textRun": {"content": "1.[]\n"}}]}}
+    doc = {"tabs": [{
+        "tabProperties": {"title": "AM", "tabId": "t.0"},
+        # decoy: an empty top-level body must NOT be what we read
+        "body": {"content": []},
+        "documentTab": {"body": {"content": [
+            {"sectionBreak": {}},           # non-paragraph block is filtered out
+            para,
+        ]}},
+    }]}
+    bodies = rn.tab_bodies(doc)
+    assert list(bodies.keys()) == ["AM"]
+    assert bodies["AM"]["tab_id"] == "t.0"
+    assert bodies["AM"]["paras"] == [para]  # pulled from documentTab, decoy ignored
+
+
+def test_rn_request_builders_tab_scoped():
+    """Regression: multi-tab writes must carry tabId, and deleteContentRange
+    takes a ``range`` object (not bare start/end). Both were wrong in the first
+    build and only surfaced on a live batchUpdate (400)."""
+    rn = _load_radio_news()
+    _, ins = rn._ins(42, "t.1", "hello")
+    assert ins["insertText"]["location"] == {"index": 42, "tabId": "t.1"}
+    assert ins["insertText"]["text"] == "hello"
+    idx, dele = rn._del(10, 18, "t.1")
+    assert idx == 10  # sort key is the start index
+    assert dele["deleteContentRange"]["range"] == {
+        "startIndex": 10, "endIndex": 18, "tabId": "t.1"}
+
+
+def test_rn_slice_leadin_fill():
+    rn = _load_radio_news()
+    out = rn.slice_leadin_fill("X [ARTICLE HEADLINE] Y [SOURCE] Z", "Big News", "Reuters")
+    assert "Big News" in out
+    assert "Reuters" in out
+    assert "[ARTICLE HEADLINE]" not in out
+    assert "[SOURCE]" not in out
+
+
+# --- route tests (always run; _run is monkeypatched) ---
+
+
+def test_rn_report_happy_and_fatal(monkeypatch):
+    payload = {"category": "global", "results": [], "count": 0,
+               "slice_of_life": None, "mtime": "2026-07-27T00:00:00Z"}
+    c, _, _ = _rn_client(monkeypatch, out=json.dumps(payload).encode())
+    r = c.get("/api/newsroom/radio/news/report")
+    assert r.status_code == 200
+    assert r.json()["category"] == "global"
+
+    c2, _, _ = _rn_client(monkeypatch, out=b'{"_fatal": "handoff missing"}')
+    r2 = c2.get("/api/newsroom/radio/news/report")
+    assert r2.status_code == 400
+    assert r2.json()["detail"] == "handoff missing"
+
+
+def test_rn_docs_argv_and_limit(monkeypatch):
+    c, calls, _ = _rn_client(monkeypatch, out=b"[]")
+    assert c.get("/api/newsroom/radio/news/docs").status_code == 200
+    argv = calls[0]
+    assert argv[0] == "python3"
+    assert argv[1].endswith("radio_news.py")
+    assert argv[-1] == "list-docs"
+
+    c2, calls2, _ = _rn_client(monkeypatch, out=b"[]")
+    assert c2.get("/api/newsroom/radio/news/docs?limit=5").status_code == 200
+    argv2 = calls2[0]
+    assert argv2[-3:] == ["list-docs", "--limit", "5"]
+
+
+def test_rn_apply_requires_fields(monkeypatch):
+    c, calls, _ = _rn_client(monkeypatch)
+    assert c.post("/api/newsroom/radio/news/apply",
+                  json={"kind": "weekday", "category": "global"}).status_code == 400
+    assert c.post("/api/newsroom/radio/news/apply",
+                  json={"doc_id": "D", "category": "global"}).status_code == 400
+    assert c.post("/api/newsroom/radio/news/apply",
+                  json={"doc_id": "D", "kind": "weekday"}).status_code == 400
+    assert calls == []  # nothing exec'd on a bad body
+
+
+def test_rn_apply_argv_and_stdin(monkeypatch):
+    c, calls, stdins = _rn_client(monkeypatch, out=b'{"written": [], "skipped": []}')
+    body = {"doc_id": "DOC1", "kind": "weekday", "category": "global",
+            "pieces": [{"title": "T", "url": "U", "source": "S",
+                        "date": "2026-07-27", "content": "C", "words": 100}],
+            "slice": {"title": "slice title"}}
+    r = c.post("/api/newsroom/radio/news/apply", json=body)
+    assert r.status_code == 200
+    argv = calls[0]
+    assert argv[0] == "python3"
+    assert argv[1].endswith("radio_news.py")
+    assert argv[2:] == ["fill", "--doc", "DOC1", "--kind", "weekday", "--category", "global"]
+    sent = json.loads(stdins[0])
+    assert sent["pieces"][0]["title"] == "T"
+    assert sent["slice"]["title"] == "slice title"
