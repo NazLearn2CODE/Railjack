@@ -114,3 +114,17 @@ async def api_apply(body: dict = Body(...)):
     stdin = json.dumps({"pieces": body.get("pieces", []),
                         "slice": body.get("slice")}).encode()
     return await _script(argv, timeout=180, stdin=stdin)
+
+
+@router.post("/api/newsroom/radio/news/autofill")
+async def api_autofill(body: dict = Body(...)):
+    """AUTOPILOT — one click: the child reads the scout handoff itself and fills
+    the doc with no human selection (pieces auto-placed by ``assign_pieces``,
+    SEA leading each broadcast). No stdin; pairs with CHEAP SCOUT's exact-count
+    sweep for max token economy. 180s covers a batchUpdate over 3 tabs."""
+    doc_id, kind, category = body.get("doc_id"), body.get("kind"), body.get("category")
+    if not (doc_id and kind and category):
+        raise HTTPException(400, "doc_id, kind and category are required")
+    argv = [PY, str(RNEWS), "autofill", "--doc", str(doc_id),
+            "--kind", str(kind), "--category", str(category)]
+    return await _script(argv, timeout=180)

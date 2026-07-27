@@ -429,3 +429,59 @@ def test_rn_apply_argv_and_stdin(monkeypatch):
     sent = json.loads(stdins[0])
     assert sent["pieces"][0]["title"] == "T"
     assert sent["slice"]["title"] == "slice title"
+
+
+# --- SEA-lead placement (assign_pieces) + AUTOPILOT autofill ---
+
+
+def test_rn_assign_pieces_sea_leads_each_broadcast():
+    rn = _load_radio_news()
+    slotmap = rn.build_slotmap("global", "weekday")  # slot-1 at AM/MIDDAY/EVE
+    pieces = ([{"title": "sea%d" % i, "region": "SEA"} for i in range(3)]
+              + [{"title": "g%d" % i} for i in range(7)])
+    a = rn.assign_pieces(slotmap, pieces, "global")
+    for tab in ("AM", "MIDDAY", "EVE"):  # every broadcast lead is a SEA piece
+        assert a[(tab, 1)]["region"] == "SEA"
+    # non-lead slots are the non-SEA remainder, newest-first into earliest slot
+    assert a[("AM", 2)]["title"] == "g0"
+    assert all(a[k].get("region") != "SEA" for k in a if k[1] != 1)
+    assert len(a) == len(slotmap) == 10
+
+
+def test_rn_assign_pieces_business_sequential_ignores_region():
+    rn = _load_radio_news()
+    slotmap = rn.build_slotmap("business", "weekday")  # no slot 1 anywhere
+    pieces = [{"title": "b%d" % i, "region": "SEA"} for i in range(10)]
+    a = rn.assign_pieces(slotmap, pieces, "business")
+    assert a[slotmap[0]]["title"] == "b0"  # sequential; region tag irrelevant
+    assert a[slotmap[1]]["title"] == "b1"
+    assert len(a) == 10
+
+
+def test_rn_assign_pieces_short_sea_falls_back():
+    rn = _load_radio_news()
+    slotmap = rn.build_slotmap("global", "weekend")  # 2 leads (MIDDAY/EVE), 7 slots
+    pieces = ([{"title": "sea0", "region": "SEA"}]
+              + [{"title": "g%d" % i} for i in range(6)])  # only 1 SEA
+    a = rn.assign_pieces(slotmap, pieces, "global")
+    assert a[("MIDDAY", 1)]["title"] == "sea0"          # lone SEA leads MIDDAY
+    assert a[("EVE", 1)].get("region") != "SEA"          # EVE lead falls back to non-SEA
+    assert len(a) == len(slotmap) == 7
+
+
+def test_rn_autofill_argv_no_stdin(monkeypatch):
+    c, calls, stdins = _rn_client(
+        monkeypatch, out=b'{"written": [], "skipped": [], "auto": true}')
+    r = c.post("/api/newsroom/radio/news/autofill",
+               json={"doc_id": "DOC9", "kind": "weekend", "category": "global"})
+    assert r.status_code == 200
+    assert calls[0][2:] == ["autofill", "--doc", "DOC9",
+                            "--kind", "weekend", "--category", "global"]
+    assert stdins[0] is None  # autofill reads the handoff itself — no stdin
+
+
+def test_rn_autofill_requires_fields(monkeypatch):
+    c, calls, _ = _rn_client(monkeypatch)
+    assert c.post("/api/newsroom/radio/news/autofill",
+                  json={"kind": "weekday", "category": "global"}).status_code == 400
+    assert calls == []  # nothing exec'd on a bad body

@@ -91,3 +91,58 @@ Naz: the flat 60-doc `<select>` was unusable. Replaced with a **one-level folder
 - **Human gate only:** browser panel click-through (browse → pick doc → SCOUT → CONVERT → tick →
   CONFIRM) on a real doc — can't be host-driven. Backend + all 5 endpoints proven; frontend
   build-verified (tsc+vite exit 0).
+
+## Refinement backlog (deferred — build when quota allows; Naz 2026-07-28)
+Requested after the folder browser shipped + the panel worked live end-to-end. NOT started.
+1. **Trim scout volume** — gather **15** pieces per category (down from ≥20) + **3** Slice-of-Life
+   (down from 5). Cost driver = fetch+clean every article for the ≥190-word gate → fewer = cheaper.
+   Still covers fill (weekday 10 / weekend 7 hard; slice needs 1). **Confirm:** "segment" = per
+   category-run (one `global`, one `business`), NOT per broadcast.
+2. **SEA quota** — ≥**1 Southeast-Asia piece per broadcast** (AM/MIDDAY/EVE), **≤3/day**. Placement
+   rule, both sides: scout tags region + guarantees ≥3 SEA in pool; fill reserves one global slot
+   per tab for SEA, rest rank newest-first. **Open Qs:** which slot per tab; weekend skips AM →
+   2 broadcasts → 2 SEA not 3.
+3. **Search method: unchanged** (Naz's hard line).
+
+Tawhan's suggestions (Naz invited; unadopted, decide at build):
+- **Cross-outlet dedupe** — drop near-dup stories (CNN+BBC same event) in the scout so one story
+  doesn't eat two slots. Cheap; quality win. → **ADOPTED + shipped (scout L1).**
+- **Lazy body fetch** (bigger saver, trade-off) — scout returns title/url/snippet/date only; fetch
+  full ≥190w body at APPLY time for ticked pieces only. Saves ~5 wasted fetches/run but adds a
+  re-fetch (paywall risk) + breaks the "scout ships content, no re-fetch" design. Reserve for if #1
+  alone doesn't fix the bill.
+
+## Cheap lane + SEA fill — backend DONE + host-verified (2026-07-28)
+Two features Naz added on top of the refinements, both for max token economy. **Backend shipped
++ tested (33 pass); frontend (2 buttons) is the only pending piece → Antigravity brief written.**
+
+### SEA-lead placement (#2 fill layer 2 — the engine)
+- New pure `assign_pieces(slotmap, pieces, category)` in `radio_news.py`: global runs reserve
+  **GLOBAL slot 1 of each broadcast** (AM/MIDDAY/EVE) for a `region:"SEA"` piece; remaining slots
+  take the rest newest-first. Graceful fallback both ways (short SEA pool → slot 1 falls back to
+  non-SEA; surplus SEA spill into open slots). Business = sequential, region ignored.
+- `cmd_fill` refactored → shared `_fill_doc(token, doc_id, kind, category, pieces, slice_piece)`
+  used by **both** `fill` (stdin) and the new `autofill`. `written[]` entries now carry `region`.
+- Smoke-proven: weekday-global → SEA at AM1/MIDDAY1/EVE1, g0..g6 into the 7 others; weekend 1-SEA
+  fallback correct; business sequential.
+
+### CHEAP SCOUT (scout exact-count mode)
+- Scout `SKILL.md` gains an **exact mode**: any of `--results N --sea M --slice K` ⇒ gather exactly
+  those counts, stop the moment each quota is met (no headroom). Pairs with AUTOPILOT.
+- Panel computes N/M/K from category+kind: weekday global `10/3/1`, weekend global `7/2/0`
+  (no AM → no Slice), weekday business `10/0/0`, weekend business `6/0/0`. Injects
+  `/radio-news-scout <cat> --results N --sea M --slice K` into the terminal (reuses the SCOUT path).
+
+### AUTOPILOT (one-click convert+place+fill)
+- New `autofill` subcommand: reads the handoff itself (no stdin), dedups `results`, picks slice
+  (weekday-global only), guards category mismatch (`_fatal` if handoff cat ≠ requested), calls
+  `_fill_doc`. Deterministic placement = **no LLM in the loop** = the real token save.
+- Route `POST /api/newsroom/radio/news/autofill {doc_id,kind,category}` (no stdin, 180s). Live-
+  verified: empty body → **400** guard, route loaded (not 405) after `systemctl --user restart`.
+- Idempotent (skips already-filled slots), same as manual fill.
+
+### Pending
+- **Frontend (Antigravity):** CHEAP SCOUT + AUTOPILOT buttons in the News Fill cheap lane — brief in
+  `RADIO-CHEAP-LANE-IDE-BRIEF.md`.
+- **Human gate:** live end-to-end auto-fill of a real doc (CHEAP SCOUT → AUTOPILOT) — can't be host-driven.
+- **Still deferred:** the glm-5 content rewrite in `process()` (the "big fish").
