@@ -886,13 +886,18 @@ def _scout_date_in_range(date_str: str, cutoff_iso: str, today_iso: str) -> bool
     return bool(date_str) and cutoff_iso <= date_str <= today_iso
 
 
-def _scout_gem_path() -> Path:
-    """Resolve the STORY SCOUT pitch gem path (relative paths anchor at the repo root).
-    Mirrors _archive_gem_path()."""
-    p = Path(_opts().get("scout_gem_path", "app/gems/story-scout-pitch.md"))
+def _resolve_gem(opt_key: str, default: str) -> Path:
+    """Resolve a gem path from options; relative paths anchor at the repo root.
+    Shared by the publicity/archive/scout gem-path resolvers."""
+    p = Path(_opts().get(opt_key, default))
     if not p.is_absolute():
         p = Path(__file__).resolve().parent.parent / p
     return p
+
+
+def _scout_gem_path() -> Path:
+    """STORY SCOUT pitch gem path."""
+    return _resolve_gem("scout_gem_path", "app/gems/story-scout-pitch.md")
 
 
 _JINA_META = ("title:", "url source:", "markdown content:", "published time:", "description:")
@@ -1419,11 +1424,8 @@ async def tn_cancel_job(jid: str) -> dict:
 
 
 def _gem_path() -> Path:
-    """Resolve the publicity gem path (relative paths anchor at the repo root)."""
-    p = Path(_opts().get("gem_path", "app/gems/event-publicity.md"))
-    if not p.is_absolute():
-        p = Path(__file__).resolve().parent.parent / p
-    return p
+    """Publicity gem path."""
+    return _resolve_gem("gem_path", "app/gems/event-publicity.md")
 
 
 def _load_gem(path: Path) -> str:
@@ -1749,12 +1751,8 @@ def _archive_is_detail(question: str) -> bool:
 
 
 def _archive_gem_path() -> Path:
-    """Resolve the ARCHIVE Q&A gem path (relative paths anchor at the repo root).
-    Mirrors _gem_path()."""
-    p = Path(_opts().get("archive_gem_path", "app/gems/event-archive-qa.md"))
-    if not p.is_absolute():
-        p = Path(__file__).resolve().parent.parent / p
-    return p
+    """ARCHIVE Q&A gem path."""
+    return _resolve_gem("archive_gem_path", "app/gems/event-archive-qa.md")
 
 
 @router.post("/api/thailandnow/archive/ask")
