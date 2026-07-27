@@ -1078,6 +1078,8 @@ async def _scout_news(query: str | None = None, category: str | None = None, day
                 continue  # strict: undated or out-of-window dropped
             ordered.append(res)
 
+    ordered = await _scout_rerank(ordered)
+
     return {
         "results": ordered,
         "count": len(ordered),
@@ -1085,6 +1087,200 @@ async def _scout_news(query: str | None = None, category: str | None = None, day
         "query": query,
         "category": category,
         "days": days,
+    }
+
+
+def _scout_apply_rerank(candidates: list[dict], llm_output: list[dict] | None) -> list[dict]:
+    """Pure helper to apply LLM rerank output to candidates list.
+    llm_output is [{idx, score, keep}]. Drops keep:false, sorts keep:true by score desc,
+    appends unmapped candidates in original order."""
+    if not candidates or not isinstance(llm_output, list):
+        return candidates
+
+    rank_map: dict[int, dict] = {}
+    for item in llm_output:
+        if isinstance(item, dict) and "idx" in item:
+            try:
+                idx = int(item["idx"])
+                rank_map[idx] = item
+            except (ValueError, TypeError):
+                continue
+
+    kept_scored: list[tuple[float, int, dict]] = []
+    unmapped: list[dict] = []
+
+    for i, c in enumerate(candidates):
+        if i in rank_map:
+            info = rank_map[i]
+            keep = info.get("keep", True)
+            if keep:
+                try:
+                    score = float(info.get("score", 0))
+                except (ValueError, TypeError):
+                    score = 0.0
+                kept_scored.append((score, i, c))
+        else:
+            unmapped.append(c)
+
+    kept_scored.sort(key=lambda x: (-x[0], x[1]))
+    sorted_kept = [c for _, _, c in kept_scored]
+    return sorted_kept + unmapped
+
+
+async def _scout_rerank(candidates: list[dict]) -> list[dict]:
+    """LLM editorial rerank for foreigner-in-Thailand audience.
+    Degrades gracefully to unranked candidates on gateway failure / invalid output."""
+    if not candidates:
+        return candidates
+    try:
+        top_candidates = candidates[:15]
+        prompt_items = [
+            {"idx": i, "title": c.get("title", ""), "snippet": c.get("snippet", "")}
+            for i, c in enumerate(top_candidates)
+        ]
+        prompt = json.dumps(prompt_items, ensure_ascii=False)
+        system = _load_gem(_resolve_gem("scout_rerank_gem_path", "app/gems/story-scout-rerank.md"))
+        opts = _opts()
+        model = (opts.get("scout_llm") or {}).get("model") or "glm-5"
+        llm_out = await _llm_json(prompt, system=system, model=model)
+        if isinstance(llm_out, list):
+            return _scout_apply_rerank(candidates, llm_out)
+    except Exception:
+        pass
+    return candidates
+
+
+async def _pexels_photos(query: str, per_page: int = 8) -> list[dict]:
+    """Fetch stock photos from Pexels API (requires PEXELS_API_KEY). Uses real Chrome UA to bypass Cloudflare."""
+    key = os.environ.get("PEXELS_API_KEY")
+    if not key or not query:
+        return []
+    headers = {
+        "Authorization": key,
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    }
+    params = {"query": query, "per_page": per_page, "orientation": "landscape"}
+    try:
+        async with httpx.AsyncClient(timeout=15) as c:
+            r = await c.get("https://api.pexels.com/v1/search", headers=headers, params=params)
+            if r.status_code != 200:
+                return []
+            data = r.json()
+            photos = data.get("photos", [])
+            out: list[dict] = []
+            for p in photos:
+                if isinstance(p, dict) and p.get("src"):
+                    src = p["src"]
+                    out.append({
+                        "url": src.get("original", ""),
+                        "thumb": src.get("medium", ""),
+                        "w": p.get("width", 0),
+                        "h": p.get("height", 0),
+                        "provider": "pexels",
+                    })
+            return out
+    except Exception:
+        return []
+
+
+async def _pixabay_photos(query: str, per_page: int = 8) -> list[dict]:
+    """Fetch stock photos from Pixabay API (requires PIXABAY_API_KEY)."""
+    key = os.environ.get("PIXABAY_API_KEY")
+    if not key or not query:
+        return []
+    params = {
+        "key": key,
+        "q": query,
+        "per_page": per_page,
+        "image_type": "photo",
+        "orientation": "horizontal",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=15) as c:
+            r = await c.get("https://pixabay.com/api/", params=params)
+            if r.status_code != 200:
+                return []
+            data = r.json()
+            hits = data.get("hits", [])
+            out: list[dict] = []
+            for h in hits:
+                if isinstance(h, dict):
+                    out.append({
+                        "url": h.get("largeImageURL", ""),
+                        "thumb": h.get("webformatURL", ""),
+                        "w": h.get("imageWidth", 0),
+                        "h": h.get("imageHeight", 0),
+                        "provider": "pixabay",
+                    })
+            return out
+    except Exception:
+        return []
+
+
+def _scout_filter_stock(photos: list[dict]) -> list[dict]:
+    """Filter stock photos to h >= 1080, dedupe by url, and sort by (h * w) descending."""
+    seen: set[str] = set()
+    filtered: list[dict] = []
+    for p in photos:
+        h = p.get("h", 0)
+        u = p.get("url", "")
+        if h >= 1080 and u and u not in seen:
+            seen.add(u)
+            filtered.append(p)
+    filtered.sort(key=lambda p: p.get("h", 0) * p.get("w", 0), reverse=True)
+    return filtered
+
+
+async def _scout_images_content(url: str) -> dict:
+    """Gather images for a news story: Tier 1 (article images) -> Tier 2 (stock >= 1080p) -> Tier 3 (AI prompts)."""
+    md = await _jina_read(url)
+    tier1_raw = _parse_images(md)
+    tier1 = [{"url": img.get("url", ""), "alt": img.get("alt", ""), "tier": 1} for img in tier1_raw]
+
+    lines = [l.strip() for l in md.split("\n")]
+    non_blank = [l for l in lines if l]
+    title = _extract_title(lines, non_blank)
+
+    digest_prompt = f"Title: {title}\nURL: {url}\n\nContent:\n{md[:6000]}"
+    system = _load_gem(_resolve_gem("scout_image_digest_gem_path", "app/gems/story-scout-image-digest.md"))
+    opts = _opts()
+    model = (opts.get("scout_llm") or {}).get("model") or "glm-5"
+
+    try:
+        digest_data = await _llm_json(digest_prompt, system=system, model=model)
+    except Exception:
+        digest_data = {}
+
+    if not isinstance(digest_data, dict):
+        digest_data = {}
+
+    stock_queries = digest_data.get("stock_queries", [])
+    if not isinstance(stock_queries, list):
+        stock_queries = []
+    ai_prompts = digest_data.get("ai_prompts", [])
+    if not isinstance(ai_prompts, list):
+        ai_prompts = []
+
+    stock_tasks = []
+    for q in stock_queries[:5]:
+        if isinstance(q, str) and q.strip():
+            stock_tasks.append(_pexels_photos(q.strip()))
+            stock_tasks.append(_pixabay_photos(q.strip()))
+
+    tier2_raw: list[dict] = []
+    if stock_tasks:
+        stock_results = await asyncio.gather(*stock_tasks)
+        for batch in stock_results:
+            tier2_raw.extend(batch)
+
+    tier2_filtered = _scout_filter_stock(tier2_raw)[:12]
+    tier2 = [{**img, "tier": 2} for img in tier2_filtered]
+
+    return {
+        "tier1": tier1,
+        "tier2": tier2,
+        "ai_prompts": [str(p) for p in ai_prompts if p],
+        "url": url,
     }
 
 
@@ -1143,6 +1339,19 @@ async def scout_pitch(payload: dict = Body(default={})):
         pitch, mode = {}, "degraded"
 
     return {"pitch": pitch, "url": url, "model": model, "mode": mode}
+
+
+@router.post("/api/thailandnow/scout/images")
+async def scout_images(payload: dict = Body(default={})):
+    """STORY SCOUT — gather multi-tier images for a news story URL."""
+    body = payload or {}
+    url = (body.get("url") or "").strip()
+    if not url:
+        raise HTTPException(400, "url is required")
+    try:
+        return await _scout_images_content(url)
+    except (HTTPException, Exception) as e:
+        return {"tier1": [], "tier2": [], "ai_prompts": [], "url": url, "error": str(e)}
 
 
 # --- EVENTS radar Tier 2 (R6): NotebookLM deep web research ---
@@ -2795,4 +3004,14 @@ if __name__ == "__main__":
     _sgp = _scout_gem_path()
     assert _sgp.name == "story-scout-pitch.md" and _sgp.exists(), "scout gem path missing"
     assert "headline_en" in _load_gem(_sgp), "scout gem extract failed"
+    # rerank mapping assert
+    _rr_cands = [{"id": 0}, {"id": 1}, {"id": 2}, {"id": 3}]
+    _rr_out = [{"idx": 0, "score": 8, "keep": True}, {"idx": 1, "score": 5, "keep": False}, {"idx": 2, "score": 9, "keep": True}]
+    _rr_res = _scout_apply_rerank(_rr_cands, _rr_out)
+    assert [c["id"] for c in _rr_res] == [2, 0, 3], "rerank apply mapping failed"
+    # stock filter & keyless check asserts
+    assert _scout_filter_stock([{"h": 1080, "w": 1920, "url": "a"}, {"h": 720, "w": 1280, "url": "b"}]) == [{"h": 1080, "w": 1920, "url": "a"}], "stock 1080p filter failed"
+    import unittest.mock
+    with unittest.mock.patch.dict(os.environ, {"PEXELS_API_KEY": "", "PIXABAY_API_KEY": ""}):
+        assert asyncio.run(_pexels_photos("test")) == [] and asyncio.run(_pixabay_photos("test")) == [], "keyless stock helpers should return []"
     print("OK archive + story scout: tokenize + title score + presence/detail classify + recursive union + news extract")

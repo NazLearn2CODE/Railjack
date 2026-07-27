@@ -65,6 +65,8 @@ modules:
       scout_llm:
         model: glm-5      # /scout/pitch; routes through app/zai.py (same gateway/combo as publicity_llm)
       scout_gem_path: app/gems/story-scout-pitch.md
+      scout_rerank_gem_path: app/gems/story-scout-rerank.md
+      scout_image_digest_gem_path: app/gems/story-scout-image-digest.md
       # --- SEO HEALTH (read-only link/image/orphan report) ---
       wordpress_url: https://www.thailandnow.in.th   # override of WORDPRESS_URL; user/password stay in ~/n8n/.secrets.env
       seo_media_cache_ttl_s: 86400                     # media library (~5750) pulled once/day

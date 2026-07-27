@@ -1495,6 +1495,7 @@ function ArchiveTab() {
 /* ------------------------------- STORY SCOUT ------------------------------ */
 
 function StoryScoutTab() {
+  const [scoutMode, setScoutMode] = usePersistentState<"pitch" | "image">("tn.scout.mode", "pitch");
   const [query, setQuery]         = usePersistentState("tn.scout.query", "");
   const [category, setCategory]   = usePersistentState("tn.scout.category", "");
   const [days, setDays]           = usePersistentState("tn.scout.days", 7);
@@ -1504,7 +1505,13 @@ function StoryScoutTab() {
   const [scoutJobId, setScoutJobId] = useState<string | null>(null);
 
   const [pitches, setPitches]     = useState<Record<string, { data?: PitchReply; loading?: boolean; err?: string }>>({});
-  const [images, setImages]       = useState<Record<string, { data?: { images: { url: string; alt: string }[] }; loading?: boolean; err?: string }>>({});
+
+  // IMAGE MODE state
+  const [imgUrl, setImgUrl]       = usePersistentState("tn.scout.img_url", "");
+  const [scoutImgData, setScoutImgData] = useState<{ tier1: any[]; tier2: any[]; ai_prompts: string[]; url: string; error?: string } | null>(null);
+  const [scoutImgLoading, setScoutImgLoading] = useState(false);
+  const [scoutImgErr, setScoutImgErr] = useState<string | null>(null);
+  const [copyFeedback, setCopyFeedback] = useState<string | null>(null);
 
   const { data: jobsData } = usePolling<{ jobs: TnJob[] }>("/api/thailandnow/jobs", 2000);
 
@@ -1554,15 +1561,26 @@ function StoryScoutTab() {
     [search]
   );
 
-  const findImages = useCallback(async (resUrl: string) => {
-    setImages((prev) => ({ ...prev, [resUrl]: { loading: true } }));
-    const r = await post<{ images: { url: string; alt: string }[] }>("/api/thailandnow/events/images", { url: resUrl });
+  const fetchScoutImages = useCallback(async (targetUrl: string) => {
+    const cleanUrl = targetUrl.trim();
+    if (!cleanUrl) return;
+    setScoutImgLoading(true);
+    setScoutImgErr(null);
+    const r = await post<{ tier1: any[]; tier2: any[]; ai_prompts: string[]; url: string; error?: string }>("/api/thailandnow/scout/images", { url: cleanUrl });
+    setScoutImgLoading(false);
     if (r.ok && r.data) {
-      setImages((prev) => ({ ...prev, [resUrl]: { data: r.data } }));
+      setScoutImgData(r.data);
+      if (r.data.error) setScoutImgErr(r.data.error);
     } else {
-      setImages((prev) => ({ ...prev, [resUrl]: { err: r.error || "failed to load images" } }));
+      setScoutImgErr(r.error || "failed to gather images");
     }
   }, []);
+
+  const openImageModeForUrl = useCallback((targetUrl: string) => {
+    setImgUrl(targetUrl);
+    setScoutMode("image");
+    fetchScoutImages(targetUrl);
+  }, [fetchScoutImages, setImgUrl, setScoutMode]);
 
   const makePitch = useCallback(async (resUrl: string) => {
     setPitches((prev) => ({ ...prev, [resUrl]: { loading: true } }));
@@ -1576,168 +1594,301 @@ function StoryScoutTab() {
 
   return (
     <section className="hud hud--bracket flex flex-col flex-grow reveal reveal-1 p-3">
-      <div className="label mb-2">STORY SCOUT</div>
-
-      {/* Pinned Input Row */}
-      <div className="flex flex-wrap items-center gap-2 shrink-0 mb-3">
-        <input
-          className="input"
-          style={{ flexGrow: 1, minWidth: 200 }}
-          placeholder="optional: Thailand visa, Songkran, …"
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          onKeyDown={handleKeyDown}
-        />
-        <select
-          className="input"
-          value={category}
-          onChange={(e) => setCategory(e.target.value)}
-        >
-          <option value="">General</option>
-          <option value="expat-policy">Expat policy</option>
-          <option value="business-investment">Business &amp; investment</option>
-          <option value="lifestyle">Lifestyle</option>
-        </select>
-        <div className="flex items-center gap-2">
-          <input
-            type="range"
-            min={1}
-            max={30}
-            step={1}
-            value={days}
-            onChange={(e) => setDays(Number(e.target.value))}
-            style={{ width: 120 }}
-          />
-          <span className="mono text-xs" style={{ color: "var(--color-signal)", minWidth: 50 }}>
-            {days} {days === 1 ? "day" : "days"}
-          </span>
+      {/* Top Header Row with Mode Toggle */}
+      <div className="flex items-center justify-between mb-2 shrink-0">
+        <span className="label">STORY SCOUT</span>
+        <div className="flex items-center gap-1">
+          <button
+            className={`btn btn--compact ${scoutMode === "pitch" ? "btn--signal" : ""}`}
+            onClick={() => setScoutMode("pitch")}
+          >
+            PITCH MODE
+          </button>
+          <button
+            className={`btn btn--compact ${scoutMode === "image" ? "btn--signal" : ""}`}
+            onClick={() => setScoutMode("image")}
+          >
+            IMAGE MODE
+          </button>
         </div>
-        <button className="btn btn--signal" disabled={searching} onClick={search}>
-          {searching ? "SEARCHING…" : "SEARCH"}
-        </button>
       </div>
 
-      {/* Scrollable Results Body */}
-      <div className="scroll-y flex-grow flex flex-col gap-3">
-        {err && <div className="mono text-xs" style={{ color: "var(--color-critical)" }}>{err}</div>}
-        {searching && results.length === 0 && (
-          <div className="mono text-xs" style={{ color: "var(--color-signal)" }}>SEARCHING…</div>
-        )}
-        {!searching && results.length === 0 && !err && (
-          <div className="mono" style={{ color: "var(--color-muted)" }}>
-            Search for Thailand news to pitch.
-          </div>
-        )}
-        {results.map((r, idx) => {
-          const pitchState = pitches[r.url];
-          const imageState = images[r.url];
-          return (
-            <div key={r.url || idx} className="border border-edge bg-void p-3 flex flex-col gap-2">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <a
-                  href={r.url}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="font-bold hover:underline"
-                  style={{ color: "var(--color-signal)" }}
-                >
-                  {r.title}
-                </a>
-                <div className="flex items-center gap-2">
-                  <span className="mono text-xs" style={{ color: "var(--color-muted)" }}>
-                    {r.source} {r.date ? `· ${r.date}` : ""} {r.lang ? `· ${r.lang.toUpperCase()}` : ""}
-                  </span>
-                  <button
-                    className="btn btn--compact"
-                    disabled={imageState?.loading}
-                    onClick={() => findImages(r.url)}
-                  >
-                    {imageState?.loading ? "LOADING…" : "FIND IMAGES"}
-                  </button>
-                  <button
-                    className="btn btn--compact"
-                    disabled={pitchState?.loading}
-                    onClick={() => makePitch(r.url)}
-                  >
-                    {pitchState?.loading ? "PITCHING…" : "MAKE PITCH"}
-                  </button>
-                </div>
-              </div>
-
-              {r.snippet && (
-                <div className="mono text-xs" style={{ color: "var(--color-muted)" }}>
-                  {r.snippet}
-                </div>
-              )}
-
-              {/* Pitch expansion */}
-              {pitchState && (
-                <div className="mt-1 border-t border-edge pt-2 flex flex-col gap-1">
-                  {pitchState.err && (
-                    <div className="mono text-xs" style={{ color: "var(--color-critical)" }}>{pitchState.err}</div>
-                  )}
-                  {pitchState.data && (
-                    pitchState.data.mode === "degraded" ? (
-                      <div className="mono text-xs" style={{ color: "var(--color-critical)" }}>
-                        LLM gateway unavailable — retry later
-                      </div>
-                    ) : (
-                      <div className="flex flex-col gap-1 bg-surface p-2 rounded">
-                        <div className="font-bold text-sm">{pitchState.data.pitch.headline_en}</div>
-                        <div className="text-sm" style={{ color: "var(--color-signal)" }}>{pitchState.data.pitch.headline_th}</div>
-                        <div className="text-xs italic" style={{ color: "var(--color-muted)" }}>{pitchState.data.pitch.excerpt_en}</div>
-                        <div className="mt-1 flex items-center justify-between">
-                          <span className="mono text-xs" style={{ color: "var(--color-muted)" }}>
-                            {pitchState.data.mode.toUpperCase()}
-                          </span>
-                          <button
-                            className="btn btn--compact"
-                            onClick={() => {
-                              const p = pitchState.data!.pitch;
-                              const block = `${p.headline_en}\n${p.headline_th}\n${p.excerpt_en}`;
-                              navigator.clipboard.writeText(block).catch(() => {});
-                            }}
-                          >
-                            COPY PITCH
-                          </button>
-                        </div>
-                      </div>
-                    )
-                  )}
-                </div>
-              )}
-
-              {/* Image expansion */}
-              {imageState && (
-                <div className="mt-1 border-t border-edge pt-2 flex flex-col gap-1">
-                  {imageState.err && (
-                    <div className="mono text-xs" style={{ color: "var(--color-critical)" }}>{imageState.err}</div>
-                  )}
-                  {imageState.data && (
-                    imageState.data.images.length === 0 ? (
-                      <div className="mono text-xs" style={{ color: "var(--color-muted)" }}>No candidate images found.</div>
-                    ) : (
-                      <div className="flex flex-wrap gap-2 pt-1">
-                        {imageState.data.images.map((img, imgIdx) => (
-                          <a
-                            key={imgIdx}
-                            href={img.url}
-                            target="_blank"
-                            rel="noreferrer"
-                            className="block border border-edge hover:border-signal"
-                          >
-                            <img src={img.url} alt={img.alt || "Candidate"} style={{ height: 64, objectFit: "cover" }} />
-                          </a>
-                        ))}
-                      </div>
-                    )
-                  )}
-                </div>
-              )}
+      {scoutMode === "pitch" ? (
+        <>
+          {/* Pinned Input Row */}
+          <div className="flex flex-wrap items-center gap-2 shrink-0 mb-3">
+            <input
+              className="input"
+              style={{ flexGrow: 1, minWidth: 200 }}
+              placeholder="optional: Thailand visa, Songkran, …"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              onKeyDown={handleKeyDown}
+            />
+            <select
+              className="input"
+              value={category}
+              onChange={(e) => setCategory(e.target.value)}
+            >
+              <option value="">General</option>
+              <option value="expat-policy">Expat policy</option>
+              <option value="business-investment">Business &amp; investment</option>
+              <option value="lifestyle">Lifestyle</option>
+            </select>
+            <div className="flex items-center gap-2">
+              <input
+                type="range"
+                min={1}
+                max={30}
+                step={1}
+                value={days}
+                onChange={(e) => setDays(Number(e.target.value))}
+                style={{ width: 120 }}
+              />
+              <span className="mono text-xs" style={{ color: "var(--color-signal)", minWidth: 50 }}>
+                {days} {days === 1 ? "day" : "days"}
+              </span>
             </div>
-          );
-        })}
-      </div>
+            <button className="btn btn--signal" disabled={searching} onClick={search}>
+              {searching ? "SEARCHING…" : "SEARCH"}
+            </button>
+          </div>
+
+          {/* Scrollable Results Body */}
+          <div className="scroll-y flex-grow flex flex-col gap-3">
+            {err && <div className="mono text-xs" style={{ color: "var(--color-critical)" }}>{err}</div>}
+            {searching && results.length === 0 && (
+              <div className="mono text-xs" style={{ color: "var(--color-signal)" }}>SEARCHING…</div>
+            )}
+            {!searching && results.length === 0 && !err && (
+              <div className="mono" style={{ color: "var(--color-muted)" }}>
+                Search for Thailand news to pitch.
+              </div>
+            )}
+            {results.map((r, idx) => {
+              const pitchState = pitches[r.url];
+              return (
+                <div key={r.url || idx} className="border border-edge bg-void p-3 flex flex-col gap-2">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <a
+                      href={r.url}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="font-bold hover:underline"
+                      style={{ color: "var(--color-signal)" }}
+                    >
+                      {r.title}
+                    </a>
+                    <div className="flex items-center gap-2">
+                      <span className="mono text-xs" style={{ color: "var(--color-muted)" }}>
+                        {r.source} {r.date ? `· ${r.date}` : ""} {r.lang ? `· ${r.lang.toUpperCase()}` : ""}
+                      </span>
+                      <button
+                        className="btn btn--compact"
+                        onClick={() => openImageModeForUrl(r.url)}
+                      >
+                        FIND IMAGES
+                      </button>
+                      <button
+                        className="btn btn--compact"
+                        disabled={pitchState?.loading}
+                        onClick={() => makePitch(r.url)}
+                      >
+                        {pitchState?.loading ? "PITCHING…" : "MAKE PITCH"}
+                      </button>
+                    </div>
+                  </div>
+
+                  {r.snippet && (
+                    <div className="mono text-xs" style={{ color: "var(--color-muted)" }}>
+                      {r.snippet}
+                    </div>
+                  )}
+
+                  {/* Pitch expansion */}
+                  {pitchState && (
+                    <div className="mt-1 border-t border-edge pt-2 flex flex-col gap-1">
+                      {pitchState.err && (
+                        <div className="mono text-xs" style={{ color: "var(--color-critical)" }}>{pitchState.err}</div>
+                      )}
+                      {pitchState.data && (
+                        pitchState.data.mode === "degraded" ? (
+                          <div className="mono text-xs" style={{ color: "var(--color-critical)" }}>
+                            LLM gateway unavailable — retry later
+                          </div>
+                        ) : (
+                          <div className="flex flex-col gap-1 bg-surface p-2 rounded">
+                            <div className="font-bold text-sm">{pitchState.data.pitch.headline_en}</div>
+                            <div className="text-sm" style={{ color: "var(--color-signal)" }}>{pitchState.data.pitch.headline_th}</div>
+                            <div className="text-xs italic" style={{ color: "var(--color-muted)" }}>{pitchState.data.pitch.excerpt_en}</div>
+                            <div className="mt-1 flex items-center justify-between">
+                              <span className="mono text-xs" style={{ color: "var(--color-muted)" }}>
+                                {pitchState.data.mode.toUpperCase()}
+                              </span>
+                              <button
+                                className="btn btn--compact"
+                                onClick={() => {
+                                  const p = pitchState.data!.pitch;
+                                  const block = `${p.headline_en}\n${p.headline_th}\n${p.excerpt_en}`;
+                                  navigator.clipboard.writeText(block).catch(() => {});
+                                }}
+                              >
+                                COPY PITCH
+                              </button>
+                            </div>
+                          </div>
+                        )
+                      )}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </>
+      ) : (
+        /* IMAGE MODE Panel */
+        <div className="flex flex-col flex-grow">
+          {/* Input Row */}
+          <div className="flex flex-wrap items-center gap-2 shrink-0 mb-3">
+            <input
+              className="input"
+              style={{ flexGrow: 1, minWidth: 260 }}
+              placeholder="Article URL (e.g. https://www.bangkokpost.com/...)"
+              value={imgUrl}
+              onChange={(e) => setImgUrl(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  fetchScoutImages(imgUrl);
+                }
+              }}
+            />
+            <button
+              className="btn btn--signal"
+              disabled={scoutImgLoading || !imgUrl.trim()}
+              onClick={() => fetchScoutImages(imgUrl)}
+            >
+              {scoutImgLoading ? "FINDING IMAGES…" : "FIND IMAGES"}
+            </button>
+          </div>
+
+          {/* Results Area */}
+          <div className="scroll-y flex-grow flex flex-col gap-4">
+            {scoutImgErr && <div className="mono text-xs" style={{ color: "var(--color-critical)" }}>{scoutImgErr}</div>}
+            {scoutImgLoading && (
+              <div className="mono text-xs" style={{ color: "var(--color-signal)" }}>
+                Extracting article images, querying Pexels/Pixabay (≥1080p), and drafting AI prompts…
+              </div>
+            )}
+
+            {!scoutImgLoading && !scoutImgData && !scoutImgErr && (
+              <div className="mono text-xs" style={{ color: "var(--color-muted)" }}>
+                Paste a story URL above (or click FIND IMAGES on any pitch search result) to discover images in 3 tiers.
+              </div>
+            )}
+
+            {scoutImgData && !scoutImgLoading && (
+              <>
+                {/* TIER 1 — Article Images */}
+                <div className="border border-edge bg-void p-3 flex flex-col gap-2">
+                  <div className="flex items-center justify-between">
+                    <span className="mono text-xs font-bold" style={{ color: "var(--color-phosphor)" }}>
+                      TIER 1 — FROM THE ARTICLE ({scoutImgData.tier1?.length ?? 0})
+                    </span>
+                    <span className="mono text-xs" style={{ color: "var(--color-muted)" }}>embedded content images</span>
+                  </div>
+                  {(!scoutImgData.tier1 || scoutImgData.tier1.length === 0) ? (
+                    <div className="mono text-xs" style={{ color: "var(--color-muted)" }}>No candidate images extracted from article HTML.</div>
+                  ) : (
+                    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(120px,1fr))", gap: 8 }}>
+                      {scoutImgData.tier1.map((im: any, idx: number) => (
+                        <a key={idx} href={im.url} target="_blank" rel="noreferrer" className="block border border-edge hover:border-signal">
+                          <img src={im.url} alt={im.alt || "Article visual"} style={{ width: "100%", height: 80, objectFit: "cover" }} />
+                        </a>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                {/* TIER 2 — Stock Photos (>=1080p) */}
+                <div className="border border-edge bg-void p-3 flex flex-col gap-2">
+                  <div className="flex items-center justify-between">
+                    <span className="mono text-xs font-bold" style={{ color: "var(--color-phosphor)" }}>
+                      TIER 2 — STOCK PHOTOS (≥1080p) ({scoutImgData.tier2?.length ?? 0})
+                    </span>
+                    <span className="mono text-xs" style={{ color: "var(--color-muted)" }}>Pexels / Pixabay · no attribution required</span>
+                  </div>
+                  {(!scoutImgData.tier2 || scoutImgData.tier2.length === 0) ? (
+                    <div className="mono text-xs" style={{ color: "var(--color-muted)" }}>No stock matches found (API keys unset or no results ≥1080p).</div>
+                  ) : (
+                    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(140px,1fr))", gap: 8 }}>
+                      {scoutImgData.tier2.map((im: any, idx: number) => (
+                        <div key={idx} className="border border-edge bg-shade p-1 flex flex-col gap-1">
+                          <a href={im.url} target="_blank" rel="noreferrer" className="block">
+                            <img src={im.thumb || im.url} alt="Stock option" style={{ width: "100%", height: 90, objectFit: "cover" }} />
+                          </a>
+                          <div className="flex items-center justify-between mono text-xs px-0.5">
+                            <span className="font-bold" style={{ color: "var(--color-signal)" }}>{im.provider?.toUpperCase()}</span>
+                            <span style={{ color: "var(--color-muted)" }}>{im.w}x{im.h}</span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                {/* TIER 3 — AI Prompts */}
+                <div className="border border-edge bg-void p-3 flex flex-col gap-2">
+                  <div className="flex items-center justify-between">
+                    <span className="mono text-xs font-bold" style={{ color: "var(--color-phosphor)" }}>
+                      TIER 3 — AI PROMPTS ({scoutImgData.ai_prompts?.length ?? 0})
+                    </span>
+                    {scoutImgData.ai_prompts && scoutImgData.ai_prompts.length > 0 && (
+                      <button
+                        className="btn btn--compact"
+                        onClick={() => {
+                          navigator.clipboard.writeText(scoutImgData.ai_prompts.join("\n\n"));
+                          setCopyFeedback("Copied all!");
+                          setTimeout(() => setCopyFeedback(null), 2000);
+                        }}
+                      >
+                        {copyFeedback === "Copied all!" ? "✓ COPIED ALL" : "COPY ALL PROMPTS"}
+                      </button>
+                    )}
+                  </div>
+                  <div className="mono text-xs" style={{ color: "var(--color-muted)" }}>
+                    Prompts for Google Flow / Gemini Image Generator (paid sub). Run generation manually in Flow or Imagen.
+                  </div>
+                  {(!scoutImgData.ai_prompts || scoutImgData.ai_prompts.length === 0) ? (
+                    <div className="mono text-xs" style={{ color: "var(--color-muted)" }}>No AI prompts generated.</div>
+                  ) : (
+                    <div className="flex flex-col gap-2 mt-1">
+                      {scoutImgData.ai_prompts.map((promptStr: string, pIdx: number) => (
+                        <div key={pIdx} className="p-2 border border-edge bg-surface flex flex-col gap-1 rounded">
+                          <div className="text-xs mono" style={{ color: "var(--color-phosphor)" }}>{promptStr}</div>
+                          <div className="flex justify-end">
+                            <button
+                              className="btn btn--compact"
+                              onClick={() => {
+                                navigator.clipboard.writeText(promptStr);
+                                setCopyFeedback(`Copied #${pIdx + 1}`);
+                                setTimeout(() => setCopyFeedback(null), 2000);
+                              }}
+                            >
+                              {copyFeedback === `Copied #${pIdx + 1}` ? "✓ COPIED" : "COPY PROMPT"}
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
     </section>
   );
 }
