@@ -41,6 +41,27 @@ interface ScoutResp {
   errors: string[];
   window?: { from: string; to: string; weeks: number };
 }
+
+type WpDraft = { image_url: string; title: string; alt_text: string; caption: string };
+
+function bareDomain(u: string): string {
+  try { return new URL(u).hostname.replace(/^www\./, ""); } catch { return u; }
+}
+
+function wpDefaults(im: any, tier: 1 | 2, articleUrl: string): WpDraft {
+  const src = tier === 1 ? bareDomain(articleUrl) : `${im.provider || "stock"}.com`;
+  const nameFromUrl = (() => {
+    try { return decodeURIComponent(new URL(im.url).pathname.split("/").pop() || "").replace(/\.[a-z0-9]+$/i, "").replace(/[-_]+/g, " ").trim(); }
+    catch { return ""; }
+  })();
+  return {
+    image_url: im.url,
+    title: tier === 1 ? (nameFromUrl || im.alt || "article image") : `${(im.provider || "stock")} photo ${im.w}x${im.h}`,
+    alt_text: tier === 1 ? (im.alt || "") : "",
+    caption: `Source: ${src} / Website`,
+  };
+}
+
 interface TnJob {
   id: string;
   kind: string; // "deep-search"
@@ -1514,6 +1535,31 @@ function StoryScoutTab() {
   const [scoutImgErr, setScoutImgErr] = usePersistentState<string | null>("tn.scout.img_err", null);
   const [copyFeedback, setCopyFeedback] = useState<string | null>(null);
 
+  // WP Media selection & upload state
+  const [selected, setSelected]   = useState<Record<string, WpDraft>>({});
+  const [wpSending, setWpSending] = useState(false);
+  const [wpStatus, setWpStatus]   = useState<Record<string, string>>({});
+
+  const sendSelectedToWp = useCallback(async () => {
+    setWpSending(true);
+    for (const [url, draft] of Object.entries(selected)) {
+      setWpStatus((s) => ({ ...s, [url]: "sending…" }));
+      const r = await post<{ id: number; link: string }>("/api/thailandnow/scout/wp-media", draft);
+      const resData = r.data;
+      if (r.ok && resData) {
+        setWpStatus((s) => ({ ...s, [url]: `✓ #${resData.id}` }));
+        setSelected((prev) => {
+          const next = { ...prev };
+          delete next[url];
+          return next;
+        });
+      } else {
+        setWpStatus((s) => ({ ...s, [url]: `err: ${r.error || "upload failed"}` }));
+      }
+    }
+    setWpSending(false);
+  }, [selected]);
+
   const { data: jobsData } = usePolling<{ jobs: TnJob[] }>("/api/thailandnow/jobs", 2000);
 
   const search = useCallback(async () => {
@@ -1806,11 +1852,38 @@ function StoryScoutTab() {
                   {(!scoutImgData.tier1 || scoutImgData.tier1.length === 0) ? (
                     <div className="mono text-xs" style={{ color: "var(--color-muted)" }}>No candidate images extracted from article HTML.</div>
                   ) : (
-                    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(120px,1fr))", gap: 8 }}>
+                    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(140px,1fr))", gap: 8 }}>
                       {scoutImgData.tier1.map((im: any, idx: number) => (
-                        <a key={idx} href={im.url} target="_blank" rel="noreferrer" className="block border border-edge hover:border-signal">
-                          <img src={im.url} alt={im.alt || "Article visual"} style={{ width: "100%", height: 80, objectFit: "cover" }} />
-                        </a>
+                        <div key={idx} className="border border-edge bg-shade p-1 flex flex-col gap-1">
+                          <div className="flex items-center justify-between px-1">
+                            <label className="mono text-xs flex items-center gap-1 cursor-pointer" style={{ color: "var(--color-muted)" }}>
+                              <input
+                                type="checkbox"
+                                checked={!!selected[im.url]}
+                                onChange={() => {
+                                  setSelected((prev) => {
+                                    const next = { ...prev };
+                                    if (next[im.url]) {
+                                      delete next[im.url];
+                                    } else {
+                                      next[im.url] = wpDefaults(im, 1, scoutImgData.url || imgUrl);
+                                    }
+                                    return next;
+                                  });
+                                }}
+                              />
+                              WP
+                            </label>
+                            {wpStatus[im.url] && (
+                              <span className="mono text-xs font-bold" style={{ color: wpStatus[im.url].startsWith("✓") ? "var(--color-phosphor)" : "var(--color-critical)" }}>
+                                {wpStatus[im.url]}
+                              </span>
+                            )}
+                          </div>
+                          <a href={im.url} target="_blank" rel="noreferrer" className="block">
+                            <img src={im.url} alt={im.alt || "Article visual"} style={{ width: "100%", height: 80, objectFit: "cover" }} />
+                          </a>
+                        </div>
                       ))}
                     </div>
                   )}
@@ -1830,8 +1903,33 @@ function StoryScoutTab() {
                     <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(140px,1fr))", gap: 8 }}>
                       {scoutImgData.tier2.map((im: any, idx: number) => (
                         <div key={idx} className="border border-edge bg-shade p-1 flex flex-col gap-1">
+                          <div className="flex items-center justify-between px-1">
+                            <label className="mono text-xs flex items-center gap-1 cursor-pointer" style={{ color: "var(--color-muted)" }}>
+                              <input
+                                type="checkbox"
+                                checked={!!selected[im.url]}
+                                onChange={() => {
+                                  setSelected((prev) => {
+                                    const next = { ...prev };
+                                    if (next[im.url]) {
+                                      delete next[im.url];
+                                    } else {
+                                      next[im.url] = wpDefaults(im, 2, scoutImgData.url || imgUrl);
+                                    }
+                                    return next;
+                                  });
+                                }}
+                              />
+                              WP
+                            </label>
+                            {wpStatus[im.url] && (
+                              <span className="mono text-xs font-bold" style={{ color: wpStatus[im.url].startsWith("✓") ? "var(--color-phosphor)" : "var(--color-critical)" }}>
+                                {wpStatus[im.url]}
+                              </span>
+                            )}
+                          </div>
                           <a href={im.url} target="_blank" rel="noreferrer" className="block">
-                            <img src={im.thumb || im.url} alt="Stock option" style={{ width: "100%", height: 90, objectFit: "cover" }} />
+                            <img src={im.thumb || im.url} alt="Stock option" style={{ width: "100%", height: 80, objectFit: "cover" }} />
                           </a>
                           <div className="flex items-center justify-between mono text-xs px-0.5">
                             <span className="font-bold" style={{ color: "var(--color-signal)" }}>{im.provider?.toUpperCase()}</span>
@@ -1889,6 +1987,67 @@ function StoryScoutTab() {
                     </div>
                   )}
                 </div>
+
+                {/* REVIEW AND SEND TO WP */}
+                {Object.keys(selected).length > 0 && (
+                  <div className="border border-signal bg-shade p-3 flex flex-col gap-3 shrink-0">
+                    <div className="flex items-center justify-between">
+                      <span className="mono text-xs font-bold" style={{ color: "var(--color-phosphor)" }}>
+                        SEND TO WORDPRESS MEDIA LIBRARY ({Object.keys(selected).length} selected)
+                      </span>
+                      <button className="btn btn--signal" disabled={wpSending} onClick={sendSelectedToWp}>
+                        {wpSending ? "SENDING…" : `SEND ${Object.keys(selected).length} TO WP`}
+                      </button>
+                    </div>
+                    <div className="flex flex-col gap-3 max-h-60 overflow-y-auto pr-1">
+                      {Object.entries(selected).map(([url, draft]) => (
+                        <div key={url} className="flex gap-2 p-2 border border-edge bg-void text-xs">
+                          <img src={url} alt="" style={{ width: 60, height: 60, objectFit: "cover" }} className="shrink-0" />
+                          <div className="flex flex-col gap-1 flex-grow">
+                            <div className="flex items-center gap-2">
+                              <span className="mono font-bold w-16 shrink-0" style={{ color: "var(--color-muted)" }}>Title:</span>
+                              <input
+                                className="input text-xs flex-grow"
+                                value={draft.title}
+                                onChange={(e) => {
+                                  const val = e.target.value;
+                                  setSelected((prev) => ({ ...prev, [url]: { ...prev[url], title: val } }));
+                                }}
+                              />
+                            </div>
+                            <div className="flex items-center gap-2">
+                              <span className="mono font-bold w-16 shrink-0" style={{ color: "var(--color-muted)" }}>Alt text:</span>
+                              <input
+                                className="input text-xs flex-grow"
+                                value={draft.alt_text}
+                                onChange={(e) => {
+                                  const val = e.target.value;
+                                  setSelected((prev) => ({ ...prev, [url]: { ...prev[url], alt_text: val } }));
+                                }}
+                              />
+                            </div>
+                            <div className="flex items-center gap-2">
+                              <span className="mono font-bold w-16 shrink-0" style={{ color: "var(--color-muted)" }}>Caption:</span>
+                              <input
+                                className="input text-xs flex-grow"
+                                value={draft.caption}
+                                onChange={(e) => {
+                                  const val = e.target.value;
+                                  setSelected((prev) => ({ ...prev, [url]: { ...prev[url], caption: val } }));
+                                }}
+                              />
+                            </div>
+                          </div>
+                          {wpStatus[url] && (
+                            <div className="mono text-xs shrink-0 self-center font-bold px-1" style={{ color: wpStatus[url].startsWith("✓") ? "var(--color-phosphor)" : "var(--color-critical)" }}>
+                              {wpStatus[url]}
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </>
             )}
           </div>

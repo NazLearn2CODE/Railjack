@@ -1410,6 +1410,22 @@ async def scout_images(payload: dict = Body(default={})):
         return {"tier1": [], "tier2": [], "ai_prompts": [], "url": url, "error": str(e)}
 
 
+@router.post("/api/thailandnow/scout/wp-media")
+async def scout_wp_media(payload: dict = Body(default={})):
+    """SEND TO WP — upload one image to the Media Library with metadata.
+    Fields arrive already-final (frontend is editable), so we upload them verbatim."""
+    body = payload or {}
+    image_url = (body.get("image_url") or "").strip()
+    if not image_url:
+        raise HTTPException(400, "image_url required")
+    return await _wp_upload_media(
+        image_url=image_url,
+        title=(body.get("title") or "").strip(),
+        alt_text=(body.get("alt_text") or "").strip(),
+        caption=(body.get("caption") or "").strip(),
+    )
+
+
 # --- EVENTS radar Tier 2 (R6): NotebookLM deep web research ---
 
 
@@ -2194,6 +2210,47 @@ async def _wp(method: str, path: str, params: dict | None = None, json_body: dic
         if r.status_code >= 400:
             raise HTTPException(502, f"WP {method} {path}: {r.status_code} {r.text[:200]}")
         return r.json() if r.content else None
+
+
+_WP_MEDIA_MAX_BYTES = 15 * 1024 * 1024  # 15 MB guard
+_BROWSER_UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+
+
+async def _wp_upload_media(image_url: str, title: str, alt_text: str, caption: str) -> dict:
+    """Fetch an image by URL and upload it to WP /media, then set title/alt/caption.
+    Returns {id, source_url, link}. Raises HTTPException on any failure."""
+    url, user, pwd = _wp_creds()
+    # 1. fetch bytes (browser UA — many news CDNs 403 a bare client)
+    async with httpx.AsyncClient(timeout=30, follow_redirects=True) as c:
+        img = await c.get(image_url, headers={"User-Agent": _BROWSER_UA})
+    if img.status_code >= 400:
+        raise HTTPException(502, f"fetch image {img.status_code} — source may block hotlinking")
+    ctype = img.headers.get("content-type", "").split(";")[0].strip()
+    if not ctype.startswith("image/"):
+        raise HTTPException(415, f"not an image (content-type {ctype or 'unknown'})")
+    if len(img.content) > _WP_MEDIA_MAX_BYTES:
+        raise HTTPException(413, "image exceeds 15 MB")
+    ext = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp", "image/gif": "gif"}.get(ctype, "jpg")
+    slug = re.sub(r"[^a-z0-9]+", "-", (title or "image").lower()).strip("-")[:60] or "image"
+    filename = f"{slug}.{ext}"
+    # 2. upload binary
+    async with httpx.AsyncClient(timeout=60, auth=(user, pwd)) as c:
+        up = await c.post(
+            f"{url}/wp-json/wp/v2/media",
+            content=img.content,
+            headers={"Content-Disposition": f'attachment; filename="{filename}"', "Content-Type": ctype},
+        )
+    if up.status_code >= 400:
+        raise HTTPException(502, f"WP media upload {up.status_code}: {up.text[:200]}")
+    media = up.json()
+    mid = media.get("id")
+    # 3. set metadata explicitly (title/caption on upload are unreliable; alt_text is upload-ignored)
+    updated = await _wp("POST", f"/media/{mid}", json_body={
+        "title": title or filename,
+        "alt_text": alt_text or "",
+        "caption": caption or "",
+    })
+    return {"id": mid, "source_url": (updated or media).get("source_url"), "link": (updated or media).get("link")}
 
 
 async def _wp_list_all(endpoint: str, fields: str) -> list[dict]:

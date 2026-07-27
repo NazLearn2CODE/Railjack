@@ -1,3 +1,4 @@
+import asyncio
 from app import thailandnow
 
 
@@ -36,3 +37,62 @@ def test_scout_dedup_exact_url():
     assert len(res) == 2
     assert res[0] == "https://bangkokpost.com/news/1"
     assert res[1] == "https://bangkokpost.com/news/2"
+
+
+def test_wp_upload_media(monkeypatch):
+    monkeypatch.setattr(thailandnow, "_wp_creds", lambda: ("https://example.com", "user", "pass"))
+
+    post_calls = []
+
+    async def mock_wp(method, path, params=None, json_body=None):
+        if method == "POST" and path == "/media/99":
+            post_calls.append(json_body)
+            return {"id": 99, "source_url": "https://example.com/uploaded.jpg", "link": "https://example.com/link"}
+        return None
+
+    monkeypatch.setattr(thailandnow, "_wp", mock_wp)
+
+    class MockResponse:
+        def __init__(self, status_code, content, headers=None, json_data=None):
+            self.status_code = status_code
+            self.content = content
+            self.headers = headers or {}
+            self._json_data = json_data or {}
+            self.text = "mock text"
+
+        def json(self):
+            return self._json_data
+
+    class MockAsyncClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+        async def get(self, url, headers=None):
+            return MockResponse(200, b"fake_image_bytes", {"content-type": "image/jpeg"})
+
+        async def post(self, url, content=None, headers=None):
+            return MockResponse(201, b"{}", json_data={"id": 99, "source_url": "https://example.com/uploaded.jpg"})
+
+    monkeypatch.setattr("httpx.AsyncClient", MockAsyncClient)
+
+    res = asyncio.run(thailandnow._wp_upload_media(
+        image_url="https://images.pexels.com/photos/32710267/pexels-photo-32710267.jpeg",
+        title="Pexels Test Image",
+        alt_text="A scenic test view",
+        caption="Source: pexels.com / Website",
+    ))
+
+    assert res["id"] == 99
+    assert res["source_url"] == "https://example.com/uploaded.jpg"
+    assert len(post_calls) == 1
+    assert post_calls[0] == {
+        "title": "Pexels Test Image",
+        "alt_text": "A scenic test view",
+        "caption": "Source: pexels.com / Website",
+    }
