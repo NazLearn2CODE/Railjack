@@ -476,6 +476,19 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
     void runFormat(selectedDoc.id);
   };
 
+  // COPY ANTIGRAVITY PROMPT — build the paste-ready prompt with category + kind,
+  // copy to clipboard. No doc selection needed; just category.
+  const handleCopyAntigravityPrompt = async () => {
+    const promptText = `Read \`10-knowledge/radio-news-antigravity-handoff.md\` in this vault. Scout recent (dated, ≥190-word) news for category \`${newsCategory}\` from premium wire/broadcast outlets, rewrite each piece plus the slice-of-life into Editor Ben's ≤250-word broadcast voice (rules in that note), tag SEA pieces, and write the result to \`/tmp/railjack-radio-news/latest.json\` in the exact shape shown — \`"rewritten": true\` on every piece. Do not touch any Google Doc.`;
+    try {
+      await navigator.clipboard.writeText(promptText);
+      setError(null);
+      // Brief flash feedback — you might want to render a toast; for now, silent success.
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "Failed to copy prompt");
+    }
+  };
+
   const refreshQueue = useCallback(() => {
     setLoading(true);
     fetchJSON<Queue>(`/api/newsroom/queue?author=${encodeURIComponent(author)}`)
@@ -1160,6 +1173,16 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
                       {newsAutopiloting ? "AUTOPILOT…" : "AUTOPILOT"}
                     </button>
                     <span style={{ color: "var(--color-muted)" }}>convert + place + fill, no hands</span>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2 mono text-xs mt-2">
+                    <button
+                      className="btn btn--compact"
+                      onClick={() => void handleCopyAntigravityPrompt()}
+                      title="Copy the paste-ready Antigravity prompt for this category (swap to IDE)"
+                    >
+                      📋 COPY ANTIGRAVITY PROMPT
+                    </button>
+                    <span style={{ color: "var(--color-muted)" }}>for {newsCategory} category → IDE</span>
                   </div>
                 </div>
               </div>
