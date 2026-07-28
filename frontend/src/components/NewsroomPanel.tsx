@@ -181,6 +181,171 @@ interface NewsFormatResponse {
 
 const CT: Record<string, string> = { "content-type": "application/json" };
 
+// Compact Drive folder/doc picker — reuses GET /api/newsroom/radio/news/browse
+// (the same one-level tree walk loadBrowse() drives for the News Fill tab).
+// Two independent instances live side-by-side (NL + Radio), each rooted at
+// its own home folder, so the drilling state can't be shared with loadBrowse's
+// single browseStack — this packages the same fetch/drill/breadcrumb pattern
+// per-instance instead. Picking a doc is additive; "auto (today)" (picked ===
+// null) keeps the existing auto-resolve path.
+function DocPicker({
+  rootId,
+  rootLabel,
+  picked,
+  onPick,
+  label,
+}: {
+  rootId: string;
+  rootLabel: string;
+  picked: NewsDoc | null;
+  onPick: (doc: NewsDoc | null) => void;
+  label: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const [stack, setStack] = useState<BrowseFolder[]>([{ id: rootId, name: rootLabel }]);
+  const [folders, setFolders] = useState<BrowseFolder[]>([]);
+  const [docs, setDocs] = useState<NewsDoc[]>([]);
+  const [loading, setLoading] = useState(false);
+  const loadedRoot = useRef<string | null>(null);
+
+  const load = useCallback(async (folderId: string) => {
+    setLoading(true);
+    try {
+      const data = await fetchJSON<NewsBrowseResponse>(
+        `/api/newsroom/radio/news/browse?parent=${encodeURIComponent(folderId)}`,
+      );
+      setFolders(Array.isArray(data?.folders) ? data.folders : []);
+      setDocs(Array.isArray(data?.docs) ? data.docs : []);
+    } catch {
+      setFolders([]);
+      setDocs([]);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (open && loadedRoot.current !== rootId) {
+      loadedRoot.current = rootId;
+      setStack([{ id: rootId, name: rootLabel }]);
+      void load(rootId);
+    }
+  }, [open, rootId, rootLabel, load]);
+
+  const enter = (f: BrowseFolder) => {
+    setStack((s) => [...s, f]);
+    void load(f.id);
+  };
+  const jump = (idx: number) => {
+    const target = stack[idx];
+    setStack((s) => s.slice(0, idx + 1));
+    void load(target.id);
+  };
+
+  return (
+    <label className="flex flex-col gap-0.5">
+      <span className="label" style={{ fontSize: 9 }}>{label}</span>
+      <button
+        type="button"
+        className="btn btn--compact"
+        onClick={() => setOpen((o) => !o)}
+        title="Pick a target doc (default: today's auto-resolve)"
+        style={{ maxWidth: 160, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+      >
+        {picked ? picked.name : "auto (today)"}
+      </button>
+      {open && (
+        <div
+          className="flex flex-col gap-1 border border-edge p-2"
+          style={{ background: "var(--color-void)", minWidth: 240, maxWidth: 340, position: "relative", zIndex: 5 }}
+        >
+          <div className="flex flex-wrap items-center gap-1 mono text-xs">
+            {stack.map((crumb, idx) => (
+              <span key={crumb.id} className="flex items-center gap-1">
+                {idx > 0 && <span style={{ color: "var(--color-muted)" }}>▸</span>}
+                <button
+                  className="mono"
+                  onClick={() => jump(idx)}
+                  disabled={idx === stack.length - 1}
+                  style={{
+                    background: "none",
+                    border: "none",
+                    padding: 0,
+                    cursor: idx === stack.length - 1 ? "default" : "pointer",
+                    color: idx === stack.length - 1 ? "var(--color-phosphor)" : "var(--color-signal)",
+                  }}
+                >
+                  {crumb.name}
+                </button>
+              </span>
+            ))}
+          </div>
+          <div className="flex flex-col overflow-auto border border-edge" style={{ maxHeight: 150 }}>
+            {loading ? (
+              <span className="label mono text-xs p-2">— loading —</span>
+            ) : folders.length === 0 && docs.length === 0 ? (
+              <span className="label mono text-xs p-2">— empty folder —</span>
+            ) : (
+              <>
+                {folders.map((f) => (
+                  <button
+                    key={f.id}
+                    className="mono text-xs flex items-center gap-1.5 px-2 py-1 text-left"
+                    onClick={() => enter(f)}
+                    style={{
+                      background: "none",
+                      border: "none",
+                      borderBottom: "1px solid var(--color-edge-soft)",
+                      color: "var(--color-phosphor-dim)",
+                      cursor: "pointer",
+                    }}
+                  >
+                    <span>📁</span>
+                    <span className="flex-1 truncate">{f.name}</span>
+                    <span style={{ color: "var(--color-muted)" }}>▸</span>
+                  </button>
+                ))}
+                {docs.map((doc) => (
+                  <button
+                    key={doc.id}
+                    className="mono text-xs flex items-center gap-1.5 px-2 py-1 text-left"
+                    onClick={() => {
+                      onPick(doc);
+                      setOpen(false);
+                    }}
+                    style={{
+                      background: "none",
+                      border: "none",
+                      borderBottom: "1px solid var(--color-edge-soft)",
+                      color: "var(--color-phosphor)",
+                      cursor: "pointer",
+                    }}
+                  >
+                    <span>📄</span>
+                    <span className="flex-1 truncate">{doc.name}</span>
+                  </button>
+                ))}
+              </>
+            )}
+          </div>
+          {picked && (
+            <button
+              className="mono text-xs"
+              onClick={() => {
+                onPick(null);
+                setOpen(false);
+              }}
+              style={{ background: "none", border: "none", padding: 0, color: "var(--color-hazard)", cursor: "pointer", textAlign: "left" }}
+            >
+              ✕ clear (use auto-resolve)
+            </button>
+          )}
+        </div>
+      )}
+    </label>
+  );
+}
+
 export default function NewsroomPanel({ module: _module }: { module: ModuleConfig }) {
   const [tab, setTab] = useState<"queue" | "ledger" | "radio">("queue");
   const [queue, setQueue] = useState<Queue | null>(null);
@@ -233,15 +398,19 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
   const [newsFormatResult, setNewsFormatResult] = useState<NewsFormatResponse | null>(null);
 
   // ---- Phase 2: NL slot-fill state ----
+  const NL_HOME_FOLDER = "0BxI14z7NX9CIc3VJNGJwTGlJcG8";
   const [nlTab, setNlTab] = useState<string>("NL");
   const [nlSlot, setNlSlot] = useState<number>(1);
+  const [nlPickedDoc, setNlPickedDoc] = useState<NewsDoc | null>(null);
   const [nlFilling, setNlFilling] = useState(false);
   const [nlFillResult, setNlFillResult] = useState<{ filled: boolean; chars: number; bold_spans: number; underline_spans: number } | null>(null);
 
   // ---- Phase 2: Radio slot-fill state ----
+  const RADIO_HOME_FOLDER = "1LSw5NwDhwg7PE9pJUO6jKPcd3yFBCOI9";
   const [radioFillSection, setRadioFillSection] = useState<"AM" | "MIDDAY" | "EVE">("AM");
   const [radioFillBlock, setRadioFillBlock] = useState<"NATIONAL" | "GLOBAL" | "BUSINESS">("NATIONAL");
   const [radioFillSlot, setRadioFillSlot] = useState<number>(1);
+  const [radioPickedDoc, setRadioPickedDoc] = useState<NewsDoc | null>(null);
   const [radioFilling, setRadioFilling] = useState(false);
   const [radioFillResult, setRadioFillResult] = useState<{ filled: boolean; doc: string; section: string; block: string; slot: number; chars: number } | null>(null);
   // Radio fill uses today's date (computed once per render; stable across the session).
@@ -598,12 +767,17 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
     if (!selected || !sendText.trim()) return;
     setNlFilling(true);
     setNlFillResult(null);
-    const ok = await post("/api/newsroom/fill", {
-      today: true,
+    const body: { today?: boolean; doc_id?: string; text: string; tab: string; slot: number } = {
       text: sendText,
       tab: nlTab,
       slot: nlSlot,
-    });
+    };
+    if (nlPickedDoc) {
+      body.doc_id = nlPickedDoc.id;
+    } else {
+      body.today = true;
+    }
+    const ok = await post("/api/newsroom/fill", body);
     if (ok) {
       // Parse the JSON result from the last successful POST (the 'post' helper
       // doesn't return the body — re-fetch from the result stored in error state
@@ -623,18 +797,32 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
     if (!sendText.trim()) return;
     setRadioFilling(true);
     setRadioFillResult(null);
+    const body: {
+      text: string;
+      section: string;
+      block: string;
+      slot: number;
+      doc_id?: string;
+      year?: number;
+      month?: number;
+      day?: number;
+    } = {
+      text: sendText,
+      section: radioFillSection,
+      block: radioFillBlock,
+      slot: radioFillSlot,
+    };
+    if (radioPickedDoc) {
+      body.doc_id = radioPickedDoc.id;
+    } else {
+      body.year = rfYear;
+      body.month = rfMonth;
+      body.day = rfDay;
+    }
     const res = await fetch("/api/newsroom/radio/fill", {
       method: "POST",
       headers: CT,
-      body: JSON.stringify({
-        text: sendText,
-        year: rfYear,
-        month: rfMonth,
-        day: rfDay,
-        section: radioFillSection,
-        block: radioFillBlock,
-        slot: radioFillSlot,
-      }),
+      body: JSON.stringify(body),
     });
     if (!res.ok) {
       const d = await res.json().catch(() => ({ detail: res.statusText }));
@@ -802,7 +990,7 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
                       value={sendText}
                       onChange={(e) => setSendText(e.target.value)}
                       className="input mono flex-1"
-                      style={{ resize: "none", fontSize: "1.0625rem" }}
+                      style={{ resize: "none", fontSize: "1.0625rem", whiteSpace: "pre-wrap" }}
                     />
                   </label>
 
@@ -862,14 +1050,22 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
                       />
                     </label>
 
+                    <DocPicker
+                      rootId={NL_HOME_FOLDER}
+                      rootLabel="NL Home"
+                      picked={nlPickedDoc}
+                      onPick={setNlPickedDoc}
+                      label="DOC"
+                    />
+
                     <button
                       id="send-to-nl-btn"
-                      className="btn btn--signal"
+                      className="btn btn--compact"
                       onClick={() => void sendToNLFill()}
                       disabled={nlFilling || !sendText.trim()}
-                      title={`Fill slot ${nlSlot} in the ${nlTab} tab of today's NL & NWB doc`}
+                      title={`Fill slot ${nlSlot} in the ${nlTab} tab of ${nlPickedDoc ? nlPickedDoc.name : "today's NL & NWB doc"}`}
                     >
-                      {nlFilling ? "SENDING…" : "SEND TO NL"}
+                      {nlFilling ? "SENDING…" : "SEND TO NL ▸"}
                     </button>
 
                     {/* ---- SEND TO RADIO ---- */}
@@ -941,15 +1137,22 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
                         />
                       </label>
 
+                      <DocPicker
+                        rootId={RADIO_HOME_FOLDER}
+                        rootLabel="RT 2026"
+                        picked={radioPickedDoc}
+                        onPick={setRadioPickedDoc}
+                        label="DOC"
+                      />
+
                       <button
                         id="send-to-radio-btn"
-                        className="btn"
-                        style={{ borderColor: "var(--color-go)", color: "var(--color-go)" }}
+                        className="btn btn--compact"
                         onClick={() => void sendToRadio()}
                         disabled={radioFilling || !sendText.trim()}
-                        title={`Fill ${radioFillSection} / ${radioFillBlock} slot ${radioFillSlot} in today's Radio script`}
+                        title={`Fill ${radioFillSection} / ${radioFillBlock} slot ${radioFillSlot} in ${radioPickedDoc ? radioPickedDoc.name : "today's Radio script"}`}
                       >
-                        {radioFilling ? "SENDING…" : "SEND TO RADIO"}
+                        {radioFilling ? "SENDING…" : "SEND TO RADIO ▸"}
                       </button>
                     </div>
                   </div>

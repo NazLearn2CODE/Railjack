@@ -197,23 +197,25 @@ async def api_radio_generate(body: dict = Body(...)):
 async def api_radio_fill(body: dict = Body(...)):
     """Fill a slot in a daily Radio script doc.
 
-    Body: {text, year, month, day, section (AM/MIDDAY/EVE),
-           block (NATIONAL/GLOBAL/BUSINESS), slot (int)}
-    Calls ``radio.py fill --year ... --month ... --day ... --section ...
-    --block ... --slot ... --text ...``.
+    Body: {text, section (AM/MIDDAY/EVE), block (NATIONAL/GLOBAL/BUSINESS),
+           slot (int), doc_id?}  — either doc_id (explicit target, from the
+           panel's folder picker) or year/month/day (auto-resolve) is required.
+    Calls ``radio.py fill --doc ...`` or ``--year ... --month ... --day ...``.
     400 on any missing required field.
     """
-    required = ("year", "month", "day", "section", "block", "slot")
+    required = ("section", "block", "slot")
     missing = [f for f in required if body.get(f) is None]
     if missing:
         raise HTTPException(400, "missing required fields: %s" % ", ".join(missing))
+    doc_id = body.get("doc_id")
+    if not doc_id:
+        missing_ymd = [f for f in ("year", "month", "day") if body.get(f) is None]
+        if missing_ymd:
+            raise HTTPException(400, "doc_id, or year/month/day, required — missing %s" % ", ".join(missing_ymd))
     try:
-        year = int(body["year"])
-        month = int(body["month"])
-        day = int(body["day"])
         slot = int(body["slot"])
     except (TypeError, ValueError) as e:
-        raise HTTPException(400, "year/month/day/slot must be integers: %s" % e)
+        raise HTTPException(400, "slot must be an integer: %s" % e)
     section = str(body["section"]).upper()
     block = str(body["block"]).upper()
     text = (body.get("text") or "").strip()
@@ -221,10 +223,19 @@ async def api_radio_fill(body: dict = Body(...)):
         raise HTTPException(400, "text required")
     argv = [
         PY, str(RADIO), "fill",
-        "--year", str(year), "--month", str(month), "--day", str(day),
         "--section", section, "--block", block, "--slot", str(slot),
         "--text", text,
     ]
+    if doc_id:
+        argv += ["--doc", str(doc_id)]
+    else:
+        try:
+            year = int(body["year"])
+            month = int(body["month"])
+            day = int(body["day"])
+        except (TypeError, ValueError) as e:
+            raise HTTPException(400, "year/month/day must be integers: %s" % e)
+        argv += ["--year", str(year), "--month", str(month), "--day", str(day)]
     return await _script(argv, timeout=60)
 
 
@@ -282,7 +293,9 @@ async def api_rewrite(body: dict = Body(...)):
         _gem_text()
         + "\n\n=== OUTPUT OVERRIDE (replaces JSON instructions) ===\n"
         "Output the broadcast rewrite as readable prose (Ben's hard rules and voice still apply). "
-        "Do NOT output JSON. Wrap every person's NAME in **double-stars** per the NAME OVERLAY rule below. "
+        "Do NOT output JSON. Structure the prose as 2-4 separate paragraphs, each separated by a "
+        "blank line (\\n\\n) — never one unbroken block of text. "
+        "Wrap every person's NAME in **double-stars** per the NAME OVERLAY rule below. "
         "Wrap every date, time, and relative-time expression in -/…/- markers "
         "(e.g. -/July 15, 2026/-, -/3:00 PM/-, -/next month/-). These become underlined in the Doc. "
         "These are the ONLY allowed markup. Output ONLY the rewritten broadcast prose. No JSON, no preamble, no commentary.\n\n"
