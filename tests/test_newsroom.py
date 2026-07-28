@@ -981,6 +981,33 @@ def test_nl_append_emits_bold_and_underline_spans(monkeypatch):
     assert len(underline_reqs) >= 1   # at least the marker-driven span
 
 
+def test_nl_append_bold_after_underline_aligns(monkeypatch):
+    """Regression: a **name** AFTER a -/date/- must still bold the name itself,
+    not shifted letters. The old parse_bold→parse_underline chain computed bold
+    offsets against the pre-underline-strip text, so a name following a date
+    marker bolded the wrong span. parse_markers (single pass) fixes it."""
+    nl = _load_nl_append()
+    posted = []
+    monkeypatch.setattr(nl, "nl_tab", lambda tok, doc_id: ("t.0", 100))
+    monkeypatch.setattr(
+        nl, "api",
+        lambda method, url, tok, body=None: (posted.append(body), {})[1],
+    )
+    # date marker BEFORE the bold name — the ordering that exposed the bug
+    nl.append("tok", "DOC", "On -/July 28, 2026/-, **Anutin** spoke.", dry=False)
+    reqs = posted[0]["requests"]
+    ins = [r for r in reqs if "insertText" in r][0]["insertText"]["text"]
+    bold_reqs = [
+        r for r in reqs
+        if r.get("updateTextStyle", {}).get("fields") == "bold"
+        and r["updateTextStyle"]["textStyle"].get("bold")
+    ]
+    assert bold_reqs, "expected a bold span for the name"
+    rng = bold_reqs[0]["updateTextStyle"]["range"]
+    s, e = rng["startIndex"] - 100, rng["endIndex"] - 100
+    assert ins[s:e] == "Anutin", f"bold span misaligned: selected {ins[s:e]!r}"
+
+
 def test_nl_append_parse_underline_strips_markers(monkeypatch):
     """parse_underline isolated: strips -/../- markers from the plain text and
     returns correct offsets into the stripped string (same math as parse_bold)."""

@@ -2,8 +2,9 @@
 
 > **Built in 2 slices** — A: `NEWSROOM-REWRITE-SLICE-A-BACKEND.md` (backend + vault + tests;
 > freezes the API contract) → B: `NEWSROOM-REWRITE-SLICE-B-FRONTEND.md` (frontend, after A
-> lands). This file is the shared spec / contract reference for both — read it for the full
-> rationale, gem paths, and reuse callouts.
+> lands). **+ SLICE C (revision, 2026-07-28): `NEWSROOM-REWRITE-SLICE-C-REVISION.md`** — name
+> overlay `[Official English(Thai)]` + `-/date/-` underline markers. v2 clauses below supersede
+> the v1 name/date rules where they conflict. Read this file for rationale, gem paths, reuse.
 
 Re-voice the newsroom **queue** sub-tab's REWRITE. Today `POST /api/newsroom/rewrite`
 runs the old news-producer Rules Gem and emits a two-layer TV script. Re-point it to
