@@ -644,11 +644,17 @@ def test_df_find_dates_variants():
     got = lambda s: [m for _, _, m in df.find_dates(s)]
     assert got("filed January 5, 2026 in Bangkok") == ["January 5, 2026"]
     assert got("on 5 January the vote held") == ["5 January"]
-    assert got("dated 2026-07-28 today") == ["2026-07-28"]
+    assert got("dated 2026-07-28 today") == ["2026-07-28", "today"]
     assert got("the Sep 3 2025 summit") == ["Sep 3 2025"]
     # lowercase month word as an ordinary verb must NOT match (case-sensitive +
     # a day number is required next to a capitalised month).
     assert got("they may go march soon") == []
+    # relative time — broadcast bread-and-butter, underlined too. Case-blind so
+    # a sentence-start capital still hits; determiner-gated so generics don't.
+    assert got("Today, markets rallied. this week we saw gains.") == ["Today", "this week"]
+    assert got("yesterday and last month") == ["yesterday", "last month"]
+    assert got("next year, tomorrow, tonight") == ["next year", "tomorrow", "tonight"]
+    assert got("this man and last resort") == []  # no unit -> no match
 
 
 def test_df_name_spans_all_occurrences():
@@ -698,6 +704,8 @@ def test_df_format_doc_gateway_down_degrades(monkeypatch):
         "tabProperties": {"title": "AM", "tabId": "t.0"},
         "documentTab": {"body": {"content": [
             _df_para("Maris spoke on 2026-07-28 today\n", 1)]}},
+    # NB "today" now also underlines (relative time) — kept in the fixture to
+    # prove both the ISO date and the relative term survive the degrade path.
     }]}
     sent = []
     monkeypatch.setattr(df, "_get", lambda tok, url: doc)
@@ -711,7 +719,7 @@ def test_df_format_doc_gateway_down_degrades(monkeypatch):
     res = df.format_doc("tok", "DOC1")
     assert res["names_skipped"] is True
     assert res["bolded"] == []
-    assert res["underlined"] == ["2026-07-28"]
+    assert res["underlined"] == ["2026-07-28", "today"]
     # one batchUpdate carrying only the underline request
     assert len(sent) == 1
     reqs = sent[0]["requests"]
