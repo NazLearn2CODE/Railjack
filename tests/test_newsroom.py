@@ -545,6 +545,15 @@ def test_rn_parse_rewrite_truncated_rescues():
                                               "The IMF said debt hit 205 billion")
 
 
+def test_rn_parse_rewrite_truncated_before_body_no_dump():
+    """Regression (live bug, 2026-07-28): truncation can cut BEFORE the body
+    value opens (`"body":` with no quote) — no body to rescue. Must NOT dump the
+    raw JSON into the slot; return the recovered title + empty body instead."""
+    rn = _load_radio_news()
+    raw = '{"title": "Oil prices plummet as conflict pauses", "body":'
+    assert rn._parse_rewrite(raw, "orig") == ("Oil prices plummet as conflict pauses", "")
+
+
 def test_rn_normalize_numbers_currency():
     """A leading-$ currency must read aloud as "<amount> dollars" — the gem is
     told to but flakes, so code guarantees it. Abbreviations expand, magnitude

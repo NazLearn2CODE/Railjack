@@ -38,7 +38,10 @@ article's headline and body. Return a rewritten headline and a broadcast script.
    reproduce it EXACTLY as in the source. Prefer paraphrase.
 6. **Continuous prose only.** No bullet points, no subheadings, no lists, no markdown
    formatting of any kind — just paragraphs of spoken prose.
-7. **250 words maximum** for the script body. Tighter is better. Never exceed 250.
+7. **190–250 words** for the script body. **Never under 190** — too thin to land the
+   story; never over 250. Aim for ~200. **Count your words before finishing: if under 190,
+   expand with more substance, attribution, and signposting drawn from the source (never
+   invented) until you cross 190.** Under-length is a worse failure than over-length.
 8. **Signpost.** Guide the listener with connective transitions — "Meanwhile," "That
    shift…," "Beyond that," "Still," — so the story flows as one spoken piece.
 9. **Broadcast-friendly numbers.** Round and simplify every number so a listener
