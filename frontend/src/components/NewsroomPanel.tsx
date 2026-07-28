@@ -713,7 +713,7 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
     const countClause = curated
       ? `gather ${scoutN} results (aim for at least ${M} SEA-led)${sliceClause} — a few MORE than the ${N} I need, so I can curate`
       : `gather EXACTLY ${scoutN} results (${M} of them SEA-led)${sliceClause}`;
-    const promptText = `Read \`10-knowledge/radio-news-antigravity-handoff.md\` in this vault. Scout recent (dated, ≥190-word) news for category \`${newsCategory}\`, kind \`${kind}\` — ${countClause} — from premium wire/broadcast outlets, rewrite each piece plus the slice-of-life into Editor Ben's ≤250-word broadcast voice (rules in that note), tag SEA pieces, and write the result to \`/tmp/railjack-radio-news/latest.json\` in the exact shape shown — \`"rewritten": true\` on every piece. Do not touch any Google Doc.`;
+    const promptText = `Read \`10-knowledge/radio-news-antigravity-handoff.md\` in this vault. Scout TODAY-ONLY (published today, not yesterday — this airs same-day), ≥180-word news for category \`${newsCategory}\`, kind \`${kind}\` — ${countClause} — from premium wire/broadcast outlets, rewrite each piece plus the slice-of-life into Editor Ben's 180-250-word broadcast voice (rules in that note), tag SEA pieces, and write the result to \`/tmp/railjack-radio-news/latest.json\` in the exact shape shown — \`"rewritten": true\` on every piece. Do not touch any Google Doc.`;
     try {
       await navigator.clipboard.writeText(promptText);
       setError(null);

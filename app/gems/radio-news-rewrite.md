@@ -40,10 +40,10 @@ article's headline and body. Return a rewritten headline and a broadcast script.
    markdown formatting of any kind — just **2–4 paragraphs** of spoken prose (never one solid
    chunk — the reader gets dizzy). Each paragraph is a natural unit; the story must still make
    sense if cut off early.
-7. **190–250 words** for the script body. **Never under 190** — too thin to land the
-   story; never over 250. Aim for ~200. **Count your words before finishing: if under 190,
+7. **180–250 words** for the script body. **Never under 180** — too thin to land the
+   story; never over 250. Aim for ~200. **Count your words before finishing: if under 180,
    expand with more substance, attribution, and signposting drawn from the source (never
-   invented) until you cross 190.** Under-length is a worse failure than over-length.
+   invented) until you cross 180.** Under-length is a worse failure than over-length.
 8. **Signpost.** Guide the listener with connective transitions — "Meanwhile," "That
    shift…," "Beyond that," "Still," — so the story flows as one spoken piece.
 9. **Broadcast-friendly numbers.** Round and simplify every number so a listener

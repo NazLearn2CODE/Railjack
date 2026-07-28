@@ -122,10 +122,17 @@ def test_probe_ok_and_down(monkeypatch):
 
 def _load_radio():
     import importlib.util
+    import sys
 
     for p in (newsroom.SCRIPTS / "radio.py",
               Path.home() / ".claude" / "skills" / "newsroom" / "scripts" / "radio.py"):
         if p.exists():
+            # radio.py's `from docfill import ...` only resolves if the skill
+            # dir is on sys.path (true when run as `python3 radio.py`, not true
+            # for a by-path importlib load) — add it so _DOCFILL loads for real.
+            script_dir = str(p.parent)
+            if script_dir not in sys.path:
+                sys.path.insert(0, script_dir)
             spec = importlib.util.spec_from_file_location("radio_mod", p)
             mod = importlib.util.module_from_spec(spec)
             assert spec.loader is not None
@@ -222,6 +229,35 @@ def test_radio_parse_title_and_body():
     assert body == "On ~~July~~, **X** spoke."  # TH title dropped for radio
     en2, body2 = radio._parse_title_and_body("plain body only")
     assert en2 is None and body2 == "plain body only"  # backward compat
+
+
+def test_radio_fill_underlines_date_backstop(monkeypatch, capsys):
+    """Regression: SEND TO RADIO used to rely 100% on Ben's ~~..~~ markers for
+    underlining — a date/relative-time the model failed to wrap (LLM compliance
+    miss) landed with ZERO underline. fill_radio_slot now runs the same DATE_RE
+    backstop nl_append.py already had, so a missed date still underlines."""
+    radio = _load_radio()
+
+    monkeypatch.setattr(radio, "_api", lambda method, url, body=None, params=None: {
+        "tabs": [{"tabProperties": {"tabId": "tab1", "title": "AM"}}]
+    })
+
+    def fake_find_heading(api_get, doc_id, tab_id, match, after=0):
+        if match("NATIONAL NEWS", "HEADING_1"):
+            return {"startIndex": 10, "endIndex": 20,
+                    "text": "NATIONAL NEWS", "next_start": 20}
+        return {"startIndex": 21, "endIndex": 40,
+                "text": "1.[Old headline]", "next_start": 100}
+
+    monkeypatch.setattr(radio, "find_heading", fake_find_heading)
+
+    # No ~~..~~ marker around "today" — simulates the model missing the markup.
+    text = "EN: New title\nTH: หัวข้อ\n\nThe story happened today, officials said."
+    radio.fill_radio_slot(None, None, None, section="AM", block="NATIONAL",
+                          slot_n=1, text=text, doc="DOC123", dry=True)
+
+    out = json.loads(capsys.readouterr().out)
+    assert out["underline_spans"] >= 1  # "today" caught by the DATE_RE backstop
 
 
 def test_radio_preview_argv(monkeypatch):

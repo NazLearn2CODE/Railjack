@@ -88,7 +88,7 @@ Path: **`/tmp/railjack-radio-news/latest.json`**. One JSON **object**:
   "slice_of_life": [ { "…same shape…" } ]
 }
 ```
-- `results`: ≥20 items, each `words ≥ 190`, dated (`YYYY-MM-DD`), **sorted most-recent first**.
+- `results`: ≥20 items, each `words ≥ 180`, dated (`YYYY-MM-DD`), **sorted most-recent first**.
 - `slice_of_life`: exactly the lighter suggestions (5), **global runs only**; omit/empty for business.
 - `content` is the cleaned article body (already fetched) — the backend never re-fetches.
 
