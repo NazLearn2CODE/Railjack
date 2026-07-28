@@ -848,16 +848,17 @@ def test_df_format_route_requires_doc_id(monkeypatch):
 
 
 def test_rewrite_success_and_prompt_assembly(monkeypatch):
-    """POST /api/newsroom/rewrite loads Ben's gem (not news-producer), includes
-    the Thai-name rule, instructs **name** markers, fires a separate SEO call
-    with AI Block Version A+B override, and returns {"rewritten", "seo"}."""
+    """POST /api/newsroom/rewrite loads Ben's gem (not news-producer), includes the
+    v2 name overlay rule ([English(Thai)] / Thai fallback / source-only carve-out),
+    instructs -/date/- underline markers, fires a separate SEO call with AI Block
+    Version A+B override, and returns {"rewritten", "seo"}."""
     calls = []
 
     async def fake_zai_message(prompt: str, max_tokens: int = 400, system: str | None = None, model: str | None = None, timeout: float = 30.0) -> str:
         calls.append({"prompt": prompt, "system": system, "max_tokens": max_tokens})
         if system:
             return "### Version A — AI Summary\nSummary text.\n\n### Version B — AI Key Points\n- WHAT: Fact."
-        return "This is broadcast prose by **Ben** mentioning **นายกฯ**."
+        return "This is broadcast prose by **[Ben(เบ็น)]** mentioning **นายกฯ** on -/July 15, 2026/-."
 
     monkeypatch.setattr(newsroom.zai, "zai_message", fake_zai_message)
     app = FastAPI()
@@ -875,10 +876,20 @@ def test_rewrite_success_and_prompt_assembly(monkeypatch):
     ben_call = [c for c in calls if not c["system"]][0]
     seo_call = [c for c in calls if c["system"]][0]
 
-    # Ben call asserts:
-    assert "editor of Thailand NOW" in ben_call["prompt"]  # Ben's gem body
-    assert "ORIGINAL THAI SCRIPT" in ben_call["prompt"]     # Thai-name rule
-    assert "**double-stars**" in ben_call["prompt"]         # Output override (name markers)
+    # Ben call — v2 name overlay rule:
+    assert "editor of Thailand NOW" in ben_call["prompt"]           # Ben's gem body
+    assert "NAME OVERLAY RULE" in ben_call["prompt"]                # overlay heading present
+    assert "[OfficialEnglish(Thai)]" in ben_call["prompt"]          # overlay format spec
+    assert "NO transliteration" in ben_call["prompt"]               # no-guess rule
+    assert "NARROW CARVE-OUT" in ben_call["prompt"]                 # source-only carve-out
+    # -/date/- instruction:
+    assert "-/…/-" in ben_call["prompt"]                            # date marker syntax
+    assert "-/next month/-" in ben_call["prompt"]                   # relative-time example
+    # v1 Thai-only blanket rule is GONE (replaced by overlay rule above).
+    # "ORIGINAL THAI SCRIPT" still legitimately appears in the overlay rule for
+    # titles/ranks, but the old blanket "never translate or transliterate any
+    # PERSON'S NAME" sentence must NOT appear in v2:
+    assert "leave every name and honorific in the ORIGINAL THAI SCRIPT" not in ben_call["prompt"]
 
     # SEO call asserts:
     assert "AI SEO Block" in seo_call["system"]             # SEO gem body
@@ -920,7 +931,9 @@ def _load_nl_append():
 
 
 def test_nl_append_emits_bold_and_underline_spans(monkeypatch):
-    """nl_append unit test: **Name** produces bold span, date produces underline span."""
+    """nl_append unit test: **Name** produces bold span; -/date/- marker produces
+    underline span (the marker path); DATE_RE backstop also fires on any date
+    not already covered by a marker (idempotent if same span)."""
     nl = _load_nl_append()
     doc_posted = []
 
@@ -935,21 +948,70 @@ def test_nl_append_emits_bold_and_underline_spans(monkeypatch):
     monkeypatch.setattr(nl, "nl_tab", fake_nl_tab)
     monkeypatch.setattr(nl, "api", fake_api)
 
-    nl.append("tok", "DOC_ID", "Prime Minister **นายกฯ** spoke on January 5, 2026.", dry=False)
+    # Text with both **bold** name and -/date/- marker
+    nl.append("tok", "DOC_ID",
+              "Prime Minister **นายกฯ** spoke on -/July 28, 2026/-.",
+              dry=False)
 
     assert len(doc_posted) == 1
     reqs = doc_posted[0]["requests"]
 
-    # Check insertText
+    # insertText: both marker types stripped from the plain text
     ins = [r for r in reqs if "insertText" in r][0]
     assert ins["insertText"]["location"]["tabId"] == "t.0"
-    assert "**" not in ins["insertText"]["text"]  # markers stripped
+    assert "**" not in ins["insertText"]["text"]   # bold markers stripped
+    assert "-/" not in ins["insertText"]["text"]    # underline markers stripped
+    assert "นายกฯ" in ins["insertText"]["text"]     # bold content preserved
+    assert "July 28, 2026" in ins["insertText"]["text"]  # underline content preserved
 
-    # Check bold style request
-    bold_reqs = [r for r in reqs if r.get("updateTextStyle", {}).get("fields") == "bold" and r["updateTextStyle"]["textStyle"].get("bold")]
+    # Bold span (field="bold", textStyle.bold=True)
+    bold_reqs = [
+        r for r in reqs
+        if r.get("updateTextStyle", {}).get("fields") == "bold"
+        and r["updateTextStyle"]["textStyle"].get("bold")
+    ]
     assert len(bold_reqs) == 1
 
-    # Check underline style request
-    underline_reqs = [r for r in reqs if r.get("updateTextStyle", {}).get("fields") == "underline" and r["updateTextStyle"]["textStyle"].get("underline")]
-    assert len(underline_reqs) == 1
+    # Underline span from -/date/- marker (field="underline", textStyle.underline=True)
+    underline_reqs = [
+        r for r in reqs
+        if r.get("updateTextStyle", {}).get("fields") == "underline"
+        and r["updateTextStyle"]["textStyle"].get("underline")
+    ]
+    assert len(underline_reqs) >= 1   # at least the marker-driven span
 
+
+def test_nl_append_parse_underline_strips_markers(monkeypatch):
+    """parse_underline isolated: strips -/../- markers from the plain text and
+    returns correct offsets into the stripped string (same math as parse_bold)."""
+    nl = _load_nl_append()
+    text = "Spoke on -/July 28, 2026/- in Bangkok."
+    plain, ranges = nl.parse_underline(text)
+    assert "-/" not in plain
+    assert "July 28, 2026" in plain
+    assert len(ranges) == 1
+    s, e = ranges[0]
+    assert plain[s:e] == "July 28, 2026"
+
+
+def test_nl_append_marker_date_not_doubled_by_backstop(monkeypatch):
+    """When Ben already wrapped a date in -/…/-, the DATE_RE backstop deduplicates
+    by start index so the span is emitted exactly once (not twice)."""
+    nl = _load_nl_append()
+    doc_posted = []
+
+    monkeypatch.setattr(nl, "nl_tab", lambda *a: ("t.0", 100))
+    monkeypatch.setattr(nl, "api",
+                        lambda m, u, t, body=None: doc_posted.append(body) or {})
+
+    # July 28 is both a -/…/- marker AND will be caught by DATE_RE as a backstop
+    nl.append("tok", "DOC1", "Met on -/July 28, 2026/-.", dry=False)
+
+    reqs = doc_posted[0]["requests"]
+    underline_reqs = [
+        r for r in reqs
+        if r.get("updateTextStyle", {}).get("fields") == "underline"
+        and r["updateTextStyle"]["textStyle"].get("underline")
+    ]
+    # Dedup keeps it to 1 span (marker wins; backstop is suppressed for same start)
+    assert len(underline_reqs) == 1

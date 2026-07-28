@@ -25,13 +25,16 @@ const rewriteDoc = (body: string, muted = false) =>
   `white-space:pre-wrap;word-wrap:break-word}</style></head><body>${escapeHtml(body)}</body></html>`;
 
 const renderRewritePreview = (text: string, seoBlock: string) => {
-  // Convert **name** to <strong>name</strong>, escaping everything else
+  // Convert **name** → <strong> and -/date/- → <u>; escape everything else.
+  // Split on both marker patterns in one pass so they can interleave naturally.
   const htmlText = text
-    .split(/(\*\*[^*]+\*\*)/g)
+    .split(/(\*\*[^*]+\*\*|-\/[^/]+-\/)/g)
     .map((part) => {
       if (part.startsWith("**") && part.endsWith("**")) {
-        const name = part.slice(2, -2);
-        return `<strong>${escapeHtml(name)}</strong>`;
+        return `<strong>${escapeHtml(part.slice(2, -2))}</strong>`;
+      }
+      if (part.startsWith("-/") && part.endsWith("/-")) {
+        return `<u>${escapeHtml(part.slice(2, -2))}</u>`;
       }
       return escapeHtml(part);
     })
@@ -45,6 +48,7 @@ const renderRewritePreview = (text: string, seoBlock: string) => {
     `<!doctype html><html><head><meta charset="utf-8"><style>` +
     `body{margin:0;padding:12px;background:#0b0f14;color:#c8d3df;font:17px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre-wrap;word-wrap:break-word}` +
     `strong{color:#7dd3fc;font-weight:600}` +
+    `u{text-decoration:underline;text-underline-offset:3px;color:#fbbf60}` +
     `</style></head><body>${htmlText}${seoHtml}</body></html>`
   );
 };
