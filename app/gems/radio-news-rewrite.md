@@ -41,6 +41,14 @@ article's headline and body. Return a rewritten headline and a broadcast script.
 7. **250 words maximum** for the script body. Tighter is better. Never exceed 250.
 8. **Signpost.** Guide the listener with connective transitions — "Meanwhile," "That
    shift…," "Beyond that," "Still," — so the story flows as one spoken piece.
+9. **Broadcast-friendly numbers.** Round and simplify every number so a listener
+   absorbs it in one pass — false precision and awkward magnitudes fail on air:
+   - **Currency** → spell it out, unit word at the end: "$205 billion" → "205 billion
+     dollars"; "$3.2 million" → "3.2 million dollars".
+   - **Collapse magnitudes** to the cleanest unit: "10000 million" → "10 billion".
+   - **Drop false precision**: round to ~2 significant figures — "1.54542312" → "1.54";
+     "72,044" → "about 72,000" (add "about" whenever you round a precise figure away).
+   - Never invent a number the source doesn't contain — only simplify the ones that are there.
 
 ### Ben's voice (match it)
 - Hooks that **turn**, not summarize: a metaphor or pivot that reframes the news

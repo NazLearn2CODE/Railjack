@@ -516,6 +516,35 @@ def test_rn_parse_rewrite_garble_falls_back():
     assert rn._parse_rewrite("not json at all", "orig") == ("orig", "not json at all")
 
 
+def test_rn_parse_rewrite_prose_prefix():
+    """Regression (live bug, 2026-07-28): the model sometimes wraps the JSON in
+    prose + a code fence. The old parser only stripped a fence if the text
+    *started* with one, so json.loads failed and the raw JSON dumped into the
+    body slot. raw_decode from the first '{' tolerates any prefix + trailing."""
+    rn = _load_radio_news()
+    raw = 'Here is the rewrite:\n```json\n{"title": "T", "body": "Good body."}\n```\nHope it helps.'
+    assert rn._parse_rewrite(raw, "orig") == ("T", "Good body.")
+
+
+def test_rn_parse_rewrite_think_prefix():
+    """Regression (same bug): a reasoning model may emit a <think> block before
+    the JSON. Must still parse the object behind it, not dump the raw text."""
+    rn = _load_radio_news()
+    raw = '<think>reasoning about the angle</think>\n{"title": "T", "body": "After think."}'
+    assert rn._parse_rewrite(raw, "orig") == ("T", "After think.")
+
+
+def test_rn_normalize_numbers_currency():
+    """A leading-$ currency must read aloud as "<amount> dollars" — the gem is
+    told to but flakes, so code guarantees it. Magnitude word stays; bare
+    amounts get "dollars"; trailing sentence punctuation is untouched."""
+    rn = _load_radio_news()
+    assert rn._normalize_numbers("debt of $205 billion was") == "debt of 205 billion dollars was"
+    assert rn._normalize_numbers("$3.2 million") == "3.2 million dollars"
+    assert rn._normalize_numbers("cost was $5.") == "cost was 5 dollars."
+    assert rn._normalize_numbers("no money here") == "no money here"
+
+
 def test_rn_prime_rewrites_calls_gateway_once_per_piece(monkeypatch):
     rn = _load_radio_news()
     monkeypatch.delenv("RADIO_REWRITE", raising=False)
