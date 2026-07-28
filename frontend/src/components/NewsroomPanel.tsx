@@ -6,7 +6,7 @@ import type { ModuleConfig } from "../store";
  * NEWSROOM panel — thin HUD over the newsroom skill CLI (queue.py +
  * nl_append.py). Queue list with author filter, story detail pane with an
  * editable script area, SEND TO NL (slot-fill + auto-mark), SEND TO RADIO
- * (section/block/slot fill), and a ledger tab.
+ * (section/block/slot fill), and a Document Generator tab.
  *
  * Phase 2: SEND TO NL replaces append with slot-fill (/api/newsroom/fill);
  * SEND TO RADIO fills a slot in the daily Radio script (/api/newsroom/radio/fill).
@@ -73,13 +73,6 @@ interface Queue {
   count: number;
   articles: Story[];
 }
-interface LedgerEntry {
-  id: string;
-  status: string;
-  doc_id: string;
-  processed_at: string;
-}
-
 interface RadioFolder {
   id?: string;
   name: string;
@@ -347,9 +340,8 @@ function DocPicker({
 }
 
 export default function NewsroomPanel({ module: _module }: { module: ModuleConfig }) {
-  const [tab, setTab] = useState<"queue" | "ledger" | "radio">("queue");
+  const [tab, setTab] = useState<"queue" | "docgen" | "radio">("queue");
   const [queue, setQueue] = useState<Queue | null>(null);
-  const [ledger, setLedger] = useState<LedgerEntry[]>([]);
   const [selected, setSelected] = useState<Story | null>(null);
   const [sendText, setSendText] = useState("");
   const [author, setAuthor] = useState("Chompatsorn");
@@ -358,9 +350,6 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
   const [rewritten, setRewritten] = useState("");
   const [seo, setSeo] = useState("");
   const [rewriting, setRewriting] = useState(false);
-
-  // RADIO mode toggle: Document Generator (docgen) vs News Fill (newsfill)
-  const [radioMode, setRadioMode] = useState<"docgen" | "newsfill">("docgen");
 
   // RADIO Document Generator state
   const now = new Date();
@@ -511,11 +500,11 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
   };
 
   useEffect(() => {
-    if (tab === "radio" && radioMode === "newsfill" && !browseInit.current) {
+    if (tab === "radio" && !browseInit.current) {
       browseInit.current = true;
       void loadBrowse(RRT_PARENT);
     }
-  }, [tab, radioMode, loadBrowse, RRT_PARENT]);
+  }, [tab, loadBrowse, RRT_PARENT]);
 
   const handleNewsScout = async () => {
     setNewsScouting(true);
@@ -733,16 +722,9 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
       .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)))
       .finally(() => setLoading(false));
   }, [author]);
-  const refreshLedger = useCallback(() => {
-    fetchJSON<LedgerEntry[]>("/api/newsroom/ledger")
-      .then((d) => setLedger(Array.isArray(d) ? d : []))
-      .catch(() => setLedger([]));
-  }, []);
-
   useEffect(() => {
     refreshQueue();
-    refreshLedger();
-  }, [refreshQueue, refreshLedger]);
+  }, [refreshQueue]);
 
   // POST helper surfacing the backend's HTTPException detail (fetchJSON only
   // reports the status code, and the stderr tail is the useful part here).
@@ -762,7 +744,7 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
   };
 
   // SEND TO NL — Phase 2 slot-fill: replace slot body in the selected tab.
-  // Marks the story on success and refreshes queue + ledger.
+  // Marks the story on success and refreshes queue.
   const sendToNLFill = async () => {
     if (!selected || !sendText.trim()) return;
     setNlFilling(true);
@@ -787,7 +769,6 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
       setSelected(null);
       setSendText("");
       refreshQueue();
-      refreshLedger();
     }
     setNlFilling(false);
   };
@@ -876,13 +857,10 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
           QUEUE
         </button>
         <button
-          className={`btn btn--compact ${tab === "ledger" ? "btn--signal" : ""}`}
-          onClick={() => {
-            setTab("ledger");
-            refreshLedger();
-          }}
+          className={`btn btn--compact ${tab === "docgen" ? "btn--signal" : ""}`}
+          onClick={() => setTab("docgen")}
         >
-          LEDGER
+          DOC GEN
         </button>
         <button
           className={`btn btn--compact ${tab === "radio" ? "btn--signal" : ""}`}
@@ -1038,16 +1016,24 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
                     {/* NL slot number */}
                     <label className="flex flex-col gap-0.5">
                       <span className="label" style={{ fontSize: 9 }}>SLOT</span>
-                      <input
+                      <select
                         id="nl-slot-input"
-                        type="number"
-                        min={1}
-                        max={12}
-                        className="input mono px-2 py-1"
-                        style={{ width: 56, fontSize: "11px" }}
+                        className="mono"
+                        style={{
+                          background: "var(--color-panel-2)",
+                          color: "var(--color-phosphor-dim)",
+                          border: "1px solid var(--color-edge)",
+                          padding: "3px 5px",
+                          fontSize: "11px",
+                          minWidth: 56,
+                        }}
                         value={nlSlot}
-                        onChange={(e) => setNlSlot(Math.max(1, Number(e.target.value)))}
-                      />
+                        onChange={(e) => setNlSlot(Number(e.target.value))}
+                      >
+                        {Array.from({ length: 15 }, (_, i) => i + 1).map((n) => (
+                          <option key={n} value={n}>{n}</option>
+                        ))}
+                      </select>
                     </label>
 
                     <DocPicker
@@ -1125,16 +1111,24 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
                       {/* Slot */}
                       <label className="flex flex-col gap-0.5">
                         <span className="label" style={{ fontSize: 9 }}>SLOT</span>
-                        <input
+                        <select
                           id="radio-slot-input"
-                          type="number"
-                          min={1}
-                          max={20}
-                          className="input mono px-2 py-1"
-                          style={{ width: 52, fontSize: "11px" }}
+                          className="mono"
+                          style={{
+                            background: "var(--color-panel-2)",
+                            color: "var(--color-phosphor-dim)",
+                            border: "1px solid var(--color-edge)",
+                            padding: "3px 5px",
+                            fontSize: "11px",
+                            minWidth: 52,
+                          }}
                           value={radioFillSlot}
-                          onChange={(e) => setRadioFillSlot(Math.max(1, Number(e.target.value)))}
-                        />
+                          onChange={(e) => setRadioFillSlot(Number(e.target.value))}
+                        >
+                          {Array.from({ length: 15 }, (_, i) => i + 1).map((n) => (
+                            <option key={n} value={n}>{n}</option>
+                          ))}
+                        </select>
                       </label>
 
                       <DocPicker
@@ -1214,689 +1208,652 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
         </div>
       )}
 
-      {tab === "ledger" && (
-        <div className="hud hud--bracket reveal reveal-1 flex min-h-0 flex-1 flex-col gap-2 p-3">
-          <span className="label">LEDGER — {ledger.length} processed</span>
-          <div className="flex-1 overflow-auto">
-            {ledger.length === 0 && <span className="label">— nothing processed yet —</span>}
-            {ledger.map((e, i) => (
-              <div key={i} className="mono flex items-center gap-2 py-0.5 text-xs">
-                <span className="pip pip--go" />
-                <span style={{ color: "var(--color-phosphor-dim)" }}>{e.id}</span>
-                <span style={{ color: "var(--color-muted)" }}>{e.doc_id || "—"}</span>
-                <span className="ml-auto" style={{ color: "var(--color-muted)" }}>
-                  {e.processed_at}
+      {tab === "docgen" && (
+        <div className="hud hud--bracket reveal reveal-1 flex min-h-0 flex-1 flex-col gap-3 p-3">
+          <span className="label">DOCUMENT GENERATOR</span>
+          {/* Document Generator Form controls */}
+          <div className="flex flex-wrap items-center gap-3">
+            <label className="flex items-center gap-1.5 mono text-xs">
+              <span className="label">Year</span>
+              <input
+                type="number"
+                className="input mono px-2 py-1 text-xs"
+                style={{ width: 80 }}
+                value={radioYear}
+                onChange={(e) => {
+                  setRadioYear(Number(e.target.value));
+                  setRadioPreview(null);
+                  setRadioResult(null);
+                }}
+              />
+            </label>
+
+            <label className="flex items-center gap-1.5 mono text-xs">
+              <span className="label">Month</span>
+              <select
+                className="mono label"
+                style={{
+                  background: "var(--color-panel-2)",
+                  color: "var(--color-phosphor-dim)",
+                  border: "1px solid var(--color-edge)",
+                  padding: "4px 6px",
+                  fontSize: "11px",
+                }}
+                value={radioMonth}
+                onChange={(e) => {
+                  setRadioMonth(Number(e.target.value));
+                  setRadioPreview(null);
+                  setRadioResult(null);
+                }}
+              >
+                {Array.from({ length: 12 }, (_, i) => i + 1).map((m) => (
+                  <option key={m} value={m}>
+                    {m < 10 ? `0${m}` : m} — {new Date(2000, m - 1, 1).toLocaleString("en-US", { month: "long" })}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <label className="flex flex-1 items-center gap-1.5 mono text-xs" style={{ minWidth: 200 }}>
+              <span className="label">Sheet Name</span>
+              <input
+                type="text"
+                placeholder="(default: folder name)"
+                className="input mono flex-1 px-2 py-1 text-xs"
+                value={radioSheetName}
+                onChange={(e) => {
+                  setRadioSheetName(e.target.value);
+                  setRadioPreview(null);
+                  setRadioResult(null);
+                }}
+              />
+            </label>
+
+            <div className="ml-auto flex gap-2">
+              <button
+                className="btn btn--compact"
+                onClick={() => void handleRadioPreview()}
+                disabled={radioLoading || radioGenerating}
+              >
+                {radioLoading ? "PREVIEWING…" : "PREVIEW"}
+              </button>
+              <button
+                className="btn btn--compact btn--signal"
+                onClick={() => void handleRadioGenerate()}
+                disabled={!radioPreview || radioLoading || radioGenerating}
+                title={!radioPreview ? "Run PREVIEW first" : "Generate files in Google Drive"}
+              >
+                {radioGenerating ? "GENERATING…" : "GENERATE"}
+              </button>
+            </div>
+          </div>
+
+          {/* Folder & Counts summary */}
+          {(radioPreview || radioResult) && (
+            <div className="flex flex-col gap-1.5 border border-edge px-3 py-2 text-xs mono" style={{ background: "var(--color-void)" }}>
+              {radioPreview?.folder && (
+                <div className="flex items-center gap-2">
+                  <span className="label" style={{ color: "var(--color-signal)" }}>TARGET FOLDER:</span>
+                  <span style={{ color: "var(--color-phosphor)" }}>{radioPreview.folder.name}</span>
+                  {radioPreview.folder.id && (
+                    <span style={{ color: "var(--color-muted)" }}>({radioPreview.folder.id})</span>
+                  )}
+                </div>
+              )}
+
+              {(radioResult?.counts || radioPreview?.counts) && (() => {
+                const c = radioResult?.counts || radioPreview?.counts!;
+                return (
+                  <div className="flex items-center gap-2 text-xs">
+                    <span className="label">SUMMARY:</span>
+                    <span style={{ color: "var(--color-phosphor-dim)" }}>
+                      {c.sheet} sheet · {c.weekday} weekday · {c.weekend} weekend · {c.to_create} to create · {c.skipped} skip
+                    </span>
+                  </div>
+                );
+              })()}
+            </div>
+          )}
+
+          {/* Output items list */}
+          <div className="flex min-h-0 flex-1 flex-col gap-1 overflow-auto border border-edge p-2" style={{ background: "var(--color-void)" }}>
+            {radioResult ? (
+              <>
+                <span className="label mb-1" style={{ color: "var(--color-go)" }}>
+                  CREATED FILES ({radioResult.created?.length || 0})
                 </span>
+                {radioResult.created?.map((item, idx) => (
+                  <div key={idx} className="mono flex items-center gap-2 border-b border-edge-soft py-1 text-xs">
+                    <span className="pip pip--go" />
+                    <span className="flex-1 truncate" style={{ color: "var(--color-phosphor)" }}>
+                      {item.name}
+                    </span>
+                    {item.kind && (
+                      <span className="label" style={{ fontSize: "10px", color: "var(--color-muted)" }}>
+                        {item.kind}
+                      </span>
+                    )}
+                    {item.link ? (
+                      <a
+                        href={item.link}
+                        target="_blank"
+                        rel="noreferrer"
+                        style={{ color: "var(--color-signal)" }}
+                      >
+                        open ↗
+                      </a>
+                    ) : null}
+                  </div>
+                ))}
+                {radioResult.skipped && radioResult.skipped.length > 0 && (
+                  <div className="mt-2 flex flex-col gap-1">
+                    <span className="label" style={{ color: "var(--color-hazard)" }}>
+                      SKIPPED FILES ({radioResult.skipped.length})
+                    </span>
+                    {radioResult.skipped.map((item, idx) => (
+                      <div key={idx} className="mono flex items-center gap-2 py-0.5 text-xs">
+                        <span className="pip pip--hazard" />
+                        <span style={{ color: "var(--color-muted)" }}>{item.name}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </>
+            ) : radioPreview ? (
+              <>
+                <span className="label mb-1" style={{ color: "var(--color-signal)" }}>
+                  PLAN TO CREATE ({radioPreview.to_create?.length || 0})
+                </span>
+                {radioPreview.to_create?.map((item, idx) => (
+                  <div key={idx} className="mono flex items-center gap-2 border-b border-edge-soft py-1 text-xs">
+                    <span className="pip pip--signal" />
+                    <span className="flex-1 truncate" style={{ color: "var(--color-phosphor-dim)" }}>
+                      {item.name}
+                    </span>
+                    {item.kind && (
+                      <span className="label" style={{ fontSize: "10px", color: "var(--color-muted)" }}>
+                        {item.kind}
+                      </span>
+                    )}
+                  </div>
+                ))}
+              </>
+            ) : (
+              <div className="flex flex-1 items-center justify-center">
+                <span className="label">— Select year & month, then click PREVIEW —</span>
               </div>
-            ))}
+            )}
           </div>
         </div>
       )}
 
       {tab === "radio" && (
         <div className="hud hud--bracket reveal reveal-1 flex min-h-0 flex-1 flex-col gap-3 p-3">
-          {/* Sub-mode navigation header */}
-          <div className="flex items-center justify-between border-b border-edge pb-2">
-            <div className="flex items-center gap-2">
-              <button
-                className={`btn btn--compact ${radioMode === "docgen" ? "btn--signal" : ""}`}
-                onClick={() => setRadioMode("docgen")}
-              >
-                Document Generator
-              </button>
-              <button
-                className={`btn btn--compact ${radioMode === "newsfill" ? "btn--signal" : ""}`}
-                onClick={() => setRadioMode("newsfill")}
-              >
-                News Fill
-              </button>
-            </div>
-            <span className="label text-xs">RADIO ▸ {radioMode === "docgen" ? "DOCUMENT GENERATOR" : "NEWS FILL"}</span>
-          </div>
+          <span className="label text-xs">RADIO ▸ NEWS FILL</span>
+          <div className="flex min-h-0 flex-1 flex-col gap-3">
+            {/* Step 0 & 1 Controls */}
+            <div className="flex flex-wrap items-center gap-3 border-b border-edge pb-2">
+              {/* Category select */}
+              <label className="flex items-center gap-1.5 mono text-xs">
+                <span className="label">Category</span>
+                <select
+                  className="mono label"
+                  style={{
+                    background: "var(--color-panel-2)",
+                    color: "var(--color-phosphor)",
+                    border: "1px solid var(--color-edge)",
+                    padding: "4px 6px",
+                    fontSize: "11px",
+                  }}
+                  value={newsCategory}
+                  onChange={(e) => {
+                    setNewsCategory(e.target.value as "global" | "business");
+                    setSelectedArticles([]);
+                    setSlicePick(null);
+                  }}
+                >
+                  <option value="global">GLOBAL</option>
+                  <option value="business">BUSINESS</option>
+                </select>
+              </label>
 
-          {radioMode === "docgen" ? (
-            <>
-              {/* Document Generator Form controls */}
-              <div className="flex flex-wrap items-center gap-3">
-                <label className="flex items-center gap-1.5 mono text-xs">
-                  <span className="label">Year</span>
-                  <input
-                    type="number"
-                    className="input mono px-2 py-1 text-xs"
-                    style={{ width: 80 }}
-                    value={radioYear}
-                    onChange={(e) => {
-                      setRadioYear(Number(e.target.value));
-                      setRadioPreview(null);
-                      setRadioResult(null);
-                    }}
-                  />
-                </label>
-
-                <label className="flex items-center gap-1.5 mono text-xs">
-                  <span className="label">Month</span>
-                  <select
-                    className="mono label"
-                    style={{
-                      background: "var(--color-panel-2)",
-                      color: "var(--color-phosphor-dim)",
-                      border: "1px solid var(--color-edge)",
-                      padding: "4px 6px",
-                      fontSize: "11px",
-                    }}
-                    value={radioMonth}
-                    onChange={(e) => {
-                      setRadioMonth(Number(e.target.value));
-                      setRadioPreview(null);
-                      setRadioResult(null);
-                    }}
-                  >
-                    {Array.from({ length: 12 }, (_, i) => i + 1).map((m) => (
-                      <option key={m} value={m}>
-                        {m < 10 ? `0${m}` : m} — {new Date(2000, m - 1, 1).toLocaleString("en-US", { month: "long" })}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-
-                <label className="flex flex-1 items-center gap-1.5 mono text-xs" style={{ minWidth: 200 }}>
-                  <span className="label">Sheet Name</span>
-                  <input
-                    type="text"
-                    placeholder="(default: folder name)"
-                    className="input mono flex-1 px-2 py-1 text-xs"
-                    value={radioSheetName}
-                    onChange={(e) => {
-                      setRadioSheetName(e.target.value);
-                      setRadioPreview(null);
-                      setRadioResult(null);
-                    }}
-                  />
-                </label>
-
-                <div className="ml-auto flex gap-2">
-                  <button
-                    className="btn btn--compact"
-                    onClick={() => void handleRadioPreview()}
-                    disabled={radioLoading || radioGenerating}
-                  >
-                    {radioLoading ? "PREVIEWING…" : "PREVIEW"}
-                  </button>
-                  <button
-                    className="btn btn--compact btn--signal"
-                    onClick={() => void handleRadioGenerate()}
-                    disabled={!radioPreview || radioLoading || radioGenerating}
-                    title={!radioPreview ? "Run PREVIEW first" : "Generate files in Google Drive"}
-                  >
-                    {radioGenerating ? "GENERATING…" : "GENERATE"}
-                  </button>
-                </div>
+              {/* SCOUT & CONVERT buttons */}
+              <div className="flex items-center gap-2 ml-auto">
+                <button
+                  className="btn btn--compact"
+                  onClick={() => void handleCopyAntigravityPrompt(true)}
+                  title={`Copy an Antigravity prompt that OVER-scouts (${cheapCounts.N}+${REGULAR_LANE_BUFFER}) + pre-rewrites, so you curate here and APPLY places your picks free → swap to IDE`}
+                >
+                  📋 IDE SCOUT
+                </button>
+                <button
+                  className="btn btn--compact"
+                  onClick={() => void handleNewsScout()}
+                  disabled={newsScouting}
+                  title="Type /radio-news-scout command into terminal pane"
+                >
+                  {newsScouting ? "SCOUTING…" : "SCOUT"}
+                </button>
+                <button
+                  className="btn btn--compact btn--signal"
+                  onClick={() => void handleNewsConvert()}
+                  disabled={newsReportLoading}
+                  title="Fetch and convert latest scout handoff report"
+                >
+                  {newsReportLoading ? "LOADING…" : "CONVERT"}
+                </button>
               </div>
 
-              {/* Folder & Counts summary */}
-              {(radioPreview || radioResult) && (
-                <div className="flex flex-col gap-1.5 border border-edge px-3 py-2 text-xs mono" style={{ background: "var(--color-void)" }}>
-                  {radioPreview?.folder && (
-                    <div className="flex items-center gap-2">
-                      <span className="label" style={{ color: "var(--color-signal)" }}>TARGET FOLDER:</span>
-                      <span style={{ color: "var(--color-phosphor)" }}>{radioPreview.folder.name}</span>
-                      {radioPreview.folder.id && (
-                        <span style={{ color: "var(--color-muted)" }}>({radioPreview.folder.id})</span>
-                      )}
-                    </div>
-                  )}
-
-                  {(radioResult?.counts || radioPreview?.counts) && (() => {
-                    const c = radioResult?.counts || radioPreview?.counts!;
-                    return (
-                      <div className="flex items-center gap-2 text-xs">
-                        <span className="label">SUMMARY:</span>
-                        <span style={{ color: "var(--color-phosphor-dim)" }}>
-                          {c.sheet} sheet · {c.weekday} weekday · {c.weekend} weekend · {c.to_create} to create · {c.skipped} skip
-                        </span>
-                      </div>
-                    );
-                  })()}
-                </div>
-              )}
-
-              {/* Output items list */}
-              <div className="flex min-h-0 flex-1 flex-col gap-1 overflow-auto border border-edge p-2" style={{ background: "var(--color-void)" }}>
-                {radioResult ? (
-                  <>
-                    <span className="label mb-1" style={{ color: "var(--color-go)" }}>
-                      CREATED FILES ({radioResult.created?.length || 0})
+              {/* Folder browser: RT 2026 ▸ month ▸ day */}
+              <div className="flex w-full flex-col gap-1">
+                {/* Breadcrumb trail */}
+                <div className="flex flex-wrap items-center gap-1 mono text-xs">
+                  <span className="label">Target Doc</span>
+                  {browseStack.map((crumb, idx) => (
+                    <span key={crumb.id} className="flex items-center gap-1">
+                      {idx > 0 && <span style={{ color: "var(--color-muted)" }}>▸</span>}
+                      <button
+                        className="mono"
+                        onClick={() => jumpToCrumb(idx)}
+                        disabled={idx === browseStack.length - 1}
+                        style={{
+                          background: "none",
+                          border: "none",
+                          padding: 0,
+                          cursor: idx === browseStack.length - 1 ? "default" : "pointer",
+                          color:
+                            idx === browseStack.length - 1
+                              ? "var(--color-phosphor)"
+                              : "var(--color-signal)",
+                        }}
+                        title={idx === browseStack.length - 1 ? "" : `Back to ${crumb.name}`}
+                      >
+                        {crumb.name}
+                      </button>
                     </span>
-                    {radioResult.created?.map((item, idx) => (
-                      <div key={idx} className="mono flex items-center gap-2 border-b border-edge-soft py-1 text-xs">
-                        <span className="pip pip--go" />
-                        <span className="flex-1 truncate" style={{ color: "var(--color-phosphor)" }}>
-                          {item.name}
-                        </span>
-                        {item.kind && (
-                          <span className="label" style={{ fontSize: "10px", color: "var(--color-muted)" }}>
-                            {item.kind}
-                          </span>
-                        )}
-                        {item.link ? (
-                          <a
-                            href={item.link}
-                            target="_blank"
-                            rel="noreferrer"
-                            style={{ color: "var(--color-signal)" }}
-                          >
-                            open ↗
-                          </a>
-                        ) : null}
-                      </div>
-                    ))}
-                    {radioResult.skipped && radioResult.skipped.length > 0 && (
-                      <div className="mt-2 flex flex-col gap-1">
-                        <span className="label" style={{ color: "var(--color-hazard)" }}>
-                          SKIPPED FILES ({radioResult.skipped.length})
-                        </span>
-                        {radioResult.skipped.map((item, idx) => (
-                          <div key={idx} className="mono flex items-center gap-2 py-0.5 text-xs">
-                            <span className="pip pip--hazard" />
-                            <span style={{ color: "var(--color-muted)" }}>{item.name}</span>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </>
-                ) : radioPreview ? (
-                  <>
-                    <span className="label mb-1" style={{ color: "var(--color-signal)" }}>
-                      PLAN TO CREATE ({radioPreview.to_create?.length || 0})
-                    </span>
-                    {radioPreview.to_create?.map((item, idx) => (
-                      <div key={idx} className="mono flex items-center gap-2 border-b border-edge-soft py-1 text-xs">
-                        <span className="pip pip--signal" />
-                        <span className="flex-1 truncate" style={{ color: "var(--color-phosphor-dim)" }}>
-                          {item.name}
-                        </span>
-                        {item.kind && (
-                          <span className="label" style={{ fontSize: "10px", color: "var(--color-muted)" }}>
-                            {item.kind}
-                          </span>
-                        )}
-                      </div>
-                    ))}
-                  </>
-                ) : (
-                  <div className="flex flex-1 items-center justify-center">
-                    <span className="label">— Select year & month, then click PREVIEW —</span>
-                  </div>
-                )}
-              </div>
-            </>
-          ) : (
-            /* News Fill UI */
-            <div className="flex min-h-0 flex-1 flex-col gap-3">
-              {/* Step 0 & 1 Controls */}
-              <div className="flex flex-wrap items-center gap-3 border-b border-edge pb-2">
-                {/* Category select */}
-                <label className="flex items-center gap-1.5 mono text-xs">
-                  <span className="label">Category</span>
-                  <select
-                    className="mono label"
-                    style={{
-                      background: "var(--color-panel-2)",
-                      color: "var(--color-phosphor)",
-                      border: "1px solid var(--color-edge)",
-                      padding: "4px 6px",
-                      fontSize: "11px",
-                    }}
-                    value={newsCategory}
-                    onChange={(e) => {
-                      setNewsCategory(e.target.value as "global" | "business");
-                      setSelectedArticles([]);
-                      setSlicePick(null);
-                    }}
-                  >
-                    <option value="global">GLOBAL</option>
-                    <option value="business">BUSINESS</option>
-                  </select>
-                </label>
-
-                {/* SCOUT & CONVERT buttons */}
-                <div className="flex items-center gap-2 ml-auto">
+                  ))}
                   <button
-                    className="btn btn--compact"
-                    onClick={() => void handleCopyAntigravityPrompt(true)}
-                    title={`Copy an Antigravity prompt that OVER-scouts (${cheapCounts.N}+${REGULAR_LANE_BUFFER}) + pre-rewrites, so you curate here and APPLY places your picks free → swap to IDE`}
+                    className="btn btn--compact ml-auto"
+                    onClick={() => void loadBrowse(browseStack[browseStack.length - 1].id)}
+                    disabled={browseLoading}
+                    title="Reload this folder"
                   >
-                    📋 IDE SCOUT
-                  </button>
-                  <button
-                    className="btn btn--compact"
-                    onClick={() => void handleNewsScout()}
-                    disabled={newsScouting}
-                    title="Type /radio-news-scout command into terminal pane"
-                  >
-                    {newsScouting ? "SCOUTING…" : "SCOUT"}
-                  </button>
-                  <button
-                    className="btn btn--compact btn--signal"
-                    onClick={() => void handleNewsConvert()}
-                    disabled={newsReportLoading}
-                    title="Fetch and convert latest scout handoff report"
-                  >
-                    {newsReportLoading ? "LOADING…" : "CONVERT"}
+                    {browseLoading ? "…" : "⟳"}
                   </button>
                 </div>
 
-                {/* Folder browser: RT 2026 ▸ month ▸ day */}
-                <div className="flex w-full flex-col gap-1">
-                  {/* Breadcrumb trail */}
-                  <div className="flex flex-wrap items-center gap-1 mono text-xs">
-                    <span className="label">Target Doc</span>
-                    {browseStack.map((crumb, idx) => (
-                      <span key={crumb.id} className="flex items-center gap-1">
-                        {idx > 0 && <span style={{ color: "var(--color-muted)" }}>▸</span>}
+                {/* Folder + doc list for the current level */}
+                <div
+                  className="flex flex-col overflow-auto border border-edge"
+                  style={{ maxHeight: 150, background: "var(--color-void)" }}
+                >
+                  {browseLoading ? (
+                    <span className="label mono text-xs p-2">— loading —</span>
+                  ) : browseFolders.length === 0 && browseDocs.length === 0 ? (
+                    <span className="label mono text-xs p-2">— empty folder —</span>
+                  ) : (
+                    <>
+                      {browseFolders.map((f) => (
                         <button
-                          className="mono"
-                          onClick={() => jumpToCrumb(idx)}
-                          disabled={idx === browseStack.length - 1}
+                          key={f.id}
+                          className="mono text-xs flex items-center gap-1.5 px-2 py-1 text-left"
+                          onClick={() => enterFolder(f)}
                           style={{
                             background: "none",
                             border: "none",
-                            padding: 0,
-                            cursor: idx === browseStack.length - 1 ? "default" : "pointer",
-                            color:
-                              idx === browseStack.length - 1
-                                ? "var(--color-phosphor)"
-                                : "var(--color-signal)",
+                            borderBottom: "1px solid var(--color-edge-soft)",
+                            color: "var(--color-phosphor-dim)",
+                            cursor: "pointer",
                           }}
-                          title={idx === browseStack.length - 1 ? "" : `Back to ${crumb.name}`}
                         >
-                          {crumb.name}
+                          <span>📁</span>
+                          <span className="flex-1 truncate">{f.name}</span>
+                          <span style={{ color: "var(--color-muted)" }}>▸</span>
                         </button>
-                      </span>
-                    ))}
-                    <button
-                      className="btn btn--compact ml-auto"
-                      onClick={() => void loadBrowse(browseStack[browseStack.length - 1].id)}
-                      disabled={browseLoading}
-                      title="Reload this folder"
-                    >
-                      {browseLoading ? "…" : "⟳"}
-                    </button>
-                  </div>
-
-                  {/* Folder + doc list for the current level */}
-                  <div
-                    className="flex flex-col overflow-auto border border-edge"
-                    style={{ maxHeight: 150, background: "var(--color-void)" }}
-                  >
-                    {browseLoading ? (
-                      <span className="label mono text-xs p-2">— loading —</span>
-                    ) : browseFolders.length === 0 && browseDocs.length === 0 ? (
-                      <span className="label mono text-xs p-2">— empty folder —</span>
-                    ) : (
-                      <>
-                        {browseFolders.map((f) => (
+                      ))}
+                      {browseDocs.map((doc) => {
+                        const active = selectedDoc?.id === doc.id;
+                        return (
                           <button
-                            key={f.id}
+                            key={doc.id}
                             className="mono text-xs flex items-center gap-1.5 px-2 py-1 text-left"
-                            onClick={() => enterFolder(f)}
+                            onClick={() => {
+                              setSelectedDoc(doc);
+                              setSelectedArticles([]);
+                              setSlicePick(null);
+                              setNewsApplyResult(null);
+                            }}
                             style={{
-                              background: "none",
+                              background: active ? "var(--color-panel-2)" : "none",
                               border: "none",
                               borderBottom: "1px solid var(--color-edge-soft)",
-                              color: "var(--color-phosphor-dim)",
+                              color: active ? "var(--color-go)" : "var(--color-phosphor)",
                               cursor: "pointer",
                             }}
                           >
-                            <span>📁</span>
-                            <span className="flex-1 truncate">{f.name}</span>
-                            <span style={{ color: "var(--color-muted)" }}>▸</span>
+                            <span>{active ? "✓" : "📄"}</span>
+                            <span className="flex-1 truncate">{doc.name}</span>
+                            <span className="label" style={{ fontSize: "10px", color: "var(--color-muted)" }}>
+                              {doc.kind.toUpperCase()}
+                            </span>
                           </button>
-                        ))}
-                        {browseDocs.map((doc) => {
-                          const active = selectedDoc?.id === doc.id;
-                          return (
-                            <button
-                              key={doc.id}
-                              className="mono text-xs flex items-center gap-1.5 px-2 py-1 text-left"
-                              onClick={() => {
-                                setSelectedDoc(doc);
-                                setSelectedArticles([]);
-                                setSlicePick(null);
-                                setNewsApplyResult(null);
-                              }}
-                              style={{
-                                background: active ? "var(--color-panel-2)" : "none",
-                                border: "none",
-                                borderBottom: "1px solid var(--color-edge-soft)",
-                                color: active ? "var(--color-go)" : "var(--color-phosphor)",
-                                cursor: "pointer",
-                              }}
-                            >
-                              <span>{active ? "✓" : "📄"}</span>
-                              <span className="flex-1 truncate">{doc.name}</span>
-                              <span className="label" style={{ fontSize: "10px", color: "var(--color-muted)" }}>
-                                {doc.kind.toUpperCase()}
-                              </span>
-                            </button>
-                          );
-                        })}
-                      </>
-                    )}
-                  </div>
-
-                  {/* Current selection echo */}
-                  <span className="mono text-xs" style={{ color: "var(--color-muted)" }}>
-                    {selectedDoc
-                      ? `Selected: ${selectedDoc.name} [${selectedDoc.kind.toUpperCase()}]`
-                      : "— pick a script doc —"}
-                  </span>
+                        );
+                      })}
+                    </>
+                  )}
                 </div>
 
-                {/* Cheap lane — exact-count scout → one-click autopilot (no ticking, max token save) */}
-                <div
-                  className="flex w-full flex-col gap-1.5 border border-edge px-2 py-1.5"
-                  style={{ background: "var(--color-void)" }}
-                >
-                  <div className="flex items-center gap-2">
-                    <span className="label" style={{ color: "var(--color-hazard)" }}>
-                      CHEAP LANE
-                    </span>
-                    <span className="mono text-xs" style={{ color: "var(--color-muted)" }}>
-                      no review · max token save
-                    </span>
-                  </div>
-                  <div className="flex flex-wrap items-center gap-2 mono text-xs">
-                    <button
-                      className="btn btn--compact"
-                      onClick={() => void handleCheapScout()}
-                      disabled={!selectedDoc || newsCheapScouting}
-                      title={
-                        selectedDoc
-                          ? `Inject scout for exactly ${cheapCounts.N} results (${cheapCounts.M} SEA, ${cheapCounts.K} slice)`
-                          : "Pick a script doc first"
-                      }
-                    >
-                      {newsCheapScouting ? "SCOUTING…" : "CHEAP SCOUT"}
-                    </button>
-                    <span style={{ color: "var(--color-muted)" }}>
-                      {selectedDoc
-                        ? `gather exactly ${cheapCounts.N} · ${cheapCounts.M} SEA · ${cheapCounts.K} slice`
-                        : "pick a doc"}
-                    </span>
-                    <span style={{ color: "var(--color-muted)" }}>→</span>
-                    <button
-                      className="btn btn--compact btn--signal"
-                      onClick={() => void handleAutopilot()}
-                      disabled={!selectedDoc || newsAutopiloting}
-                      title={
-                        selectedDoc
-                          ? "Convert + place + fill deterministically, no ticking"
-                          : "Pick a script doc first"
-                      }
-                    >
-                      {newsAutopiloting ? "AUTOPILOT…" : "AUTOPILOT"}
-                    </button>
-                    <span style={{ color: "var(--color-muted)" }}>convert + place + fill, no hands</span>
-                  </div>
-                  <div className="flex flex-wrap items-center gap-2 mono text-xs mt-2">
-                    <button
-                      className="btn btn--compact"
-                      onClick={() => void handleCopyAntigravityPrompt(false)}
-                      title="Copy the paste-ready Antigravity prompt (category + kind + exact counts) → swap to IDE"
-                    >
-                      📋 COPY ANTIGRAVITY PROMPT
-                    </button>
-                    <span style={{ color: "var(--color-muted)" }}>
-                      {newsCategory} · {selectedDoc?.kind ?? "weekday"} · {cheapCounts.N}/{cheapCounts.M} SEA/{cheapCounts.K} slice → IDE
-                    </span>
-                  </div>
-                </div>
+                {/* Current selection echo */}
+                <span className="mono text-xs" style={{ color: "var(--color-muted)" }}>
+                  {selectedDoc
+                    ? `Selected: ${selectedDoc.name} [${selectedDoc.kind.toUpperCase()}]`
+                    : "— pick a script doc —"}
+                </span>
               </div>
 
-              {/* Status Header / Target Summary & CONFIRM Button */}
-              <div className="flex items-center justify-between px-2 py-1.5 text-xs mono border border-edge gap-2" style={{ background: "var(--color-void)" }}>
-                <div className="flex items-center gap-3">
-                  <div className="flex items-center gap-1.5">
-                    <span className="label" style={{ color: "var(--color-signal)" }}>HARD PICKS:</span>
-                    <span style={{ color: selectedArticles.length === targetHardCount ? "var(--color-go)" : "var(--color-hazard)" }}>
-                      {selectedArticles.length} / {targetHardCount} selected
-                    </span>
-                  </div>
-                  {isWeekdayGlobal && (
-                    <div className="flex items-center gap-1.5">
-                      <span className="label" style={{ color: "var(--color-signal)" }}>SLICE OF LIFE:</span>
-                      <span style={{ color: slicePick ? "var(--color-go)" : "var(--color-hazard)" }}>
-                        {slicePick ? "1 picked" : "0 picked"}
-                      </span>
-                    </div>
-                  )}
+              {/* Cheap lane — exact-count scout → one-click autopilot (no ticking, max token save) */}
+              <div
+                className="flex w-full flex-col gap-1.5 border border-edge px-2 py-1.5"
+                style={{ background: "var(--color-void)" }}
+              >
+                <div className="flex items-center gap-2">
+                  <span className="label" style={{ color: "var(--color-hazard)" }}>
+                    CHEAP LANE
+                  </span>
+                  <span className="mono text-xs" style={{ color: "var(--color-muted)" }}>
+                    no review · max token save
+                  </span>
                 </div>
-                <div className="ml-auto flex items-center gap-2">
-                  {newsFormatResult && (
-                    <span
-                      className="mono text-xs"
-                      style={{ color: "var(--color-go)" }}
-                      title={
-                        newsFormatResult.names_skipped
-                          ? "gateway down — dates underlined, names skipped"
-                          : "publication polish applied"
-                      }
-                    >
-                      ✓ {newsFormatResult.bolded.length} bold · {newsFormatResult.underlined.length} underline
-                      {newsFormatResult.names_skipped ? " (names skipped)" : ""}
-                    </span>
-                  )}
+                <div className="flex flex-wrap items-center gap-2 mono text-xs">
                   <button
                     className="btn btn--compact"
-                    onClick={() => void handleFormat()}
-                    disabled={!selectedDoc || newsFormatting}
+                    onClick={() => void handleCheapScout()}
+                    disabled={!selectedDoc || newsCheapScouting}
                     title={
                       selectedDoc
-                        ? "Bold people names + underline dates on this doc (idempotent)"
+                        ? `Inject scout for exactly ${cheapCounts.N} results (${cheapCounts.M} SEA, ${cheapCounts.K} slice)`
                         : "Pick a script doc first"
                     }
                   >
-                    {newsFormatting ? "FORMATTING…" : "FORMAT"}
+                    {newsCheapScouting ? "SCOUTING…" : "CHEAP SCOUT"}
                   </button>
+                  <span style={{ color: "var(--color-muted)" }}>
+                    {selectedDoc
+                      ? `gather exactly ${cheapCounts.N} · ${cheapCounts.M} SEA · ${cheapCounts.K} slice`
+                      : "pick a doc"}
+                  </span>
+                  <span style={{ color: "var(--color-muted)" }}>→</span>
                   <button
                     className="btn btn--compact btn--signal"
-                    onClick={() => void handleNewsApply()}
-                    disabled={!isConfirmEnabled}
-                    title={!isConfirmEnabled ? "Target hard picks and required slice pick must be met" : "Apply selected pieces to target document"}
+                    onClick={() => void handleAutopilot()}
+                    disabled={!selectedDoc || newsAutopiloting}
+                    title={
+                      selectedDoc
+                        ? "Convert + place + fill deterministically, no ticking"
+                        : "Pick a script doc first"
+                    }
                   >
-                    {newsApplying ? "APPLYING…" : "CONFIRM & APPLY TO DOC"}
+                    {newsAutopiloting ? "AUTOPILOT…" : "AUTOPILOT"}
                   </button>
+                  <span style={{ color: "var(--color-muted)" }}>convert + place + fill, no hands</span>
+                </div>
+                <div className="flex flex-wrap items-center gap-2 mono text-xs mt-2">
+                  <button
+                    className="btn btn--compact"
+                    onClick={() => void handleCopyAntigravityPrompt(false)}
+                    title="Copy the paste-ready Antigravity prompt (category + kind + exact counts) → swap to IDE"
+                  >
+                    📋 COPY ANTIGRAVITY PROMPT
+                  </button>
+                  <span style={{ color: "var(--color-muted)" }}>
+                    {newsCategory} · {selectedDoc?.kind ?? "weekday"} · {cheapCounts.N}/{cheapCounts.M} SEA/{cheapCounts.K} slice → IDE
+                  </span>
                 </div>
               </div>
+            </div>
 
-              {/* News Fill Content Area (Checklist & Results) */}
-              <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-auto border border-edge p-2" style={{ background: "var(--color-void)" }}>
-                {newsApplyResult ? (
-                  <div className="flex flex-col gap-2">
-                    <span className="label" style={{ color: "var(--color-go)" }}>
-                      ✓ {newsApplyResult.auto ? "AUTOPILOT FILLED" : "APPLIED TO DOC"} —{" "}
-                      {newsApplyResult.written.length} SLOTS WRITTEN
-                      {typeof newsApplyResult.picked === "number"
-                        ? ` (${newsApplyResult.picked} picked)`
-                        : ""}
+            {/* Status Header / Target Summary & CONFIRM Button */}
+            <div className="flex items-center justify-between px-2 py-1.5 text-xs mono border border-edge gap-2" style={{ background: "var(--color-void)" }}>
+              <div className="flex items-center gap-3">
+                <div className="flex items-center gap-1.5">
+                  <span className="label" style={{ color: "var(--color-signal)" }}>HARD PICKS:</span>
+                  <span style={{ color: selectedArticles.length === targetHardCount ? "var(--color-go)" : "var(--color-hazard)" }}>
+                    {selectedArticles.length} / {targetHardCount} selected
+                  </span>
+                </div>
+                {isWeekdayGlobal && (
+                  <div className="flex items-center gap-1.5">
+                    <span className="label" style={{ color: "var(--color-signal)" }}>SLICE OF LIFE:</span>
+                    <span style={{ color: slicePick ? "var(--color-go)" : "var(--color-hazard)" }}>
+                      {slicePick ? "1 picked" : "0 picked"}
                     </span>
-                    <div className="flex flex-col gap-1">
-                      {newsApplyResult.written.map((w, idx) => (
-                        <div key={idx} className="mono flex items-center gap-2 border-b border-edge-soft py-1 text-xs">
-                          <span className="pip pip--go" />
-                          <span className="label" style={{ color: "var(--color-signal)" }}>
-                            [{w.tab} SLOT {w.slot}]
+                  </div>
+                )}
+              </div>
+              <div className="ml-auto flex items-center gap-2">
+                {newsFormatResult && (
+                  <span
+                    className="mono text-xs"
+                    style={{ color: "var(--color-go)" }}
+                    title={
+                      newsFormatResult.names_skipped
+                        ? "gateway down — dates underlined, names skipped"
+                        : "publication polish applied"
+                    }
+                  >
+                    ✓ {newsFormatResult.bolded.length} bold · {newsFormatResult.underlined.length} underline
+                    {newsFormatResult.names_skipped ? " (names skipped)" : ""}
+                  </span>
+                )}
+                <button
+                  className="btn btn--compact"
+                  onClick={() => void handleFormat()}
+                  disabled={!selectedDoc || newsFormatting}
+                  title={
+                    selectedDoc
+                      ? "Bold people names + underline dates on this doc (idempotent)"
+                      : "Pick a script doc first"
+                  }
+                >
+                  {newsFormatting ? "FORMATTING…" : "FORMAT"}
+                </button>
+                <button
+                  className="btn btn--compact btn--signal"
+                  onClick={() => void handleNewsApply()}
+                  disabled={!isConfirmEnabled}
+                  title={!isConfirmEnabled ? "Target hard picks and required slice pick must be met" : "Apply selected pieces to target document"}
+                >
+                  {newsApplying ? "APPLYING…" : "CONFIRM & APPLY TO DOC"}
+                </button>
+              </div>
+            </div>
+
+            {/* News Fill Content Area (Checklist & Results) */}
+            <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-auto border border-edge p-2" style={{ background: "var(--color-void)" }}>
+              {newsApplyResult ? (
+                <div className="flex flex-col gap-2">
+                  <span className="label" style={{ color: "var(--color-go)" }}>
+                    ✓ {newsApplyResult.auto ? "AUTOPILOT FILLED" : "APPLIED TO DOC"} —{" "}
+                    {newsApplyResult.written.length} SLOTS WRITTEN
+                    {typeof newsApplyResult.picked === "number"
+                      ? ` (${newsApplyResult.picked} picked)`
+                      : ""}
+                  </span>
+                  <div className="flex flex-col gap-1">
+                    {newsApplyResult.written.map((w, idx) => (
+                      <div key={idx} className="mono flex items-center gap-2 border-b border-edge-soft py-1 text-xs">
+                        <span className="pip pip--go" />
+                        <span className="label" style={{ color: "var(--color-signal)" }}>
+                          [{w.tab} SLOT {w.slot}]
+                        </span>
+                        {w.region === "SEA" && (
+                          <span
+                            className="label"
+                            style={{ fontSize: "9px", color: "var(--color-hazard)" }}
+                            title="Southeast-Asia lead piece"
+                          >
+                            SEA
                           </span>
-                          {w.region === "SEA" && (
-                            <span
-                              className="label"
-                              style={{ fontSize: "9px", color: "var(--color-hazard)" }}
-                              title="Southeast-Asia lead piece"
-                            >
-                              SEA
-                            </span>
-                          )}
-                          <span className="flex-1 truncate" style={{ color: "var(--color-phosphor)" }}>
-                            {w.title}
+                        )}
+                        <span className="flex-1 truncate" style={{ color: "var(--color-phosphor)" }}>
+                          {w.title}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                  {newsApplyResult.skipped.length > 0 && (
+                    <div className="mt-2 flex flex-col gap-1">
+                      <span className="label" style={{ color: "var(--color-hazard)" }}>
+                        SKIPPED SLOTS ({newsApplyResult.skipped.length})
+                      </span>
+                      {newsApplyResult.skipped.map((s, idx) => (
+                        <div key={idx} className="mono flex items-center gap-2 py-0.5 text-xs">
+                          <span className="pip pip--hazard" />
+                          <span className="label" style={{ color: "var(--color-muted)" }}>
+                            [{s.tab} SLOT {s.slot}]
                           </span>
+                          <span style={{ color: "var(--color-muted)" }}>{s.reason}</span>
                         </div>
                       ))}
                     </div>
-                    {newsApplyResult.skipped.length > 0 && (
-                      <div className="mt-2 flex flex-col gap-1">
-                        <span className="label" style={{ color: "var(--color-hazard)" }}>
-                          SKIPPED SLOTS ({newsApplyResult.skipped.length})
-                        </span>
-                        {newsApplyResult.skipped.map((s, idx) => (
-                          <div key={idx} className="mono flex items-center gap-2 py-0.5 text-xs">
-                            <span className="pip pip--hazard" />
-                            <span className="label" style={{ color: "var(--color-muted)" }}>
-                              [{s.tab} SLOT {s.slot}]
-                            </span>
-                            <span style={{ color: "var(--color-muted)" }}>{s.reason}</span>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                ) : newsReport ? (
-                  <div className="flex flex-col gap-3">
-                    {/* Hard News Checklist */}
-                    <div>
-                      <div className="flex items-center justify-between mb-1">
-                        <span className="label" style={{ color: "var(--color-signal)" }}>
-                          SCOUTED ARTICLES ({newsReport.results?.length || 0}) — PICK {targetHardCount}
-                        </span>
-                        {selectedArticles.length > 0 && (
-                          <button
-                            className="btn btn--compact"
-                            onClick={() => setSelectedArticles([])}
-                            style={{ fontSize: "10px", padding: "1px 6px" }}
+                  )}
+                </div>
+              ) : newsReport ? (
+                <div className="flex flex-col gap-3">
+                  {/* Hard News Checklist */}
+                  <div>
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="label" style={{ color: "var(--color-signal)" }}>
+                        SCOUTED ARTICLES ({newsReport.results?.length || 0}) — PICK {targetHardCount}
+                      </span>
+                      {selectedArticles.length > 0 && (
+                        <button
+                          className="btn btn--compact"
+                          onClick={() => setSelectedArticles([])}
+                          style={{ fontSize: "10px", padding: "1px 6px" }}
+                        >
+                          Clear Picks
+                        </button>
+                      )}
+                    </div>
+                    <div className="flex flex-col gap-1">
+                      {newsReport.results?.map((article) => {
+                        const selectIndex = selectedArticles.findIndex((a) => a.url === article.url);
+                        const isSelected = selectIndex >= 0;
+                        return (
+                          <div
+                            key={article.url}
+                            onClick={() => toggleArticleSelect(article)}
+                            className="mono flex cursor-pointer items-start gap-2 border border-edge px-2 py-1.5 transition-colors"
+                            style={{
+                              background: isSelected
+                                ? "color-mix(in srgb, var(--color-signal) 12%, var(--color-panel-2))"
+                                : "var(--color-panel-2)",
+                              borderColor: isSelected ? "var(--color-signal)" : "var(--color-edge)",
+                            }}
                           >
-                            Clear Picks
-                          </button>
-                        )}
-                      </div>
-                      <div className="flex flex-col gap-1">
-                        {newsReport.results?.map((article) => {
-                          const selectIndex = selectedArticles.findIndex((a) => a.url === article.url);
-                          const isSelected = selectIndex >= 0;
-                          return (
-                            <div
-                              key={article.url}
-                              onClick={() => toggleArticleSelect(article)}
-                              className="mono flex cursor-pointer items-start gap-2 border border-edge px-2 py-1.5 transition-colors"
+                            <span
+                              className="label mt-0.5"
                               style={{
-                                background: isSelected
-                                  ? "color-mix(in srgb, var(--color-signal) 12%, var(--color-panel-2))"
-                                  : "var(--color-panel-2)",
-                                borderColor: isSelected ? "var(--color-signal)" : "var(--color-edge)",
+                                color: isSelected ? "var(--color-signal)" : "var(--color-muted)",
+                                minWidth: 28,
                               }}
                             >
-                              <span
-                                className="label mt-0.5"
-                                style={{
-                                  color: isSelected ? "var(--color-signal)" : "var(--color-muted)",
-                                  minWidth: 28,
-                                }}
-                              >
-                                {isSelected ? `[#${selectIndex + 1}]` : "[  ]"}
-                              </span>
+                              {isSelected ? `[#${selectIndex + 1}]` : "[  ]"}
+                            </span>
+                            <div className="flex flex-1 flex-col gap-0.5 min-w-0">
+                              <div className="flex items-center justify-between gap-2">
+                                <span
+                                  className="font-semibold text-xs truncate flex items-center gap-1.5"
+                                  style={{
+                                    color: isSelected ? "var(--color-phosphor)" : "var(--color-phosphor-dim)",
+                                  }}
+                                >
+                                  {(article.region || "").toUpperCase() === "SEA" && (
+                                    <span className="label" style={{ fontSize: "9px", color: "var(--color-hazard)" }} title="Southeast-Asia lead piece">
+                                      SEA
+                                    </span>
+                                  )}
+                                  {article.rewritten && (
+                                    <span className="label" style={{ fontSize: "9px", color: "var(--color-go)" }} title="Pre-rewritten by Antigravity — APPLY places it free (no local rewrite)">
+                                      ✎READY
+                                    </span>
+                                  )}
+                                  <span className="truncate">{article.title}</span>
+                                </span>
+                                <span className="label text-xs shrink-0" style={{ color: "var(--color-muted)", fontSize: "10px" }}>
+                                  {article.source} · {article.words}w · {article.date}
+                                </span>
+                              </div>
+                              {article.content && (
+                                <span className="text-xs truncate" style={{ color: "var(--color-muted)", fontSize: "11px" }}>
+                                  {article.content.slice(0, 140)}…
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  {/* Slice of Life Section (weekday global only) */}
+                  {isWeekdayGlobal && newsReport.slice_of_life && newsReport.slice_of_life.length > 0 && (
+                    <div className="border-t border-edge pt-2">
+                      <span className="label mb-1 block" style={{ color: "var(--color-hazard)" }}>
+                        SLICE OF LIFE (PICK EXACTLY 1)
+                      </span>
+                      <div className="flex flex-col gap-1">
+                        {newsReport.slice_of_life.map((slice) => {
+                          const isPicked = slicePick?.url === slice.url;
+                          return (
+                            <div
+                              key={slice.url}
+                              onClick={() => setSlicePick(isPicked ? null : slice)}
+                              className="mono flex cursor-pointer items-start gap-2 border border-edge px-2 py-1.5"
+                              style={{
+                                background: isPicked
+                                  ? "color-mix(in srgb, var(--color-hazard) 15%, var(--color-panel-2))"
+                                  : "var(--color-panel-2)",
+                                borderColor: isPicked ? "var(--color-hazard)" : "var(--color-edge)",
+                              }}
+                            >
+                              <input
+                                type="radio"
+                                name="slice_pick"
+                                checked={isPicked}
+                                onChange={() => setSlicePick(slice)}
+                                className="mt-1"
+                              />
                               <div className="flex flex-1 flex-col gap-0.5 min-w-0">
                                 <div className="flex items-center justify-between gap-2">
                                   <span
-                                    className="font-semibold text-xs truncate flex items-center gap-1.5"
+                                    className="font-semibold text-xs truncate"
                                     style={{
-                                      color: isSelected ? "var(--color-phosphor)" : "var(--color-phosphor-dim)",
+                                      color: isPicked ? "var(--color-phosphor)" : "var(--color-phosphor-dim)",
                                     }}
                                   >
-                                    {(article.region || "").toUpperCase() === "SEA" && (
-                                      <span className="label" style={{ fontSize: "9px", color: "var(--color-hazard)" }} title="Southeast-Asia lead piece">
-                                        SEA
-                                      </span>
-                                    )}
-                                    {article.rewritten && (
-                                      <span className="label" style={{ fontSize: "9px", color: "var(--color-go)" }} title="Pre-rewritten by Antigravity — APPLY places it free (no local rewrite)">
-                                        ✎READY
-                                      </span>
-                                    )}
-                                    <span className="truncate">{article.title}</span>
+                                    {slice.title}
                                   </span>
                                   <span className="label text-xs shrink-0" style={{ color: "var(--color-muted)", fontSize: "10px" }}>
-                                    {article.source} · {article.words}w · {article.date}
+                                    {slice.source} · {slice.words}w
                                   </span>
                                 </div>
-                                {article.content && (
-                                  <span className="text-xs truncate" style={{ color: "var(--color-muted)", fontSize: "11px" }}>
-                                    {article.content.slice(0, 140)}…
-                                  </span>
-                                )}
                               </div>
                             </div>
                           );
                         })}
                       </div>
                     </div>
-
-                    {/* Slice of Life Section (weekday global only) */}
-                    {isWeekdayGlobal && newsReport.slice_of_life && newsReport.slice_of_life.length > 0 && (
-                      <div className="border-t border-edge pt-2">
-                        <span className="label mb-1 block" style={{ color: "var(--color-hazard)" }}>
-                          SLICE OF LIFE (PICK EXACTLY 1)
-                        </span>
-                        <div className="flex flex-col gap-1">
-                          {newsReport.slice_of_life.map((slice) => {
-                            const isPicked = slicePick?.url === slice.url;
-                            return (
-                              <div
-                                key={slice.url}
-                                onClick={() => setSlicePick(isPicked ? null : slice)}
-                                className="mono flex cursor-pointer items-start gap-2 border border-edge px-2 py-1.5"
-                                style={{
-                                  background: isPicked
-                                    ? "color-mix(in srgb, var(--color-hazard) 15%, var(--color-panel-2))"
-                                    : "var(--color-panel-2)",
-                                  borderColor: isPicked ? "var(--color-hazard)" : "var(--color-edge)",
-                                }}
-                              >
-                                <input
-                                  type="radio"
-                                  name="slice_pick"
-                                  checked={isPicked}
-                                  onChange={() => setSlicePick(slice)}
-                                  className="mt-1"
-                                />
-                                <div className="flex flex-1 flex-col gap-0.5 min-w-0">
-                                  <div className="flex items-center justify-between gap-2">
-                                    <span
-                                      className="font-semibold text-xs truncate"
-                                      style={{
-                                        color: isPicked ? "var(--color-phosphor)" : "var(--color-phosphor-dim)",
-                                      }}
-                                    >
-                                      {slice.title}
-                                    </span>
-                                    <span className="label text-xs shrink-0" style={{ color: "var(--color-muted)", fontSize: "10px" }}>
-                                      {slice.source} · {slice.words}w
-                                    </span>
-                                  </div>
-                                </div>
-                              </div>
-                            );
-                          })}
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                ) : (
-                  <div className="flex flex-1 flex-col items-center justify-center gap-2">
-                    <span className="label">— Click SCOUT to run terminal scout or CONVERT to load report —</span>
-                  </div>
-                )}
-              </div>
+                  )}
+                </div>
+              ) : (
+                <div className="flex flex-1 flex-col items-center justify-center gap-2">
+                  <span className="label">— Click SCOUT to run terminal scout or CONVERT to load report —</span>
+                </div>
+              )}
             </div>
-          )}
+          </div>
         </div>
       )}
 
