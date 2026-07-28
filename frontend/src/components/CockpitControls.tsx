@@ -59,6 +59,7 @@ export default function CockpitControls() {
   const [skillSel, setSkillSel] = useState("");
   const [mktSel, setMktSel] = useState("");
   const [mcpSel, setMcpSel] = useState("");
+  const [restarting, setRestarting] = useState(false);
 
   const { data: catalog, refetch: refetchCatalog } = usePolling<Catalog>("/api/catalog", 60_000);
 
@@ -94,6 +95,37 @@ export default function CockpitControls() {
     } finally {
       setReloading(false);
     }
+  };
+
+  // Restart the railjack server itself (load new backend code after an edit).
+  // The endpoint returns fast, then a detached `sleep 1 && systemctl restart`
+  // kills these workers ~1 s later — so we expect the connection to drop and
+  // poll /api/health until the service is back, then reload the page.
+  const restartServer = async () => {
+    if (!confirm("Restart railjack now? Loads new backend code — ~2 s downtime.")) return;
+    setRestarting(true);
+    try {
+      await fetchJSON("/api/system/restart", { method: "POST" });
+    } catch {
+      /* expected — the worker dies ~1 s after responding */
+    }
+    const deadline = Date.now() + 20_000;
+    const tick = setInterval(async () => {
+      if (Date.now() > deadline) {
+        clearInterval(tick);
+        setRestarting(false);
+        return;
+      }
+      try {
+        const r = await fetch("/api/health");
+        if (r.ok) {
+          clearInterval(tick);
+          location.reload(); // pick up any frontend rebuild too
+        }
+      } catch {
+        /* still restarting */
+      }
+    }, 500);
   };
 
   const skills = grouped(catalog?.skills ?? []);
@@ -177,6 +209,15 @@ export default function CockpitControls() {
         title="Re-read the machine YAML (buttons/modules) and rescan skills / marketplace / MCP — applies edits and surfaces newly added skills without restarting the server"
       >
         {reloading ? "↻…" : "↻ CFG"}
+      </button>
+
+      <button
+        className="btn btn--compact"
+        onClick={() => void restartServer()}
+        disabled={restarting}
+        title="Restart the railjack server itself — loads new backend code after Antigravity/Tawhan edit the app. ~2 s downtime."
+      >
+        {restarting ? "↻ SVC…" : "↻ SVC"}
       </button>
     </div>
   );

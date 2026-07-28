@@ -102,6 +102,21 @@ def post_config_reload() -> dict:
     return _serialize_config()
 
 
+@app.post("/api/system/restart")
+async def post_system_restart() -> dict:
+    """Restart the railjack service itself — load new backend code without a
+    terminal. Spawns a DETACHED ``sleep 1 && systemctl --user restart railjack``
+    (``start_new_session=True``) so the child survives this worker being killed;
+    the 1 s delay lets this response flush first. The cockpit polls /api/health
+    to see the service come back."""
+    import subprocess
+    subprocess.Popen(
+        ["bash", "-c", "sleep 1 && systemctl --user restart railjack"],
+        start_new_session=True,
+    )
+    return {"restarting": True}
+
+
 # Serve the built React dashboard when present; otherwise a placeholder.
 # Mounted LAST so /api/* routes above take precedence.
 if DASHBOARD_DIST.is_dir():
