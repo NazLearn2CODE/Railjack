@@ -163,8 +163,10 @@ Two features Naz added on top of the refinements, both for max token economy. **
   (glm-5 `app/gems/doc-format-entities.md`) + underlines **dates** (regex: month-day / day-month /
   ISO). One tab-scoped `batchUpdate` per tab; idempotent. Gateway-down **degrades** (dates still
   underlined, names skipped, 200 + `names_skipped:true`) — NOT fail-fast, per the gem's contract.
-- Route `POST /api/newsroom/format/apply {doc_id, tab?}` (120s). FORMAT button in the News Fill
-  status row (standalone, renders bold/underline counts). `tsc + vite build` exit 0. 49 tests green.
+- Route `POST /api/newsroom/format/apply {doc_id, tab?}` (120s). FORMAT in the News Fill status
+  row: a standalone button for re-runs/any doc, AND **auto-chained after every successful APPLY +
+  AUTOPILOT** (so a fill is one click — fill writes, then format bolds names + underlines dates).
+  `tsc + vite build` exit 0. 52 tests green.
 - Known quirk (pre-existing, shared `_script` wrapper, NOT CP3): a `_fatal` exits nonzero so the
   `rc!=0 → 502` branch beats the `_json → 400` path — script config/validation errors surface as 502,
   not 400. Message is preserved either way; flagged, not fixed (out of scope).

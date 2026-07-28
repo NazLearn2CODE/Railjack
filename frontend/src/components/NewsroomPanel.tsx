@@ -382,6 +382,7 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
       } else {
         const data: NewsFillApplyResponse = await res.json();
         setNewsApplyResult(data);
+        void runFormat(selectedDoc.id); // auto-chain polish: bold names + underline dates
       }
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : String(e));
@@ -433,6 +434,7 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
       } else {
         const data: NewsFillApplyResponse = await res.json();
         setNewsApplyResult(data);
+        void runFormat(selectedDoc.id); // auto-chain polish: bold names + underline dates
       }
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : String(e));
@@ -441,11 +443,11 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
     }
   };
 
-  // FORMAT — publication polish on the selected doc, standalone (no chaining):
-  // bold people names + underline dates across its tabs. Idempotent, so it is
-  // safe to press after APPLY/AUTOPILOT or on its own.
-  const handleFormat = async () => {
-    if (!selectedDoc) return;
+  // FORMAT — publication polish: bold people names + underline dates across a
+  // doc's tabs. Idempotent, so safe to re-run. `runFormat` is the reusable core
+  // (also fired automatically after a successful APPLY/AUTOPILOT so a fill is a
+  // single one-click flow); `handleFormat` is the standalone-button wrapper.
+  const runFormat = async (docId: string) => {
     setNewsFormatting(true);
     setError(null);
     setNewsFormatResult(null);
@@ -453,7 +455,7 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
       const res = await fetch("/api/newsroom/format/apply", {
         method: "POST",
         headers: CT,
-        body: JSON.stringify({ doc_id: selectedDoc.id }),
+        body: JSON.stringify({ doc_id: docId }),
       });
       if (!res.ok) {
         const d = await res.json().catch(() => ({ detail: res.statusText }));
@@ -467,6 +469,11 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
     } finally {
       setNewsFormatting(false);
     }
+  };
+
+  const handleFormat = () => {
+    if (!selectedDoc) return;
+    void runFormat(selectedDoc.id);
   };
 
   const refreshQueue = useCallback(() => {
