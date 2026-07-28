@@ -641,6 +641,34 @@ def test_rn_rewrite_retries_for_length(monkeypatch):
     assert len(body.split()) >= rn.MIN_WORDS
 
 
+def test_rn_report_carries_rewritten_and_region(tmp_path, capsys):
+    """CONVERT must carry ``rewritten`` + ``region`` through so a human-curated
+    pick still short-circuits the rewrite at APPLY (regular lane = ultra-cheap)
+    and SEA-lead placement survives the round-trip. Regression: cmd_report used
+    to rebuild each result with only 6 fields, dropping both flags."""
+    rn = _load_radio_news()
+    handoff = tmp_path / "latest.json"
+    handoff.write_text(json.dumps({
+        "category": "global",
+        "results": [
+            {"title": "SEA lead", "url": "u1", "source": "Reuters", "date": "2026-07-28",
+             "content": "cut", "words": 200, "region": "SEA", "rewritten": True},
+            {"title": "plain", "url": "u2", "source": "AP", "date": "2026-07-28",
+             "content": "cut2", "words": 210},  # no region/rewritten → defaults
+        ],
+        "slice_of_life": [],
+    }))
+
+    class _Args:
+        path = str(handoff)
+
+    rn.cmd_report(_Args())
+    out = json.loads(capsys.readouterr().out)
+    a, b = out["results"]
+    assert a["region"] == "SEA" and a["rewritten"] is True
+    assert b["region"] == "" and b["rewritten"] is False  # safe defaults
+
+
 def test_rn_rewrite_off_env_passthrough(monkeypatch):
     """RADIO_REWRITE=off makes the whole pass a no-op → pytest stays offline."""
     rn = _load_radio_news()

@@ -105,6 +105,8 @@ interface NewsArticle {
   date: string;
   content: string;
   words: number;
+  region?: string;
+  rewritten?: boolean;
 }
 
 interface NewsReportResponse {
@@ -477,13 +479,22 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
   };
 
   // COPY ANTIGRAVITY PROMPT — build the paste-ready prompt with category + kind
-  // + EXACT counts (from cheapCounts, same source AUTOPILOT trusts), copy to
-  // clipboard. Kind defaults to weekday when no doc is picked; counts follow.
-  const handleCopyAntigravityPrompt = async () => {
+  // + counts (from cheapCounts, same source AUTOPILOT trusts), copy to clipboard.
+  // Kind defaults to weekday when no doc is picked; counts follow.
+  //   curated=false (CHEAP LANE) → EXACT counts, AUTOPILOT places all, no review.
+  //   curated=true  (regular lane) → OVER-scout (N+buffer) so CONVERT gives you a
+  //     pool to pick from; every piece is still pre-rewritten (rewritten:true), so
+  //     your human-picked N place FREE at APPLY (the seam survives CONVERT now).
+  const REGULAR_LANE_BUFFER = 5;
+  const handleCopyAntigravityPrompt = async (curated = false) => {
     const kind = selectedDoc?.kind ?? "weekday";
     const { N, M, K } = cheapCounts;
+    const scoutN = curated ? N + REGULAR_LANE_BUFFER : N;
     const sliceClause = K > 0 ? ` plus ${K} slice-of-life piece` : " and no slice-of-life piece (no AM tab)";
-    const promptText = `Read \`10-knowledge/radio-news-antigravity-handoff.md\` in this vault. Scout recent (dated, ≥190-word) news for category \`${newsCategory}\`, kind \`${kind}\` — gather EXACTLY ${N} results (${M} of them SEA-led)${sliceClause} — from premium wire/broadcast outlets, rewrite each piece plus the slice-of-life into Editor Ben's ≤250-word broadcast voice (rules in that note), tag SEA pieces, and write the result to \`/tmp/railjack-radio-news/latest.json\` in the exact shape shown — \`"rewritten": true\` on every piece. Do not touch any Google Doc.`;
+    const countClause = curated
+      ? `gather ${scoutN} results (aim for at least ${M} SEA-led)${sliceClause} — a few MORE than the ${N} I need, so I can curate`
+      : `gather EXACTLY ${scoutN} results (${M} of them SEA-led)${sliceClause}`;
+    const promptText = `Read \`10-knowledge/radio-news-antigravity-handoff.md\` in this vault. Scout recent (dated, ≥190-word) news for category \`${newsCategory}\`, kind \`${kind}\` — ${countClause} — from premium wire/broadcast outlets, rewrite each piece plus the slice-of-life into Editor Ben's ≤250-word broadcast voice (rules in that note), tag SEA pieces, and write the result to \`/tmp/railjack-radio-news/latest.json\` in the exact shape shown — \`"rewritten": true\` on every piece. Do not touch any Google Doc.`;
     try {
       await navigator.clipboard.writeText(promptText);
       setError(null);
@@ -1009,6 +1020,13 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
                 <div className="flex items-center gap-2 ml-auto">
                   <button
                     className="btn btn--compact"
+                    onClick={() => void handleCopyAntigravityPrompt(true)}
+                    title={`Copy an Antigravity prompt that OVER-scouts (${cheapCounts.N}+${REGULAR_LANE_BUFFER}) + pre-rewrites, so you curate here and APPLY places your picks free → swap to IDE`}
+                  >
+                    📋 IDE SCOUT
+                  </button>
+                  <button
+                    className="btn btn--compact"
                     onClick={() => void handleNewsScout()}
                     disabled={newsScouting}
                     title="Type /radio-news-scout command into terminal pane"
@@ -1181,7 +1199,7 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
                   <div className="flex flex-wrap items-center gap-2 mono text-xs mt-2">
                     <button
                       className="btn btn--compact"
-                      onClick={() => void handleCopyAntigravityPrompt()}
+                      onClick={() => void handleCopyAntigravityPrompt(false)}
                       title="Copy the paste-ready Antigravity prompt (category + kind + exact counts) → swap to IDE"
                     >
                       📋 COPY ANTIGRAVITY PROMPT
@@ -1345,12 +1363,22 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
                               <div className="flex flex-1 flex-col gap-0.5 min-w-0">
                                 <div className="flex items-center justify-between gap-2">
                                   <span
-                                    className="font-semibold text-xs truncate"
+                                    className="font-semibold text-xs truncate flex items-center gap-1.5"
                                     style={{
                                       color: isSelected ? "var(--color-phosphor)" : "var(--color-phosphor-dim)",
                                     }}
                                   >
-                                    {article.title}
+                                    {(article.region || "").toUpperCase() === "SEA" && (
+                                      <span className="label" style={{ fontSize: "9px", color: "var(--color-hazard)" }} title="Southeast-Asia lead piece">
+                                        SEA
+                                      </span>
+                                    )}
+                                    {article.rewritten && (
+                                      <span className="label" style={{ fontSize: "9px", color: "var(--color-go)" }} title="Pre-rewritten by Antigravity — APPLY places it free (no local rewrite)">
+                                        ✎READY
+                                      </span>
+                                    )}
+                                    <span className="truncate">{article.title}</span>
                                   </span>
                                   <span className="label text-xs shrink-0" style={{ color: "var(--color-muted)", fontSize: "10px" }}>
                                     {article.source} · {article.words}w · {article.date}
