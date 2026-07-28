@@ -485,3 +485,102 @@ def test_rn_autofill_requires_fields(monkeypatch):
     assert c.post("/api/newsroom/radio/news/autofill",
                   json={"kind": "weekday", "category": "global"}).status_code == 400
     assert calls == []  # nothing exec'd on a bad body
+
+
+# --- glm-5 rewrite pre-pass (Editor Ben's voice) ---
+#
+# The live rewrite hits the OmniRoute gateway; tests stay offline by either
+# monkeypatching ``_gateway`` or exercising the pass-through short-circuits
+# (RADIO_REWRITE=off / rewritten:true), which must make ZERO gateway contact.
+
+
+def test_rn_parse_rewrite_strict_false_literal_newlines():
+    """The gem body carries literal newlines between paragraphs — strict JSON
+    rejects control chars in strings, so the parser must use strict=False."""
+    rn = _load_radio_news()
+    raw = '{"title": "Bangkok Repeats", "body": "Para one.\nPara two."}'
+    title, body = rn._parse_rewrite(raw, "orig title")
+    assert title == "Bangkok Repeats"
+    assert body == "Para one.\nPara two."
+
+
+def test_rn_parse_rewrite_strips_code_fence():
+    rn = _load_radio_news()
+    raw = '```json\n{"title": "T", "body": "B"}\n```'
+    assert rn._parse_rewrite(raw, "orig") == ("T", "B")
+
+
+def test_rn_parse_rewrite_garble_falls_back():
+    """Non-JSON reply → (original title, returned text) — never a crash."""
+    rn = _load_radio_news()
+    assert rn._parse_rewrite("not json at all", "orig") == ("orig", "not json at all")
+
+
+def test_rn_prime_rewrites_calls_gateway_once_per_piece(monkeypatch):
+    rn = _load_radio_news()
+    monkeypatch.delenv("RADIO_REWRITE", raising=False)
+    seen = []
+
+    def fake_gateway(system, user, **kw):
+        seen.append(user)
+        return '{"title": "CUT", "body": "broadcast line"}'
+
+    monkeypatch.setattr(rn, "_gateway", fake_gateway)
+    monkeypatch.setattr(rn, "_load_rewrite_gem", lambda: "GEM")
+    p = {"title": "Raw", "content": "Long web body"}
+    cache = rn._prime_rewrites([p, p])  # same object twice → deduped by id
+    assert cache[id(p)] == ("CUT", "broadcast line")
+    assert len(seen) == 1  # rewritten once, not twice
+    assert "Long web body" in seen[0] and "Raw" in seen[0]
+
+
+def test_rn_rewritten_flag_short_circuits(monkeypatch):
+    """Antigravity seam: a piece already marked ``rewritten`` is passed through
+    verbatim — no gem load, no gateway call (zero re-pay)."""
+    rn = _load_radio_news()
+    monkeypatch.delenv("RADIO_REWRITE", raising=False)
+
+    def boom(*a, **k):
+        raise AssertionError("gateway must NOT be called for a rewritten piece")
+
+    monkeypatch.setattr(rn, "_gateway", boom)
+    monkeypatch.setattr(rn, "_load_rewrite_gem", boom)
+    p = {"title": "Pre-done", "content": "already a cut", "rewritten": True}
+    assert rn._prime_rewrites([p])[id(p)] == ("Pre-done", "already a cut")
+
+
+def test_rn_rewrite_off_env_passthrough(monkeypatch):
+    """RADIO_REWRITE=off makes the whole pass a no-op → pytest stays offline."""
+    rn = _load_radio_news()
+    monkeypatch.setenv("RADIO_REWRITE", "off")
+
+    def boom(*a, **k):
+        raise AssertionError("gateway must NOT be called when RADIO_REWRITE=off")
+
+    monkeypatch.setattr(rn, "_gateway", boom)
+    monkeypatch.setattr(rn, "_load_rewrite_gem", boom)
+    p = {"title": "Raw", "content": "Long web body"}
+    assert rn._prime_rewrites([p])[id(p)] == ("Raw", "Long web body")
+
+
+def test_rn_prime_rewrites_gateway_down_aborts(monkeypatch):
+    """Gateway-availability failure inside the pre-pass exits nonzero (→502)
+    BEFORE any doc read/write — the fail-fast guarantee that the doc is never
+    half-filled. ``_gateway`` uses ``_fail_upstream`` = stderr + sys.exit(1)."""
+    rn = _load_radio_news()
+    monkeypatch.delenv("RADIO_REWRITE", raising=False)
+    monkeypatch.setattr(rn, "_load_rewrite_gem", lambda: "GEM")
+    monkeypatch.setattr(rn, "_omniroute_key", lambda: None)  # no key → _fail_upstream
+    with pytest.raises(SystemExit):
+        rn._prime_rewrites([{"title": "T", "content": "C"}])
+
+
+def test_rn_load_rewrite_gem_slices_role_section(monkeypatch):
+    """The gem loader returns only the ``## Role & Purpose`` body (up to the
+    first ``\\n---\\n``) — the Ben voice, not the Notes/frontmatter."""
+    rn = _load_radio_news()
+    monkeypatch.setenv("RADIO_REWRITE_GEM", str(radio_news.REWRITE_GEM))
+    gem = rn._load_rewrite_gem()
+    assert "Ben" in gem
+    assert "## Role & Purpose" not in gem  # heading itself sliced off
+    assert "## Notes" not in gem            # trailing notes excluded

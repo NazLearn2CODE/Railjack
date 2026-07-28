@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from pathlib import Path
 
 from fastapi import APIRouter, Body, HTTPException
@@ -20,6 +21,9 @@ router = APIRouter()
 
 SCRIPTS = Path.home() / "Cephalon" / "10-knowledge" / "skills" / "newsroom" / "scripts"
 RNEWS = SCRIPTS / "radio_news.py"
+# Editor Ben's broadcast-rewrite gem, sliced by the fill script at write time.
+# Passed explicitly (env) so the script never has to guess the repo location.
+REWRITE_GEM = Path(__file__).parent / "gems" / "radio-news-rewrite.md"
 # See newsroom.py: vault scripts carry no exec bit, deps live with system python3.
 PY = "python3"
 
@@ -29,6 +33,8 @@ async def _run(argv: list[str], timeout: float = 90,
     kwargs: dict = {"stdout": asyncio.subprocess.PIPE, "stderr": asyncio.subprocess.PIPE}
     if stdin is not None:
         kwargs["stdin"] = asyncio.subprocess.PIPE
+    # Inherit the hub env; point the child at the rewrite gem it slices.
+    kwargs["env"] = {**os.environ, "RADIO_REWRITE_GEM": str(REWRITE_GEM)}
     proc = await asyncio.create_subprocess_exec(*argv, **kwargs)
     try:
         out, err = await asyncio.wait_for(proc.communicate(stdin), timeout=timeout)
