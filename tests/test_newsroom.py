@@ -572,33 +572,73 @@ def test_rn_prime_rewrites_calls_gateway_once_per_piece(monkeypatch):
     rn = _load_radio_news()
     monkeypatch.delenv("RADIO_REWRITE", raising=False)
     seen = []
+    long_body = "broadcast line. " * 200  # >= MIN_WORDS so _rewrite accepts first try
 
     def fake_gateway(system, user, **kw):
         seen.append(user)
-        return '{"title": "CUT", "body": "broadcast line"}'
+        return '{"title": "CUT", "body": "%s"}' % long_body
 
     monkeypatch.setattr(rn, "_gateway", fake_gateway)
     monkeypatch.setattr(rn, "_load_rewrite_gem", lambda: "GEM")
     p = {"title": "Raw", "content": "Long web body"}
     cache = rn._prime_rewrites([p, p])  # same object twice → deduped by id
-    assert cache[id(p)] == ("CUT", "broadcast line")
+    assert cache[id(p)][0] == "CUT"
     assert len(seen) == 1  # rewritten once, not twice
     assert "Long web body" in seen[0] and "Raw" in seen[0]
 
 
 def test_rn_rewritten_flag_short_circuits(monkeypatch):
-    """Antigravity seam: a piece already marked ``rewritten`` is passed through
-    verbatim — no gem load, no gateway call (zero re-pay)."""
+    """Antigravity seam: a piece already marked ``rewritten`` AND long enough
+    (>= MIN_WORDS) is passed through verbatim — no gem load, no gateway call
+    (zero re-pay). A short pre-rewritten cut is re-expanded (see next test)."""
     rn = _load_radio_news()
     monkeypatch.delenv("RADIO_REWRITE", raising=False)
 
     def boom(*a, **k):
-        raise AssertionError("gateway must NOT be called for a rewritten piece")
+        raise AssertionError("gateway must NOT be called for a long rewritten piece")
 
     monkeypatch.setattr(rn, "_gateway", boom)
     monkeypatch.setattr(rn, "_load_rewrite_gem", boom)
-    p = {"title": "Pre-done", "content": "already a cut", "rewritten": True}
-    assert rn._prime_rewrites([p])[id(p)] == ("Pre-done", "already a cut")
+    long_cut = "already a broadcast cut. " * 50  # 250 words -> passes the floor
+    p = {"title": "Pre-done", "content": long_cut, "rewritten": True}
+    assert rn._prime_rewrites([p])[id(p)] == ("Pre-done", long_cut)
+
+
+def test_rn_rewritten_short_piece_is_reexpanded(monkeypatch):
+    """Safety net: a ``rewritten:true`` cut that came in UNDER the floor is
+    re-expanded locally rather than shipped short (LLMs under-count words, so a
+    thin Antigravity cut must not reach the slot)."""
+    rn = _load_radio_news()
+    monkeypatch.delenv("RADIO_REWRITE", raising=False)
+    calls = []
+
+    def fake_gateway(system, user, **kw):
+        calls.append(user)
+        return '{"title": "EXPANDED", "body": "%s"}' % ("expanded cut line. " * 200)
+
+    monkeypatch.setattr(rn, "_gateway", fake_gateway)
+    monkeypatch.setattr(rn, "_load_rewrite_gem", lambda: "GEM")
+    p = {"title": "Thin", "content": "way too short cut", "rewritten": True}
+    out = rn._prime_rewrites([p])[id(p)]
+    assert out[0] == "EXPANDED"
+    assert len(out[1].split()) >= rn.MIN_WORDS
+    assert len(calls) == 1
+
+
+def test_rn_rewrite_retries_for_length(monkeypatch):
+    """_rewrite retries until the body clears MIN_WORDS, nudging longer on later
+    attempts; returns the first >=floor body, not a short one."""
+    rn = _load_radio_news()
+    monkeypatch.delenv("RADIO_REWRITE", raising=False)
+    seq = iter([
+        '{"title": "T", "body": "%s"}' % ("short. " * 50),            # 50 words
+        '{"title": "T", "body": "%s"}' % ("longer cut. " * 210),      # 420 -> >= floor
+    ])
+
+    monkeypatch.setattr(rn, "_gateway", lambda system, user, **kw: next(seq))
+    monkeypatch.setattr(rn, "_load_rewrite_gem", lambda: "GEM")
+    t, body = rn._rewrite("orig", "source article body", "GEM")
+    assert len(body.split()) >= rn.MIN_WORDS
 
 
 def test_rn_rewrite_off_env_passthrough(monkeypatch):

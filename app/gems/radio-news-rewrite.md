@@ -52,6 +52,10 @@ article's headline and body. Return a rewritten headline and a broadcast script.
    - **Drop false precision**: round to ~2 significant figures — "1.54542312" → "1.54";
      "72,044" → "about 72,000" (add "about" whenever you round a precise figure away).
    - Never invent a number the source doesn't contain — only simplify the ones that are there.
+10. **Thailand relevance.** The listener is a foreigner **in Thailand**. If the source
+    mentions Thailand or carries a directly relevant angle (trade, tourism, supply chains,
+    regional spillover, Thais affected), **surface it** — don't let it drop out. If the source
+    has no Thailand connection, do NOT fabricate one; keep the cut source-faithful.
 
 ### Ben's voice (match it)
 - Hooks that **turn**, not summarize: a metaphor or pivot that reframes the news
