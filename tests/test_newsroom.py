@@ -171,7 +171,7 @@ def test_radio_dry_run_makes_no_network_calls(monkeypatch, capsys):
     assert out["counts"] == {"sheet": 1, "weekend": 10, "weekday": 21,
                              "planned": 32, "to_create": 32, "skipped": 0}
     assert out["created"] == []
-    assert out["to_create"][0] == {"name": "202608 August", "kind": "sheet"}
+    assert out["to_create"][0] == {"name": "202608_Rundown", "kind": "sheet"}
     assert len(out["to_create"]) == 32
 
 
@@ -181,13 +181,37 @@ def test_radio_dry_run_skips_existing(monkeypatch, capsys):
     monkeypatch.setattr(radio, "copy_file", lambda *a, **k: pytest.fail("write"))
     monkeypatch.setattr(radio, "find_month_folder",
                         lambda *a, **k: ("F", "202608 August"))
-    # the sheet already exists → idempotent skip.
+    # the sheet already exists → idempotent skip (sheet is now named YYYYMM_Rundown).
     monkeypatch.setattr(radio, "existing_names",
-                        lambda *a, **k: {"202608 August"})
+                        lambda *a, **k: {"202608_Rundown"})
     radio.main(["--year", "2026", "--month", "8", "--dry-run"])
     out = json.loads(capsys.readouterr().out)
     assert out["counts"]["to_create"] == 31
     assert out["counts"]["skipped"] == 1
+
+
+def test_radio_generate_stamps_calendar_per_doc(monkeypatch, capsys):
+    """Real (non-dry-run) generate stamps CALENDAR on every daily doc (not the
+    sheet), using the broadcast date convention 'Weekday, Month Nth, Year'."""
+    radio = _load_radio()
+    monkeypatch.setattr(radio, "find_month_folder",
+                        lambda *a, **k: ("F", "202608 August"))
+    monkeypatch.setattr(radio, "existing_names", lambda *a, **k: set())
+    monkeypatch.setattr(radio, "copy_file",
+                        lambda tid, name, fid: (f"id-{name}", name, "link"))
+    stamped = []
+    monkeypatch.setattr(radio, "replace_calendar",
+                        lambda doc_id, date_text: stamped.append((doc_id, date_text)))
+    radio.main(["--year", "2026", "--month", "8"])  # real run, no --dry-run
+    json.loads(capsys.readouterr().out)
+    # Aug 2026 = 31 days → 31 daily docs stamped; the 1 sheet is NOT stamped.
+    assert len(stamped) == 31
+    assert all("Script" in doc_id for doc_id, _ in stamped)
+    assert not any("Rundown" in doc_id for doc_id, _ in stamped)
+    # first daily doc = day 1; date text follows the broadcast convention.
+    assert "20260801" in stamped[0][0]
+    assert stamped[0][1] == radio.calendar_text("20260801")
+    assert stamped[0][1].endswith("2026")
 
 
 def test_radio_preview_argv(monkeypatch):
