@@ -31,8 +31,8 @@ RADIO = SCRIPTS / "radio.py"
 # The Rules Gem drives REWRITE (news-producer prompt → two-layer broadcast
 # script). ~/Gems is the office canonical copy; home has no ~/Gems, so the
 # vault-synced gem is the source here — _gem_text falls through to it.
-GEM = Path.home() / "Gems" / "news-producer-gem.md"
-GEM_FALLBACK = Path.home() / "Cephalon" / "10-knowledge" / "ai-workflow" / "gemini-gem-news-rules.md"
+BEN_GEM = Path(__file__).parent / "gems" / "radio-news-rewrite.md"
+SEO_GEM = Path.home() / "Cephalon" / "10-knowledge" / "ai-workflow" / "gemini-gem-thailandnow-seo.md"
 # Run via the system interpreter, not the scripts' shebang: vault files carry no
 # exec bit (git syncs can drop it — the Somatic original 500s on exactly this),
 # and the skill's deps live with the system python3, not Railjack's venv.
@@ -175,26 +175,53 @@ async def api_radio_generate(body: dict = Body(...)):
 
 
 def _gem_text() -> str:
-    for p in (GEM, GEM_FALLBACK):
-        if p.exists():
-            return p.read_text(encoding="utf-8")
-    raise HTTPException(500, "Rules Gem not found (looked in ~/Gems and the vault)")
+    """Load Ben's voice gem body (## Role & Purpose -> ### Output)."""
+    if not BEN_GEM.exists():
+        raise HTTPException(500, f"Ben gem not found at {BEN_GEM}")
+    md = BEN_GEM.read_text(encoding="utf-8")
+    marker = "## Role & Purpose"
+    i = md.find(marker)
+    if i < 0:
+        raise HTTPException(500, "Ben gem missing '## Role & Purpose'")
+    body = md[i:]
+    j = body.find("### Output")
+    if j >= 0:
+        body = body[:j]
+    return body.strip()
+
+
+def _seo_gem_text() -> str:
+    """Load Thailand NOW SEO gem body (Role & Purpose + House Style + Section 4 AI SEO Block rules)."""
+    if not SEO_GEM.exists():
+        raise HTTPException(500, f"SEO gem not found at {SEO_GEM}")
+    md = SEO_GEM.read_text(encoding="utf-8")
+    role_i = md.find("## Role & Purpose")
+    out_req_i = md.find("## Output Requirements")
+    block_i = md.find("### 4. AI SEO Block (2 versions)")
+    if role_i >= 0 and out_req_i >= 0 and block_i >= 0:
+        head = md[role_i:out_req_i]
+        end_sep = md.find("\n---\n\n## Thailand NOW Content", block_i)
+        block = md[block_i:end_sep] if end_sep >= 0 else md[block_i:]
+        return (head.strip() + "\n\n" + block.strip()).strip()
+    return md.strip()
 
 
 @router.post("/api/newsroom/rewrite")
 async def api_rewrite(body: dict = Body(...)):
-    """Run the Script-box text through the Rules Gem → finished two-layer script.
+    """Run the Script-box text through Ben's gem (broadcast prose + **name** markers)
+    and the Thailand NOW SEO gem (AI SEO Block Version A+B).
 
-    The override block restates the editorial non-negotiables on top of the gem:
-    source-only (no fact from training memory), and every person's name +
-    title/rank stays in the original Thai script. Returns ``{"rewritten": ...}``
-    for the panel's iframe."""
+    Returns ``{"rewritten": ..., "seo": ...}``."""
     text = (body.get("text") or "").strip()
     if not text:
         raise HTTPException(400, "nothing to rewrite — the Script box is empty")
-    prompt = (
+    ben_prompt = (
         _gem_text()
-        + "\n\n=== CRITICAL EDITORIAL RULE (overrides everything above) ===\n"
+        + "\n\n=== OUTPUT OVERRIDE (replaces JSON instructions) ===\n"
+        "Output the broadcast rewrite as readable prose (Ben's hard rules and voice still apply). "
+        "Do NOT output JSON. Wrap every person's NAME in **double-stars** (e.g. **นายกฯ**, **Anutin Charnvirakul**). "
+        "This is the ONLY markdown allowed. Output ONLY the rewritten broadcast prose. No JSON, no preamble, no commentary.\n\n"
+        "=== CRITICAL EDITORIAL RULE (overrides everything above) ===\n"
         "Use ONLY the information in the SOURCE ARTICLE below. Never add names, "
         "dates, ranks, titles, agencies, figures, locations, or any fact from your "
         "own knowledge or training. Specifically:\n"
@@ -206,15 +233,25 @@ async def api_rewrite(body: dict = Body(...)):
         "- Do NOT translate or transliterate any PERSON'S NAME or their TITLE/rank "
         "from Thai — leave every name and honorific in the ORIGINAL THAI SCRIPT "
         "exactly as the source writes it. Translate the rest of the story into "
-        "English as normal; the human writers render the names/titles themselves.\n"
-        "Output ONLY the finished two-layer script (broadcast layer, then `---`, "
-        "then the digital block). No preamble, no commentary.\n\n"
+        "English as normal; the human writers render the names/titles themselves.\n\n"
         "=== SOURCE ARTICLE ===\n" + text
     )
-    out = await zai.zai_message(prompt, max_tokens=9000, timeout=120)
-    if not out.strip():
+    seo_system = (
+        _seo_gem_text()
+        + "\n\n=== CRITICAL OUTPUT OVERRIDE ===\n"
+        "Produce ONLY the AI SEO Block — Version A (40-60w summary) + Version B (key points).\n"
+        "SKIP focus keyphrases, meta descriptions, and hashtags entirely. Do not output keyphrase lists or hashtags.\n"
+        "Output ONLY the AI SEO Block (Version A and Version B)."
+    )
+    out_ben, out_seo = await asyncio.gather(
+        zai.zai_message(ben_prompt, max_tokens=9000, timeout=120),
+        zai.zai_message(text, system=seo_system, max_tokens=4000, timeout=60),
+    )
+    if not out_ben.strip():
         raise HTTPException(502, "rewrite came back empty")
-    return {"rewritten": out}
+    if not out_seo.strip():
+        raise HTTPException(502, "seo generation came back empty")
+    return {"rewritten": out_ben, "seo": out_seo}
 
 
 # ---------------------------------------------------------------- health

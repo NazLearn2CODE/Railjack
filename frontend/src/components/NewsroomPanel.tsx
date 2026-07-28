@@ -24,6 +24,31 @@ const rewriteDoc = (body: string, muted = false) =>
   `font:17px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace;` +
   `white-space:pre-wrap;word-wrap:break-word}</style></head><body>${escapeHtml(body)}</body></html>`;
 
+const renderRewritePreview = (text: string, seoBlock: string) => {
+  // Convert **name** to <strong>name</strong>, escaping everything else
+  const htmlText = text
+    .split(/(\*\*[^*]+\*\*)/g)
+    .map((part) => {
+      if (part.startsWith("**") && part.endsWith("**")) {
+        const name = part.slice(2, -2);
+        return `<strong>${escapeHtml(name)}</strong>`;
+      }
+      return escapeHtml(part);
+    })
+    .join("");
+
+  const seoHtml = seoBlock
+    ? `<div style="margin-top:16px;border-top:1px solid #445566;padding-top:12px;color:#8fa5b8"><div style="font-weight:600;margin-bottom:8px">AI SEO BLOCK</div><div style="white-space:pre-wrap;font-size:15px">${escapeHtml(seoBlock)}</div></div>`
+    : "";
+
+  return (
+    `<!doctype html><html><head><meta charset="utf-8"><style>` +
+    `body{margin:0;padding:12px;background:#0b0f14;color:#c8d3df;font:17px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre-wrap;word-wrap:break-word}` +
+    `strong{color:#7dd3fc;font-weight:600}` +
+    `</style></head><body>${htmlText}${seoHtml}</body></html>`
+  );
+};
+
 interface Story {
   id: string;
   date: string;
@@ -160,6 +185,7 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
   const [sending, setSending] = useState(false);
   const [loading, setLoading] = useState(false);
   const [rewritten, setRewritten] = useState("");
+  const [seo, setSeo] = useState("");
   const [rewriting, setRewriting] = useState(false);
 
   // RADIO mode toggle: Document Generator (docgen) vs News Fill (newsfill)
@@ -563,6 +589,7 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
     if (!selected || !sendText.trim()) return;
     setRewriting(true);
     setRewritten("");
+    setSeo("");
     setError(null);
     try {
       const res = await fetch("/api/newsroom/rewrite", {
@@ -576,6 +603,7 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
       } else {
         const d = await res.json().catch(() => ({}));
         setRewritten(d.rewritten || "");
+        setSeo(d.seo || "");
       }
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : String(e));
@@ -750,7 +778,7 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
                       </div>
                       <iframe
                         title="rewritten article"
-                        srcDoc={rewriting ? rewriteDoc("processing rewrite…", true) : rewriteDoc(rewritten)}
+                        srcDoc={rewriting ? rewriteDoc("processing rewrite…", true) : renderRewritePreview(rewritten, seo)}
                         style={{
                           width: "100%",
                           minHeight: 140,

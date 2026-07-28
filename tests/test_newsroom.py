@@ -842,3 +842,114 @@ def test_df_format_route_argv(monkeypatch):
 def test_df_format_route_requires_doc_id(monkeypatch):
     c, _, _ = _rn_client(monkeypatch)
     assert c.post("/api/newsroom/format/apply", json={}).status_code == 400
+
+
+# ---------------------------------------------------------------- rewrite (Ben + SEO)
+
+
+def test_rewrite_success_and_prompt_assembly(monkeypatch):
+    """POST /api/newsroom/rewrite loads Ben's gem (not news-producer), includes
+    the Thai-name rule, instructs **name** markers, fires a separate SEO call
+    with AI Block Version A+B override, and returns {"rewritten", "seo"}."""
+    calls = []
+
+    async def fake_zai_message(prompt: str, max_tokens: int = 400, system: str | None = None, model: str | None = None, timeout: float = 30.0) -> str:
+        calls.append({"prompt": prompt, "system": system, "max_tokens": max_tokens})
+        if system:
+            return "### Version A — AI Summary\nSummary text.\n\n### Version B — AI Key Points\n- WHAT: Fact."
+        return "This is broadcast prose by **Ben** mentioning **นายกฯ**."
+
+    monkeypatch.setattr(newsroom.zai, "zai_message", fake_zai_message)
+    app = FastAPI()
+    app.include_router(newsroom.router)
+    client = TestClient(app)
+
+    r = client.post("/api/newsroom/rewrite", json={"text": "Prime Minister **นายกฯ** spoke on January 5, 2026."})
+    assert r.status_code == 200
+    data = r.json()
+    assert "rewritten" in data and "seo" in data
+    assert "broadcast prose" in data["rewritten"]
+    assert "Version A" in data["seo"]
+
+    assert len(calls) == 2
+    ben_call = [c for c in calls if not c["system"]][0]
+    seo_call = [c for c in calls if c["system"]][0]
+
+    # Ben call asserts:
+    assert "editor of Thailand NOW" in ben_call["prompt"]  # Ben's gem body
+    assert "ORIGINAL THAI SCRIPT" in ben_call["prompt"]     # Thai-name rule
+    assert "**double-stars**" in ben_call["prompt"]         # Output override (name markers)
+
+    # SEO call asserts:
+    assert "AI SEO Block" in seo_call["system"]             # SEO gem body
+    assert "Version A (40-60w summary)" in seo_call["system"]  # A+B override
+
+
+def test_rewrite_requires_text(monkeypatch):
+    app = FastAPI()
+    app.include_router(newsroom.router)
+    client = TestClient(app)
+    r = client.post("/api/newsroom/rewrite", json={"text": "   "})
+    assert r.status_code == 400
+
+
+def test_rewrite_empty_output_raises_502(monkeypatch):
+    async def fake_empty(*a, **k):
+        return ""
+
+    monkeypatch.setattr(newsroom.zai, "zai_message", fake_empty)
+    app = FastAPI()
+    app.include_router(newsroom.router)
+    client = TestClient(app)
+    r = client.post("/api/newsroom/rewrite", json={"text": "Article text"})
+    assert r.status_code == 502
+
+
+def _load_nl_append():
+    import importlib.util
+
+    for p in (newsroom.SCRIPTS / "nl_append.py",
+              Path.home() / ".claude" / "skills" / "newsroom" / "scripts" / "nl_append.py"):
+        if p.exists():
+            spec = importlib.util.spec_from_file_location("nl_append_mod", p)
+            mod = importlib.util.module_from_spec(spec)
+            assert spec.loader is not None
+            spec.loader.exec_module(mod)
+            return mod
+    pytest.skip("nl_append.py not found on a skill path")
+
+
+def test_nl_append_emits_bold_and_underline_spans(monkeypatch):
+    """nl_append unit test: **Name** produces bold span, date produces underline span."""
+    nl = _load_nl_append()
+    doc_posted = []
+
+    def fake_nl_tab(tok, doc_id):
+        return "t.0", 100
+
+    def fake_api(method, url, tok, body=None):
+        if method == "POST":
+            doc_posted.append(body)
+        return {}
+
+    monkeypatch.setattr(nl, "nl_tab", fake_nl_tab)
+    monkeypatch.setattr(nl, "api", fake_api)
+
+    nl.append("tok", "DOC_ID", "Prime Minister **นายกฯ** spoke on January 5, 2026.", dry=False)
+
+    assert len(doc_posted) == 1
+    reqs = doc_posted[0]["requests"]
+
+    # Check insertText
+    ins = [r for r in reqs if "insertText" in r][0]
+    assert ins["insertText"]["location"]["tabId"] == "t.0"
+    assert "**" not in ins["insertText"]["text"]  # markers stripped
+
+    # Check bold style request
+    bold_reqs = [r for r in reqs if r.get("updateTextStyle", {}).get("fields") == "bold" and r["updateTextStyle"]["textStyle"].get("bold")]
+    assert len(bold_reqs) == 1
+
+    # Check underline style request
+    underline_reqs = [r for r in reqs if r.get("updateTextStyle", {}).get("fields") == "underline" and r["updateTextStyle"]["textStyle"].get("underline")]
+    assert len(underline_reqs) == 1
+
