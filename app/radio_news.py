@@ -21,9 +21,12 @@ router = APIRouter()
 
 SCRIPTS = Path.home() / "Cephalon" / "10-knowledge" / "skills" / "newsroom" / "scripts"
 RNEWS = SCRIPTS / "radio_news.py"
+DFORMAT = SCRIPTS / "doc_format.py"
 # Editor Ben's broadcast-rewrite gem, sliced by the fill script at write time.
 # Passed explicitly (env) so the script never has to guess the repo location.
 REWRITE_GEM = Path(__file__).parent / "gems" / "radio-news-rewrite.md"
+# Person-name tagger gem for the reusable publication-formatting pass.
+FORMAT_GEM = Path(__file__).parent / "gems" / "doc-format-entities.md"
 # See newsroom.py: vault scripts carry no exec bit, deps live with system python3.
 PY = "python3"
 
@@ -33,8 +36,11 @@ async def _run(argv: list[str], timeout: float = 90,
     kwargs: dict = {"stdout": asyncio.subprocess.PIPE, "stderr": asyncio.subprocess.PIPE}
     if stdin is not None:
         kwargs["stdin"] = asyncio.subprocess.PIPE
-    # Inherit the hub env; point the child at the rewrite gem it slices.
-    kwargs["env"] = {**os.environ, "RADIO_REWRITE_GEM": str(REWRITE_GEM)}
+    # Inherit the hub env; point each child at the gem(s) it slices. Passing
+    # both is harmless — each script reads only the var it needs.
+    kwargs["env"] = {**os.environ,
+                     "RADIO_REWRITE_GEM": str(REWRITE_GEM),
+                     "DOC_FORMAT_GEM": str(FORMAT_GEM)}
     proc = await asyncio.create_subprocess_exec(*argv, **kwargs)
     try:
         out, err = await asyncio.wait_for(proc.communicate(stdin), timeout=timeout)
@@ -134,3 +140,21 @@ async def api_autofill(body: dict = Body(...)):
     argv = [PY, str(RNEWS), "autofill", "--doc", str(doc_id),
             "--kind", str(kind), "--category", str(category)]
     return await _script(argv, timeout=180)
+
+
+# ---------------------------------------------------------------- format (polish)
+
+
+@router.post("/api/newsroom/format/apply")
+async def api_format(body: dict = Body(...)):
+    """Publication polish — bold people names + underline dates across the doc's
+    tabs (or one ``tab``). Reusable beyond RADIO; idempotent (safe re-run). Gem
+    path is handed to the child via env. 120s covers a batchUpdate per tab."""
+    doc_id = body.get("doc_id")
+    if not doc_id:
+        raise HTTPException(400, "doc_id is required")
+    argv = [PY, str(DFORMAT), "--doc", str(doc_id)]
+    tab = body.get("tab")
+    if tab:
+        argv += ["--tab", str(tab)]
+    return await _script(argv, timeout=120)

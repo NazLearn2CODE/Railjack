@@ -584,3 +584,133 @@ def test_rn_load_rewrite_gem_slices_role_section(monkeypatch):
     assert "Ben" in gem
     assert "## Role & Purpose" not in gem  # heading itself sliced off
     assert "## Notes" not in gem            # trailing notes excluded
+
+
+# ---------------------------------------------------------------- doc_format
+# Publication-formatting pass: bold people names (glm-5 gem) + underline dates
+# (regex). Pure helpers are tested directly; the gateway stays offline via
+# monkeypatch, and the route rides radio_news.router (so _rn_client mounts it).
+
+
+def _load_doc_format():
+    import importlib.util
+
+    for p in (newsroom.SCRIPTS / "doc_format.py",
+              Path.home() / ".claude" / "skills" / "newsroom" / "scripts" / "doc_format.py"):
+        if p.exists():
+            spec = importlib.util.spec_from_file_location("doc_format_mod", p)
+            mod = importlib.util.module_from_spec(spec)
+            assert spec.loader is not None
+            spec.loader.exec_module(mod)
+            return mod
+    pytest.skip("doc_format.py not on a skill path yet (canonical writes pending)")
+
+
+def _df_para(text, start):
+    return {"paragraph": {"elements": [{"startIndex": start, "textRun": {"content": text}}]}}
+
+
+def test_df_find_dates_variants():
+    df = _load_doc_format()
+    got = lambda s: [m for _, _, m in df.find_dates(s)]
+    assert got("filed January 5, 2026 in Bangkok") == ["January 5, 2026"]
+    assert got("on 5 January the vote held") == ["5 January"]
+    assert got("dated 2026-07-28 today") == ["2026-07-28"]
+    assert got("the Sep 3 2025 summit") == ["Sep 3 2025"]
+    # lowercase month word as an ordinary verb must NOT match (case-sensitive +
+    # a day number is required next to a capitalised month).
+    assert got("they may go march soon") == []
+
+
+def test_df_name_spans_all_occurrences():
+    df = _load_doc_format()
+    parts = df._para_runs(_df_para("Prabowo met Prabowo again\n", 1))
+    spans = df._name_spans_in(parts, "Prabowo")
+    assert len(spans) == 2               # every occurrence styled
+    assert spans[0] == (1, 8)            # abs [start, end) of first hit
+    assert spans[1][0] == 13
+
+
+def test_df_parse_names():
+    df = _load_doc_format()
+    assert df.parse_names('["Maris", "Prabowo"]') == ["Maris", "Prabowo"]
+    assert df.parse_names('```json\n["A"]\n```') == ["A"]   # fence tolerated
+    assert df.parse_names('["A", "A", "B"]') == ["A", "B"]  # deduped, order kept
+    assert df.parse_names("not json") == []
+    assert df.parse_names('{"not": "a list"}') == []
+
+
+def test_df_plan_tab_tab_scoped_fields():
+    """Every updateTextStyle carries the tab's tabId and the single field it
+    sets (bold XOR underline) — a missing tabId writes into the wrong tab, a
+    wrong ``fields`` mask clobbers unrelated styling."""
+    df = _load_doc_format()
+    meta = {"tab_id": "t.0",
+            "paras": [_df_para("Prabowo met on January 5, 2026.\n", 1)]}
+    reqs, underlined, bolded = df.plan_tab(meta, ["Prabowo"])
+    assert "January 5, 2026" in underlined
+    assert "Prabowo" in bolded
+    for r in reqs:
+        rng = r["updateTextStyle"]["range"]
+        assert rng["tabId"] == "t.0"
+    unders = [r for r in reqs if r["updateTextStyle"]["fields"] == "underline"]
+    bolds = [r for r in reqs if r["updateTextStyle"]["fields"] == "bold"]
+    assert len(unders) == 1 and unders[0]["updateTextStyle"]["textStyle"]["underline"] is True
+    assert len(bolds) == 1 and bolds[0]["updateTextStyle"]["textStyle"]["bold"] is True
+    assert bolds[0]["updateTextStyle"]["range"]["startIndex"] == 1  # 'Prabowo' at doc start
+
+
+def test_df_format_doc_gateway_down_degrades(monkeypatch):
+    """Gateway-down is NOT fail-fast here (unlike the rewrite): dates still get
+    underlined, names are skipped, and the doc is written — the entity gem's own
+    contract. Proves the date channel is independent of the name channel."""
+    df = _load_doc_format()
+    doc = {"tabs": [{
+        "tabProperties": {"title": "AM", "tabId": "t.0"},
+        "documentTab": {"body": {"content": [
+            _df_para("Maris spoke on 2026-07-28 today\n", 1)]}},
+    }]}
+    sent = []
+    monkeypatch.setattr(df, "_get", lambda tok, url: doc)
+    monkeypatch.setattr(df, "_post", lambda tok, url, body: sent.append(body) or {})
+    monkeypatch.setattr(df, "_load_entities_gem", lambda: "GEM")
+
+    def down(*a, **k):
+        raise df.GatewayDown("gateway unreachable")
+
+    monkeypatch.setattr(df, "_gateway", down)
+    res = df.format_doc("tok", "DOC1")
+    assert res["names_skipped"] is True
+    assert res["bolded"] == []
+    assert res["underlined"] == ["2026-07-28"]
+    # one batchUpdate carrying only the underline request
+    assert len(sent) == 1
+    reqs = sent[0]["requests"]
+    assert all(r["updateTextStyle"]["fields"] == "underline" for r in reqs)
+
+
+def test_df_load_entities_gem_slices_role_section(monkeypatch):
+    df = _load_doc_format()
+    monkeypatch.setenv("DOC_FORMAT_GEM", str(radio_news.FORMAT_GEM))
+    gem = df._load_entities_gem()
+    assert "person" in gem.lower()          # the role body
+    assert "## Role & Purpose" not in gem   # heading sliced off
+    assert "## Notes" not in gem            # trailing notes excluded
+
+
+def test_df_format_route_argv(monkeypatch):
+    c, calls, _ = _rn_client(monkeypatch, out=b'{"doc_id": "D", "tabs": [], '
+                             b'"bolded": [], "underlined": [], "names_skipped": false}')
+    r = c.post("/api/newsroom/format/apply", json={"doc_id": "D"})
+    assert r.status_code == 200
+    assert calls[0][1:] == [str(radio_news.DFORMAT), "--doc", "D"]
+    # optional tab passes through
+    c2, calls2, _ = _rn_client(monkeypatch, out=b'{"doc_id": "D", "tabs": [], '
+                               b'"bolded": [], "underlined": [], "names_skipped": false}')
+    c2.post("/api/newsroom/format/apply", json={"doc_id": "D", "tab": "AM"})
+    assert calls2[0][1:] == [str(radio_news.DFORMAT), "--doc", "D", "--tab", "AM"]
+
+
+def test_df_format_route_requires_doc_id(monkeypatch):
+    c, _, _ = _rn_client(monkeypatch)
+    assert c.post("/api/newsroom/format/apply", json={}).status_code == 400

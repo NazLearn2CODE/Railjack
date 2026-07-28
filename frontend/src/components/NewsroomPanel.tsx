@@ -137,6 +137,14 @@ interface NewsFillApplyResponse {
   picked?: number;
 }
 
+interface NewsFormatResponse {
+  doc_id: string;
+  tabs: string[];
+  bolded: string[];
+  underlined: string[];
+  names_skipped: boolean;
+}
+
 const CT: Record<string, string> = { "content-type": "application/json" };
 
 export default function NewsroomPanel({ module: _module }: { module: ModuleConfig }) {
@@ -186,6 +194,9 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
   // Cheap lane: exact-count scout + one-click autopilot (no human curation)
   const [newsCheapScouting, setNewsCheapScouting] = useState<boolean>(false);
   const [newsAutopiloting, setNewsAutopiloting] = useState<boolean>(false);
+  // Publication polish — bold names + underline dates on the selected doc.
+  const [newsFormatting, setNewsFormatting] = useState<boolean>(false);
+  const [newsFormatResult, setNewsFormatResult] = useState<NewsFormatResponse | null>(null);
 
   const handleRadioPreview = async () => {
     setRadioLoading(true);
@@ -427,6 +438,34 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setNewsAutopiloting(false);
+    }
+  };
+
+  // FORMAT — publication polish on the selected doc, standalone (no chaining):
+  // bold people names + underline dates across its tabs. Idempotent, so it is
+  // safe to press after APPLY/AUTOPILOT or on its own.
+  const handleFormat = async () => {
+    if (!selectedDoc) return;
+    setNewsFormatting(true);
+    setError(null);
+    setNewsFormatResult(null);
+    try {
+      const res = await fetch("/api/newsroom/format/apply", {
+        method: "POST",
+        headers: CT,
+        body: JSON.stringify({ doc_id: selectedDoc.id }),
+      });
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({ detail: res.statusText }));
+        setError(typeof d.detail === "string" ? d.detail : JSON.stringify(d.detail));
+      } else {
+        const data: NewsFormatResponse = await res.json();
+        setNewsFormatResult(data);
+      }
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setNewsFormatting(false);
     }
   };
 
@@ -1136,14 +1175,42 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
                     </div>
                   )}
                 </div>
-                <button
-                  className="btn btn--compact btn--signal ml-auto"
-                  onClick={() => void handleNewsApply()}
-                  disabled={!isConfirmEnabled}
-                  title={!isConfirmEnabled ? "Target hard picks and required slice pick must be met" : "Apply selected pieces to target document"}
-                >
-                  {newsApplying ? "APPLYING…" : "CONFIRM & APPLY TO DOC"}
-                </button>
+                <div className="ml-auto flex items-center gap-2">
+                  {newsFormatResult && (
+                    <span
+                      className="mono text-xs"
+                      style={{ color: "var(--color-go)" }}
+                      title={
+                        newsFormatResult.names_skipped
+                          ? "gateway down — dates underlined, names skipped"
+                          : "publication polish applied"
+                      }
+                    >
+                      ✓ {newsFormatResult.bolded.length} bold · {newsFormatResult.underlined.length} underline
+                      {newsFormatResult.names_skipped ? " (names skipped)" : ""}
+                    </span>
+                  )}
+                  <button
+                    className="btn btn--compact"
+                    onClick={() => void handleFormat()}
+                    disabled={!selectedDoc || newsFormatting}
+                    title={
+                      selectedDoc
+                        ? "Bold people names + underline dates on this doc (idempotent)"
+                        : "Pick a script doc first"
+                    }
+                  >
+                    {newsFormatting ? "FORMATTING…" : "FORMAT"}
+                  </button>
+                  <button
+                    className="btn btn--compact btn--signal"
+                    onClick={() => void handleNewsApply()}
+                    disabled={!isConfirmEnabled}
+                    title={!isConfirmEnabled ? "Target hard picks and required slice pick must be met" : "Apply selected pieces to target document"}
+                  >
+                    {newsApplying ? "APPLYING…" : "CONFIRM & APPLY TO DOC"}
+                  </button>
+                </div>
               </div>
 
               {/* News Fill Content Area (Checklist & Results) */}

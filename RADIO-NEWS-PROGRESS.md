@@ -149,10 +149,30 @@ Two features Naz added on top of the refinements, both for max token economy. **
   reads `AUTOPILOT FILLED (N picked)` vs `APPLIED`; SEA-led slots get a `SEA` badge. Both disabled
   until a doc is picked. `tsc --noEmit` + `vite build` exit 0.
 
+### CP2 — glm-5 Ben-voice rewrite (DONE + host-verified, 2026-07-28, `bfa0ef1`)
+- Rewrite seam in `radio_news.py`: `_rewrite`/`_gateway`/`_parse_rewrite`/`_prime_rewrites` — every
+  assigned piece is rewritten via the OmniRoute gateway (`naz-backup`) into a <=250-word broadcast
+  cut **before** the doc is read (fail-fast: gateway down ⇒ 502, doc untouched, no half-fill).
+- Short-circuits: `rewritten:true` (Antigravity ultra-cheap seam) + `RADIO_REWRITE=off` (offline
+  tests) make zero gateway/gem contact. `strict=False` parse (body carries literal `\n`).
+- Gem `app/gems/radio-news-rewrite.md` (Editor Ben's voice); app wrapper passes `RADIO_REWRITE_GEM`.
+- 41 tests green; live seam verified end-to-end (sample article → 88w broadcast cut, no subheads).
+
+### CP3 — publication-formatting pass (DONE + host-verified, 2026-07-28)
+- NEW reusable script `newsroom/scripts/doc_format.py` (stdlib urllib): bolds **people names**
+  (glm-5 `app/gems/doc-format-entities.md`) + underlines **dates** (regex: month-day / day-month /
+  ISO). One tab-scoped `batchUpdate` per tab; idempotent. Gateway-down **degrades** (dates still
+  underlined, names skipped, 200 + `names_skipped:true`) — NOT fail-fast, per the gem's contract.
+- Route `POST /api/newsroom/format/apply {doc_id, tab?}` (120s). FORMAT button in the News Fill
+  status row (standalone, renders bold/underline counts). `tsc + vite build` exit 0. 49 tests green.
+- Known quirk (pre-existing, shared `_script` wrapper, NOT CP3): a `_fatal` exits nonzero so the
+  `rc!=0 → 502` branch beats the `_json → 400` path — script config/validation errors surface as 502,
+  not 400. Message is preserved either way; flagged, not fixed (out of scope).
+
 ### Pending
-- **Human gate:** live end-to-end auto-fill of a real doc (CHEAP SCOUT → Enter → AUTOPILOT) — can't
-  be host-driven.
-- **Still deferred:** the glm-5 content rewrite in `process()` (the "big fish").
+- **Human gate (Naz):** live end-to-end on a real weekday doc — CHEAP SCOUT → AUTOPILOT → FORMAT,
+  eyeball the broadcast copy + bold/underline polish. Can't be host-driven.
+- **Known:** the `_script` 502-vs-400 quirk above (cosmetic; fix when a client needs the distinction).
 
 ### Backlog — ULTRA CHEAP mode (after the rewrite; Naz, 2026-07-28)
 - Offload the scout itself off the metered Claude session: send the scout **or** cheap-scout
