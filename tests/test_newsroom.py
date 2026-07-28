@@ -1042,3 +1042,325 @@ def test_nl_append_marker_date_not_doubled_by_backstop(monkeypatch):
     ]
     # Dedup keeps it to 1 span (marker wins; backstop is suppressed for same start)
     assert len(underline_reqs) == 1
+
+
+# ---------------------------------------------------------------- Phase 2 tests
+# docfill.py + find_today_doc exact-match fix + fill_nl_slot + find_day_doc
+
+
+def _load_nl_append_fresh():
+    """Load nl_append with docfill importable (same scripts/ dir)."""
+    import importlib.util
+    import sys as _sys
+
+    scripts_dir = newsroom.SCRIPTS
+    # Ensure docfill is findable from the same dir as nl_append
+    if str(scripts_dir) not in _sys.path:
+        _sys.path.insert(0, str(scripts_dir))
+
+    for p in (scripts_dir / "nl_append.py",
+              Path.home() / ".claude" / "skills" / "newsroom" / "scripts" / "nl_append.py"):
+        if p.exists():
+            spec = importlib.util.spec_from_file_location("nl_append_fresh", p)
+            mod = importlib.util.module_from_spec(spec)
+            assert spec.loader is not None
+            spec.loader.exec_module(mod)
+            return mod
+    pytest.skip("nl_append.py not found")
+
+
+def _load_docfill():
+    import importlib.util
+    import sys as _sys
+
+    for p in (newsroom.SCRIPTS / "docfill.py",
+              Path.home() / ".claude" / "skills" / "newsroom" / "scripts" / "docfill.py"):
+        if p.exists():
+            if str(p.parent) not in _sys.path:
+                _sys.path.insert(0, str(p.parent))
+            spec = importlib.util.spec_from_file_location("docfill_mod", p)
+            mod = importlib.util.module_from_spec(spec)
+            assert spec.loader is not None
+            spec.loader.exec_module(mod)
+            return mod
+    pytest.skip("docfill.py not found")
+
+
+def test_phase2_find_today_doc_exact_match(monkeypatch):
+    """find_today_doc MUST use exact name = 'NL & NWB DDMMYY' and return ONLY
+    the 4-tab rundown doc — NOT the 'RUNDOWN NL-NWB' brief that the old
+    'contains' query also matched."""
+    nl = _load_nl_append_fresh()
+
+    # Simulate Drive returning both the correct doc AND the wrong decoy.
+    both_files = [
+        {"id": "CORRECT_ID", "name": "NL & NWB 280726"},
+        {"id": "WRONG_ID",   "name": "RUNDOWN NL-NWB 280726"},
+    ]
+    captured_query = []
+
+    def fake_api(method, url, tok, body=None):
+        captured_query.append(url)
+        return {"files": both_files}
+
+    monkeypatch.setattr(nl, "api", fake_api)
+
+    doc_id, name = nl.find_today_doc("tok", "280726")
+    # Must return the first result (exact match returns only the right doc first)
+    assert doc_id == "CORRECT_ID"
+    assert name == "NL & NWB 280726"
+
+    # The query must use exact equality, not 'contains'
+    assert captured_query, "no API call was made"
+    q_url = captured_query[0]
+    # The Drive API v3 query string is URL-encoded; `name = '...'` becomes
+    # `name+%3D+%27...%27` or `name%20%3D%20%27...%27`. Check both forms.
+    import urllib.parse as _up
+    decoded_q = _up.unquote_plus(q_url)
+    assert "name = " in decoded_q, (
+        "find_today_doc must use exact `name = '...'` predicate, not `contains`; "
+        f"got: {decoded_q!r}"
+    )
+    assert "contains" not in decoded_q, (
+        "find_today_doc must NOT use `contains` (it matches the wrong RUNDOWN doc); "
+        f"got: {decoded_q!r}"
+    )
+
+
+def test_phase2_docfill_parse_markers_single_pass():
+    """parse_markers single-pass correctness: a **name** AFTER a -/date/-
+    must still bold the name at the right offset (the Phase-1 regression)."""
+    df = _load_docfill()
+    text = "On -/July 28, 2026/-, **Anutin** spoke."
+    plain, bolds, underlines = df.parse_markers(text)
+
+    # Plain text has no markers
+    assert "**" not in plain
+    assert "-/" not in plain
+    assert "July 28, 2026" in plain
+    assert "Anutin" in plain
+
+    # Bold span must cover exactly "Anutin"
+    assert len(bolds) == 1
+    s, e = bolds[0]
+    assert plain[s:e] == "Anutin", (
+        f"bold span misaligned: got {plain[s:e]!r} instead of 'Anutin'"
+    )
+
+    # Underline span must cover "July 28, 2026"
+    assert len(underlines) == 1
+    us, ue = underlines[0]
+    assert plain[us:ue] == "July 28, 2026"
+
+
+def test_phase2_build_fill_requests_structure():
+    """build_fill_requests must produce [insertText, clear-bold, bold..., underline...]
+    with correct tab scoping and aligned absolute indices."""
+    df = _load_docfill()
+    at = 50
+    plain = "On July 28, Anutin spoke."
+    # Simulate: bold [14, 20) = "Anutin", underline [3, 10) = "July 28"
+    bolds = [(14, 20)]
+    underlines = [(3, 10)]
+    tab_id = "t.1"
+
+    reqs = df.build_fill_requests(tab_id, at, plain, bolds, underlines)
+
+    # Structure: insertText, clear-bold, bold spans, underline spans
+    assert reqs[0]["insertText"]["location"] == {"index": at, "tabId": tab_id}
+    assert reqs[0]["insertText"]["text"] == plain
+
+    clear_bold = reqs[1]
+    assert clear_bold["updateTextStyle"]["textStyle"]["bold"] is False
+    assert clear_bold["updateTextStyle"]["range"]["startIndex"] == at
+    assert clear_bold["updateTextStyle"]["range"]["endIndex"] == at + len(plain)
+
+    bold_req = reqs[2]
+    assert bold_req["updateTextStyle"]["textStyle"]["bold"] is True
+    assert bold_req["updateTextStyle"]["range"]["startIndex"] == at + 14
+    assert bold_req["updateTextStyle"]["range"]["endIndex"] == at + 20
+
+    underline_req = reqs[3]
+    assert underline_req["updateTextStyle"]["textStyle"]["underline"] is True
+    assert underline_req["updateTextStyle"]["range"]["startIndex"] == at + 3
+    assert underline_req["updateTextStyle"]["range"]["endIndex"] == at + 10
+
+
+def test_phase2_fill_nl_slot_requests(monkeypatch):
+    """fill_nl_slot end-to-end: builds correct batchUpdate with delete + insert
+    + clear-bold + bold/underline spans. Regression: **name** after -/date/-
+    must bold the name, not shifted bytes."""
+    nl = _load_nl_append_fresh()
+    if not nl._DOCFILL:
+        pytest.skip("docfill not importable in this environment")
+
+    posted = []
+
+    def fake_find_tab(tok, doc_id, title=None):
+        return "t.0", 999  # (tab_id, end_unused)
+
+    heading_resp = {
+        "startIndex": 10,
+        "endIndex": 25,
+        "text": "3. Royal Birthday",
+        "next_start": 200,
+    }
+
+    def fake_find_heading(api_get, doc_id, tab_id, match):
+        return heading_resp
+
+    def fake_api(method, url, tok, body=None):
+        if method == "POST":
+            posted.append(body)
+        return {}
+
+    monkeypatch.setattr(nl, "find_tab", fake_find_tab)
+    monkeypatch.setattr(nl, "find_heading", fake_find_heading)
+    monkeypatch.setattr(nl, "api", fake_api)
+
+    # Text with -/date/- BEFORE **name** — the regression ordering
+    nl.fill_nl_slot("tok", "DOC", "NL RUNDOWN", 3,
+                    "On -/July 28, 2026/-, **Anutin** spoke.", dry=False)
+
+    assert posted, "expected a batchUpdate POST"
+    reqs = posted[0]["requests"]
+
+    # First request must be deleteContentRange for slot body [25, 200)
+    dele = reqs[0]
+    assert "deleteContentRange" in dele
+    rng = dele["deleteContentRange"]["range"]
+    assert rng["startIndex"] == 25   # h.endIndex
+    assert rng["endIndex"] == 200    # h.next_start
+
+    # Second request: insertText at h.endIndex
+    ins = reqs[1]
+    assert "insertText" in ins
+    assert ins["insertText"]["location"]["index"] == 25
+    plain = ins["insertText"]["text"]
+    assert "**" not in plain
+    assert "Anutin" in plain
+
+    # Bold span must cover "Anutin" (not shifted by the preceding date marker)
+    bold_reqs = [
+        r for r in reqs
+        if r.get("updateTextStyle", {}).get("fields") == "bold"
+        and r["updateTextStyle"]["textStyle"].get("bold")
+    ]
+    assert bold_reqs, "expected at least one bold span"
+    rng = bold_reqs[0]["updateTextStyle"]["range"]
+    s = rng["startIndex"] - 25   # subtract insert offset to get plain index
+    e = rng["endIndex"] - 25
+    assert plain[s:e] == "Anutin", (
+        f"bold span misaligned after -/date/-: got {plain[s:e]!r}"
+    )
+
+
+def test_phase2_find_day_doc_weekday_vs_weekend(monkeypatch):
+    """find_day_doc picks Weekend Script on Sat/Sun, Weekday Script Mon-Fri."""
+    radio = _load_radio()
+
+    def fake_find_month_folder(*a, **k):
+        return ("FOLDER_ID", "202607 July")
+
+    files_in_folder = [
+        {"id": "WD_ID", "name": "20260727_Weekday Script"},   # 2026-07-27 = Mon
+        {"id": "WE_ID", "name": "20260726_Weekend Script"},   # 2026-07-26 = Sun
+    ]
+
+    def fake_api(method, url, params=None, body=None):
+        return {"files": files_in_folder}
+
+    monkeypatch.setattr(radio, "find_month_folder", fake_find_month_folder)
+    monkeypatch.setattr(radio, "_api", fake_api)
+
+    # Monday 2026-07-27 → Weekday Script
+    doc_id, name = radio.find_day_doc("PARENT", "20260727")
+    assert doc_id == "WD_ID"
+    assert "Weekday" in name
+
+    # Sunday 2026-07-26 → Weekend Script
+    doc_id, name = radio.find_day_doc("PARENT", "20260726")
+    assert doc_id == "WE_ID"
+    assert "Weekend" in name
+
+    # Saturday 2026-07-25 — add to files list
+    files_in_folder.append({"id": "WE_ID2", "name": "20260725_Weekend Script"})
+    doc_id, name = radio.find_day_doc("PARENT", "20260725")
+    assert doc_id == "WE_ID2"
+    assert "Weekend" in name
+
+
+def test_phase2_api_fill_nl_argv(monkeypatch):
+    """POST /api/newsroom/fill builds the right argv; 400 on missing/bad slot."""
+    c, calls = _client(monkeypatch, out=b'{"filled": true}')
+
+    # Happy path
+    r = c.post("/api/newsroom/fill",
+               json={"text": "Hello **World**.", "tab": "NL", "slot": 3})
+    assert r.status_code == 200
+    argv = calls[0]
+    assert argv[0] == "python3"
+    assert argv[1].endswith("nl_append.py")
+    assert argv[2] == "fill"
+    assert "--tab" in argv and argv[argv.index("--tab") + 1] == "NL"
+    assert "--slot" in argv and argv[argv.index("--slot") + 1] == "3"
+    assert "--today" in argv
+    assert "--text" in argv
+
+    # Default tab is NL when omitted
+    calls.clear()
+    r2 = c.post("/api/newsroom/fill", json={"text": "Script.", "slot": 1})
+    assert r2.status_code == 200
+    argv2 = calls[0]
+    assert argv2[argv2.index("--tab") + 1] == "NL"
+
+    # explicit doc_id overrides --today
+    calls.clear()
+    r3 = c.post("/api/newsroom/fill",
+                json={"text": "T", "slot": 2, "doc_id": "DOCXYZ"})
+    assert r3.status_code == 200
+    argv3 = calls[0]
+    assert "--doc" in argv3 and argv3[argv3.index("--doc") + 1] == "DOCXYZ"
+    assert "--today" not in argv3
+
+    # Missing slot → 400
+    assert c.post("/api/newsroom/fill", json={"text": "T"}).status_code == 400
+    # Non-int slot → 400
+    assert c.post("/api/newsroom/fill", json={"text": "T", "slot": "x"}).status_code == 400
+    # Missing text → 400
+    assert c.post("/api/newsroom/fill", json={"slot": 1}).status_code == 400
+
+
+def test_phase2_api_radio_fill_argv(monkeypatch):
+    """POST /api/newsroom/radio/fill builds the right argv; 400 on missing fields."""
+    c, calls = _client(monkeypatch, out=b'{"filled": true}')
+
+    body = {
+        "text": "Broadcast copy.",
+        "year": 2026, "month": 7, "day": 28,
+        "section": "AM", "block": "NATIONAL", "slot": 2,
+    }
+    r = c.post("/api/newsroom/radio/fill", json=body)
+    assert r.status_code == 200
+    argv = calls[0]
+    assert argv[0] == "python3"
+    assert argv[1].endswith("radio.py")
+    assert argv[2] == "fill"
+    assert "--year" in argv and argv[argv.index("--year") + 1] == "2026"
+    assert "--month" in argv and argv[argv.index("--month") + 1] == "7"
+    assert "--day" in argv and argv[argv.index("--day") + 1] == "28"
+    assert "--section" in argv and argv[argv.index("--section") + 1] == "AM"
+    assert "--block" in argv and argv[argv.index("--block") + 1] == "NATIONAL"
+    assert "--slot" in argv and argv[argv.index("--slot") + 1] == "2"
+    assert "--text" in argv
+
+    # Missing required fields → 400
+    for drop in ("year", "month", "day", "section", "block", "slot"):
+        bad = {k: v for k, v in body.items() if k != drop}
+        assert c.post("/api/newsroom/radio/fill", json=bad).status_code == 400, (
+            f"expected 400 when {drop!r} is missing"
+        )
+    # Missing text → 400
+    no_text = {k: v for k, v in body.items() if k != "text"}
+    assert c.post("/api/newsroom/radio/fill", json=no_text).status_code == 400
+

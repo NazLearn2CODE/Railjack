@@ -5,8 +5,11 @@ import type { ModuleConfig } from "../store";
 /**
  * NEWSROOM panel — thin HUD over the newsroom skill CLI (queue.py +
  * nl_append.py). Queue list with author filter, story detail pane with an
- * editable script area, SEND TO NL (append + auto-mark), and a ledger tab.
- * Port of Somatic's NewsroomPanel (18ef2ff) into home Railjack's idiom.
+ * editable script area, SEND TO NL (slot-fill + auto-mark), SEND TO RADIO
+ * (section/block/slot fill), and a ledger tab.
+ *
+ * Phase 2: SEND TO NL replaces append with slot-fill (/api/newsroom/fill);
+ * SEND TO RADIO fills a slot in the daily Radio script (/api/newsroom/radio/fill).
  *
  * REWRITE runs the Script-box text through the backend Rules-Gem pass
  * (/api/newsroom/rewrite, source-only — keeps Thai names/titles in the
@@ -186,7 +189,6 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
   const [sendText, setSendText] = useState("");
   const [author, setAuthor] = useState("Chompatsorn");
   const [error, setError] = useState<string | null>(null);
-  const [sending, setSending] = useState(false);
   const [loading, setLoading] = useState(false);
   const [rewritten, setRewritten] = useState("");
   const [seo, setSeo] = useState("");
@@ -229,6 +231,24 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
   // Publication polish — bold names + underline dates on the selected doc.
   const [newsFormatting, setNewsFormatting] = useState<boolean>(false);
   const [newsFormatResult, setNewsFormatResult] = useState<NewsFormatResponse | null>(null);
+
+  // ---- Phase 2: NL slot-fill state ----
+  const [nlTab, setNlTab] = useState<string>("NL");
+  const [nlSlot, setNlSlot] = useState<number>(1);
+  const [nlFilling, setNlFilling] = useState(false);
+  const [nlFillResult, setNlFillResult] = useState<{ filled: boolean; chars: number; bold_spans: number; underline_spans: number } | null>(null);
+
+  // ---- Phase 2: Radio slot-fill state ----
+  const [radioFillSection, setRadioFillSection] = useState<"AM" | "MIDDAY" | "EVE">("AM");
+  const [radioFillBlock, setRadioFillBlock] = useState<"NATIONAL" | "GLOBAL" | "BUSINESS">("NATIONAL");
+  const [radioFillSlot, setRadioFillSlot] = useState<number>(1);
+  const [radioFilling, setRadioFilling] = useState(false);
+  const [radioFillResult, setRadioFillResult] = useState<{ filled: boolean; doc: string; section: string; block: string; slot: number; chars: number } | null>(null);
+  // Radio fill uses today's date (computed once per render; stable across the session).
+  const nowFill = new Date();
+  const rfYear = nowFill.getFullYear();
+  const rfMonth = nowFill.getMonth() + 1;
+  const rfDay = nowFill.getDate();
 
   const handleRadioPreview = async () => {
     setRadioLoading(true);
@@ -572,19 +592,60 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
     setSendText(s.detail);
   };
 
-  const sendToNL = async () => {
+  // SEND TO NL — Phase 2 slot-fill: replace slot body in the selected tab.
+  // Marks the story on success and refreshes queue + ledger.
+  const sendToNLFill = async () => {
     if (!selected || !sendText.trim()) return;
-    setSending(true);
-    // Append first; only a successful drop stamps the ledger (the dedup).
-    if (await post("/api/newsroom/append", { today: true, text: sendText })) {
+    setNlFilling(true);
+    setNlFillResult(null);
+    const ok = await post("/api/newsroom/fill", {
+      today: true,
+      text: sendText,
+      tab: nlTab,
+      slot: nlSlot,
+    });
+    if (ok) {
+      // Parse the JSON result from the last successful POST (the 'post' helper
+      // doesn't return the body — re-fetch from the result stored in error state
+      // is awkward; instead just mark success and show minimal feedback).
+      setNlFillResult({ filled: true, chars: sendText.length, bold_spans: 0, underline_spans: 0 });
       await post("/api/newsroom/mark", { ids: [selected.id] });
       setSelected(null);
       setSendText("");
       refreshQueue();
       refreshLedger();
     }
-    setSending(false);
+    setNlFilling(false);
   };
+
+  // SEND TO RADIO — Phase 2: insert text into a Radio daily doc slot.
+  const sendToRadio = async () => {
+    if (!sendText.trim()) return;
+    setRadioFilling(true);
+    setRadioFillResult(null);
+    const res = await fetch("/api/newsroom/radio/fill", {
+      method: "POST",
+      headers: CT,
+      body: JSON.stringify({
+        text: sendText,
+        year: rfYear,
+        month: rfMonth,
+        day: rfDay,
+        section: radioFillSection,
+        block: radioFillBlock,
+        slot: radioFillSlot,
+      }),
+    });
+    if (!res.ok) {
+      const d = await res.json().catch(() => ({ detail: res.statusText }));
+      setError(typeof d.detail === "string" ? d.detail : JSON.stringify(d.detail));
+    } else {
+      const data = await res.json().catch(() => ({}));
+      setRadioFillResult(data);
+    }
+    setRadioFilling(false);
+  };
+
 
   // REWRITE: POST the Script-box text to the backend Rules-Gem pass (which
   // rides the OmniRoute gateway), then render the finished two-layer script in
@@ -745,6 +806,7 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
                     />
                   </label>
 
+                  {/* ---- Action controls: REWRITE + SEND TO NL + SEND TO RADIO ---- */}
                   <div className="flex gap-2">
                     <button
                       className="btn"
@@ -754,14 +816,160 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
                     >
                       {rewriting ? "REWRITING…" : "REWRITE"}
                     </button>
-                    <button
-                      className="btn btn--signal"
-                      onClick={() => void sendToNL()}
-                      disabled={sending || !sendText.trim()}
-                    >
-                      {sending ? "SENDING…" : "SEND TO NL"}
-                    </button>
                   </div>
+
+                  {/* ---- Phase 2: SEND TO NL slot-fill controls ---- */}
+                  <div
+                    className="flex flex-wrap items-end gap-2"
+                    style={{ borderTop: "1px solid var(--color-edge)", paddingTop: 8 }}
+                  >
+                    {/* NL tab selector */}
+                    <label className="flex flex-col gap-0.5">
+                      <span className="label" style={{ fontSize: 9 }}>TAB</span>
+                      <select
+                        id="nl-tab-select"
+                        className="mono"
+                        style={{
+                          background: "var(--color-panel-2)",
+                          color: "var(--color-phosphor-dim)",
+                          border: "1px solid var(--color-edge)",
+                          padding: "3px 5px",
+                          fontSize: "11px",
+                          minWidth: 72,
+                        }}
+                        value={nlTab}
+                        onChange={(e) => setNlTab(e.target.value)}
+                      >
+                        <option value="NL">NL</option>
+                        <option value="AM">AM</option>
+                        <option value="MID">MID</option>
+                        <option value="EVE">EVE</option>
+                      </select>
+                    </label>
+
+                    {/* NL slot number */}
+                    <label className="flex flex-col gap-0.5">
+                      <span className="label" style={{ fontSize: 9 }}>SLOT</span>
+                      <input
+                        id="nl-slot-input"
+                        type="number"
+                        min={1}
+                        max={12}
+                        className="input mono px-2 py-1"
+                        style={{ width: 56, fontSize: "11px" }}
+                        value={nlSlot}
+                        onChange={(e) => setNlSlot(Math.max(1, Number(e.target.value)))}
+                      />
+                    </label>
+
+                    <button
+                      id="send-to-nl-btn"
+                      className="btn btn--signal"
+                      onClick={() => void sendToNLFill()}
+                      disabled={nlFilling || !sendText.trim()}
+                      title={`Fill slot ${nlSlot} in the ${nlTab} tab of today's NL & NWB doc`}
+                    >
+                      {nlFilling ? "SENDING…" : "SEND TO NL"}
+                    </button>
+
+                    {/* ---- SEND TO RADIO ---- */}
+                    <div
+                      style={{
+                        marginLeft: "auto",
+                        display: "flex",
+                        flexWrap: "wrap",
+                        alignItems: "flex-end",
+                        gap: 6,
+                      }}
+                    >
+                      {/* Section */}
+                      <label className="flex flex-col gap-0.5">
+                        <span className="label" style={{ fontSize: 9 }}>SECTION</span>
+                        <select
+                          id="radio-section-select"
+                          className="mono"
+                          style={{
+                            background: "var(--color-panel-2)",
+                            color: "var(--color-phosphor-dim)",
+                            border: "1px solid var(--color-edge)",
+                            padding: "3px 5px",
+                            fontSize: "11px",
+                          }}
+                          value={radioFillSection}
+                          onChange={(e) => setRadioFillSection(e.target.value as "AM" | "MIDDAY" | "EVE")}
+                        >
+                          <option value="AM">AM</option>
+                          <option value="MIDDAY">MIDDAY</option>
+                          <option value="EVE">EVE</option>
+                        </select>
+                      </label>
+
+                      {/* Block */}
+                      <label className="flex flex-col gap-0.5">
+                        <span className="label" style={{ fontSize: 9 }}>BLOCK</span>
+                        <select
+                          id="radio-block-select"
+                          className="mono"
+                          style={{
+                            background: "var(--color-panel-2)",
+                            color: "var(--color-phosphor-dim)",
+                            border: "1px solid var(--color-edge)",
+                            padding: "3px 5px",
+                            fontSize: "11px",
+                          }}
+                          value={radioFillBlock}
+                          onChange={(e) => setRadioFillBlock(e.target.value as "NATIONAL" | "GLOBAL" | "BUSINESS")}
+                        >
+                          <option value="NATIONAL">NATIONAL</option>
+                          <option value="GLOBAL">GLOBAL</option>
+                          <option value="BUSINESS">BUSINESS</option>
+                        </select>
+                      </label>
+
+                      {/* Slot */}
+                      <label className="flex flex-col gap-0.5">
+                        <span className="label" style={{ fontSize: 9 }}>SLOT</span>
+                        <input
+                          id="radio-slot-input"
+                          type="number"
+                          min={1}
+                          max={20}
+                          className="input mono px-2 py-1"
+                          style={{ width: 52, fontSize: "11px" }}
+                          value={radioFillSlot}
+                          onChange={(e) => setRadioFillSlot(Math.max(1, Number(e.target.value)))}
+                        />
+                      </label>
+
+                      <button
+                        id="send-to-radio-btn"
+                        className="btn"
+                        style={{ borderColor: "var(--color-go)", color: "var(--color-go)" }}
+                        onClick={() => void sendToRadio()}
+                        disabled={radioFilling || !sendText.trim()}
+                        title={`Fill ${radioFillSection} / ${radioFillBlock} slot ${radioFillSlot} in today's Radio script`}
+                      >
+                        {radioFilling ? "SENDING…" : "SEND TO RADIO"}
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Fill feedback (NL) */}
+                  {nlFillResult && (
+                    <div className="mono flex items-center gap-2" style={{ fontSize: 11, color: "var(--color-go)" }}>
+                      <span className="pip pip--go" />
+                      NL slot {nlSlot} filled — {nlFillResult.chars} chars
+                    </div>
+                  )}
+
+                  {/* Fill feedback (Radio) */}
+                  {radioFillResult && (
+                    <div className="mono flex items-center gap-2" style={{ fontSize: 11, color: "var(--color-go)" }}>
+                      <span className="pip pip--go" />
+                      Radio {radioFillResult.section} / {radioFillResult.block} slot {radioFillResult.slot} filled —{" "}
+                      {radioFillResult.doc}
+                    </div>
+                  )}
 
                   {/* Rewritten article — Rules-Gem output, rendered in an iframe */}
                   {(rewriting || rewritten) && (

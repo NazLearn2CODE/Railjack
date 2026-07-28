@@ -136,10 +136,37 @@ async def api_append(body: dict = Body(...)):
     return await _script(argv, timeout=60)
 
 
+@router.post("/api/newsroom/fill")
+async def api_fill(body: dict = Body(...)):
+    """Replace story slot #N in the NL rundown tab.
+
+    Body: {text, tab? (AM/MID/EVE/NL, default NL), slot (int), doc_id?}
+    Calls ``nl_append.py fill --tab ... --slot N --today/--doc ... --text ...``.
+    400 if ``slot`` is missing or not an integer.
+    """
+    text = body.get("text", "")
+    if not text.strip():
+        raise HTTPException(400, "text required")
+    slot = body.get("slot")
+    try:
+        slot = int(slot)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        raise HTTPException(400, "slot required (integer 1-12)")
+    tab = body.get("tab") or "NL"
+    argv = [PY, str(APPEND), "fill", "--tab", str(tab), "--slot", str(slot)]
+    if body.get("doc_id"):
+        argv += ["--doc", body["doc_id"]]
+    else:
+        argv.append("--today")
+    argv += ["--text", text]
+    return await _script(argv, timeout=60)
+
+
 # ---------------------------------------------------------------- radio
 # Monthly Drive batch generator (RADIO): copies the spreadsheet + per-day script
 # templates into the pre-existing month folder. `radio.py` is the contract —
 # this panel only builds argv and surfaces `_fatal` (→ 400) vs stderr (→ 502).
+
 
 
 def _radio_argv(body: dict) -> list[str]:
@@ -164,6 +191,42 @@ async def api_radio_preview(body: dict = Body(...)):
 async def api_radio_generate(body: dict = Body(...)):
     """Real run — copies every planned file (~31 calls), hence the longer cap."""
     return await _script(_radio_argv(body), timeout=180)
+
+
+@router.post("/api/newsroom/radio/fill")
+async def api_radio_fill(body: dict = Body(...)):
+    """Fill a slot in a daily Radio script doc.
+
+    Body: {text, year, month, day, section (AM/MIDDAY/EVE),
+           block (NATIONAL/GLOBAL/BUSINESS), slot (int)}
+    Calls ``radio.py fill --year ... --month ... --day ... --section ...
+    --block ... --slot ... --text ...``.
+    400 on any missing required field.
+    """
+    required = ("year", "month", "day", "section", "block", "slot")
+    missing = [f for f in required if body.get(f) is None]
+    if missing:
+        raise HTTPException(400, "missing required fields: %s" % ", ".join(missing))
+    try:
+        year = int(body["year"])
+        month = int(body["month"])
+        day = int(body["day"])
+        slot = int(body["slot"])
+    except (TypeError, ValueError) as e:
+        raise HTTPException(400, "year/month/day/slot must be integers: %s" % e)
+    section = str(body["section"]).upper()
+    block = str(body["block"]).upper()
+    text = (body.get("text") or "").strip()
+    if not text:
+        raise HTTPException(400, "text required")
+    argv = [
+        PY, str(RADIO), "fill",
+        "--year", str(year), "--month", str(month), "--day", str(day),
+        "--section", section, "--block", block, "--slot", str(slot),
+        "--text", text,
+    ]
+    return await _script(argv, timeout=60)
+
 
 
 # ---------------------------------------------------------------- rewrite
