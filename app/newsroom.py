@@ -141,7 +141,7 @@ async def api_fill(body: dict = Body(...)):
     """Replace story slot #N in the NL rundown tab.
 
     Body: {text, tab? (AM/MID/EVE/NL, default NL), slot (int), doc_id?}
-    Calls ``nl_append.py fill --tab ... --slot N --today/--doc ... --text ...``.
+    Calls ``nl_append.py fill --tab ... --slot N --today~~-doc ... --text ...``.
     400 if ``slot`` is missing or not an integer.
     """
     text = body.get("text", "")
@@ -296,9 +296,12 @@ async def api_rewrite(body: dict = Body(...)):
         "Do NOT output JSON. Structure the prose as 2-4 separate paragraphs, each separated by a "
         "blank line (\\n\\n) — never one unbroken block of text. "
         "Wrap every person's NAME in **double-stars** per the NAME OVERLAY rule below. "
-        "Wrap every date, time, and relative-time expression in -/…/- markers "
-        "(e.g. -/July 15, 2026/-, -/3:00 PM/-, -/next month/-). These become underlined in the Doc. "
-        "These are the ONLY allowed markup. Output ONLY the rewritten broadcast prose. No JSON, no preamble, no commentary.\n\n"
+        "Wrap every date, time, and relative-time expression in ~~…~~ markers "
+        "(e.g. ~~July 15, 2026~~, ~~3:00 PM~~, ~~next month~~). These become underlined in the Doc. "
+        "These are the ONLY allowed markup. FIRST output the title pair on two lines — "
+        "'EN: <a short SEO-friendly English title>' and 'TH: <the original Thai title from the "
+        "source, retained exactly; translate from EN if the source has none>'. Then a blank line, "
+        "then the broadcast rewrite as 2-4 paragraphs. No JSON, no other preamble, no commentary.\n\n"
         "=== NAME OVERLAY RULE ===\n"
         "For each person the SOURCE names, render their name as follows:\n"
         "- If you can CONFIDENTLY confirm that person's official English name (the established public "

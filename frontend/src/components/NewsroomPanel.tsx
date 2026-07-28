@@ -28,15 +28,15 @@ const rewriteDoc = (body: string, muted = false) =>
   `white-space:pre-wrap;word-wrap:break-word}</style></head><body>${escapeHtml(body)}</body></html>`;
 
 const renderRewritePreview = (text: string, seoBlock: string) => {
-  // Convert **name** → <strong> and -/date/- → <u>; escape everything else.
+  // Convert **name** → <strong> and ~~date~~ → <u>; escape everything else.
   // Split on both marker patterns in one pass so they can interleave naturally.
   const htmlText = text
-    .split(/(\*\*[^*]+\*\*|-\/[^/]+-\/)/g)
+    .split(/(\*\*[^*]+\*\*|~~[^~]+~~)/g)
     .map((part) => {
       if (part.startsWith("**") && part.endsWith("**")) {
         return `<strong>${escapeHtml(part.slice(2, -2))}</strong>`;
       }
-      if (part.startsWith("-/") && part.endsWith("/-")) {
+      if (part.startsWith("~~") && part.endsWith("~~")) {
         return `<u>${escapeHtml(part.slice(2, -2))}</u>`;
       }
       return escapeHtml(part);

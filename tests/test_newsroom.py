@@ -874,7 +874,7 @@ def test_df_format_route_requires_doc_id(monkeypatch):
 def test_rewrite_success_and_prompt_assembly(monkeypatch):
     """POST /api/newsroom/rewrite loads Ben's gem (not news-producer), includes the
     v2 name overlay rule ([English(Thai)] / Thai fallback / source-only carve-out),
-    instructs -/date/- underline markers, fires a separate SEO call with AI Block
+    instructs ~~date~~ underline markers, fires a separate SEO call with AI Block
     Version A+B override, and returns {"rewritten", "seo"}."""
     calls = []
 
@@ -882,7 +882,7 @@ def test_rewrite_success_and_prompt_assembly(monkeypatch):
         calls.append({"prompt": prompt, "system": system, "max_tokens": max_tokens})
         if system:
             return "### Version A — AI Summary\nSummary text.\n\n### Version B — AI Key Points\n- WHAT: Fact."
-        return "This is broadcast prose by **[Ben(เบ็น)]** mentioning **นายกฯ** on -/July 15, 2026/-."
+        return "This is broadcast prose by **[Ben(เบ็น)]** mentioning **นายกฯ** on ~~July 15, 2026~~."
 
     monkeypatch.setattr(newsroom.zai, "zai_message", fake_zai_message)
     app = FastAPI()
@@ -906,9 +906,9 @@ def test_rewrite_success_and_prompt_assembly(monkeypatch):
     assert "[OfficialEnglish(Thai)]" in ben_call["prompt"]          # overlay format spec
     assert "NO transliteration" in ben_call["prompt"]               # no-guess rule
     assert "NARROW CARVE-OUT" in ben_call["prompt"]                 # source-only carve-out
-    # -/date/- instruction:
-    assert "-/…/-" in ben_call["prompt"]                            # date marker syntax
-    assert "-/next month/-" in ben_call["prompt"]                   # relative-time example
+    # ~~date~~ instruction:
+    assert "~~…~~" in ben_call["prompt"]                            # date marker syntax
+    assert "~~next month~~" in ben_call["prompt"]                   # relative-time example
     # v1 Thai-only blanket rule is GONE (replaced by overlay rule above).
     # "ORIGINAL THAI SCRIPT" still legitimately appears in the overlay rule for
     # titles/ranks, but the old blanket "never translate or transliterate any
@@ -955,7 +955,7 @@ def _load_nl_append():
 
 
 def test_nl_append_emits_bold_and_underline_spans(monkeypatch):
-    """nl_append unit test: **Name** produces bold span; -/date/- marker produces
+    """nl_append unit test: **Name** produces bold span; ~~date~~ marker produces
     underline span (the marker path); DATE_RE backstop also fires on any date
     not already covered by a marker (idempotent if same span)."""
     nl = _load_nl_append()
@@ -972,9 +972,9 @@ def test_nl_append_emits_bold_and_underline_spans(monkeypatch):
     monkeypatch.setattr(nl, "nl_tab", fake_nl_tab)
     monkeypatch.setattr(nl, "api", fake_api)
 
-    # Text with both **bold** name and -/date/- marker
+    # Text with both **bold** name and ~~date~~ marker
     nl.append("tok", "DOC_ID",
-              "Prime Minister **นายกฯ** spoke on -/July 28, 2026/-.",
+              "Prime Minister **นายกฯ** spoke on ~~July 28, 2026~~.",
               dry=False)
 
     assert len(doc_posted) == 1
@@ -984,7 +984,7 @@ def test_nl_append_emits_bold_and_underline_spans(monkeypatch):
     ins = [r for r in reqs if "insertText" in r][0]
     assert ins["insertText"]["location"]["tabId"] == "t.0"
     assert "**" not in ins["insertText"]["text"]   # bold markers stripped
-    assert "-/" not in ins["insertText"]["text"]    # underline markers stripped
+    assert "~~" not in ins["insertText"]["text"]    # underline markers stripped
     assert "นายกฯ" in ins["insertText"]["text"]     # bold content preserved
     assert "July 28, 2026" in ins["insertText"]["text"]  # underline content preserved
 
@@ -996,7 +996,7 @@ def test_nl_append_emits_bold_and_underline_spans(monkeypatch):
     ]
     assert len(bold_reqs) == 1
 
-    # Underline span from -/date/- marker (field="underline", textStyle.underline=True)
+    # Underline span from ~~date~~ marker (field="underline", textStyle.underline=True)
     underline_reqs = [
         r for r in reqs
         if r.get("updateTextStyle", {}).get("fields") == "underline"
@@ -1006,7 +1006,7 @@ def test_nl_append_emits_bold_and_underline_spans(monkeypatch):
 
 
 def test_nl_append_bold_after_underline_aligns(monkeypatch):
-    """Regression: a **name** AFTER a -/date/- must still bold the name itself,
+    """Regression: a **name** AFTER a ~~date~~ must still bold the name itself,
     not shifted letters. The old parse_bold→parse_underline chain computed bold
     offsets against the pre-underline-strip text, so a name following a date
     marker bolded the wrong span. parse_markers (single pass) fixes it."""
@@ -1018,7 +1018,7 @@ def test_nl_append_bold_after_underline_aligns(monkeypatch):
         lambda method, url, tok, body=None: (posted.append(body), {})[1],
     )
     # date marker BEFORE the bold name — the ordering that exposed the bug
-    nl.append("tok", "DOC", "On -/July 28, 2026/-, **Anutin** spoke.", dry=False)
+    nl.append("tok", "DOC", "On ~~July 28, 2026~~, **Anutin** spoke.", dry=False)
     reqs = posted[0]["requests"]
     ins = [r for r in reqs if "insertText" in r][0]["insertText"]["text"]
     bold_reqs = [
@@ -1033,12 +1033,12 @@ def test_nl_append_bold_after_underline_aligns(monkeypatch):
 
 
 def test_nl_append_parse_underline_strips_markers(monkeypatch):
-    """parse_underline isolated: strips -/../- markers from the plain text and
+    """parse_underline isolated: strips ~~..~~ markers from the plain text and
     returns correct offsets into the stripped string (same math as parse_bold)."""
     nl = _load_nl_append()
-    text = "Spoke on -/July 28, 2026/- in Bangkok."
+    text = "Spoke on ~~July 28, 2026~~ in Bangkok."
     plain, ranges = nl.parse_underline(text)
-    assert "-/" not in plain
+    assert "~~" not in plain
     assert "July 28, 2026" in plain
     assert len(ranges) == 1
     s, e = ranges[0]
@@ -1046,7 +1046,7 @@ def test_nl_append_parse_underline_strips_markers(monkeypatch):
 
 
 def test_nl_append_marker_date_not_doubled_by_backstop(monkeypatch):
-    """When Ben already wrapped a date in -/…/-, the DATE_RE backstop deduplicates
+    """When Ben already wrapped a date in ~~…~~, the DATE_RE backstop deduplicates
     by start index so the span is emitted exactly once (not twice)."""
     nl = _load_nl_append()
     doc_posted = []
@@ -1055,8 +1055,8 @@ def test_nl_append_marker_date_not_doubled_by_backstop(monkeypatch):
     monkeypatch.setattr(nl, "api",
                         lambda m, u, t, body=None: doc_posted.append(body) or {})
 
-    # July 28 is both a -/…/- marker AND will be caught by DATE_RE as a backstop
-    nl.append("tok", "DOC1", "Met on -/July 28, 2026/-.", dry=False)
+    # July 28 is both a ~~…~~ marker AND will be caught by DATE_RE as a backstop
+    nl.append("tok", "DOC1", "Met on ~~July 28, 2026~~.", dry=False)
 
     reqs = doc_posted[0]["requests"]
     underline_reqs = [
@@ -1152,15 +1152,15 @@ def test_phase2_find_today_doc_exact_match(monkeypatch):
 
 
 def test_phase2_docfill_parse_markers_single_pass():
-    """parse_markers single-pass correctness: a **name** AFTER a -/date/-
+    """parse_markers single-pass correctness: a **name** AFTER a ~~date~~
     must still bold the name at the right offset (the Phase-1 regression)."""
     df = _load_docfill()
-    text = "On -/July 28, 2026/-, **Anutin** spoke."
+    text = "On ~~July 28, 2026~~, **Anutin** spoke."
     plain, bolds, underlines = df.parse_markers(text)
 
     # Plain text has no markers
     assert "**" not in plain
-    assert "-/" not in plain
+    assert "~~" not in plain
     assert "July 28, 2026" in plain
     assert "Anutin" in plain
 
@@ -1212,7 +1212,7 @@ def test_phase2_build_fill_requests_structure():
 
 def test_phase2_fill_nl_slot_requests(monkeypatch):
     """fill_nl_slot end-to-end: builds correct batchUpdate with delete + insert
-    + clear-bold + bold/underline spans. Regression: **name** after -/date/-
+    + clear-bold + bold/underline spans. Regression: **name** after ~~date~~
     must bold the name, not shifted bytes."""
     nl = _load_nl_append_fresh()
     if not nl._DOCFILL:
@@ -1242,9 +1242,9 @@ def test_phase2_fill_nl_slot_requests(monkeypatch):
     monkeypatch.setattr(nl, "find_heading", fake_find_heading)
     monkeypatch.setattr(nl, "api", fake_api)
 
-    # Text with -/date/- BEFORE **name** — the regression ordering
+    # Text with ~~date~~ BEFORE **name** — the regression ordering
     nl.fill_nl_slot("tok", "DOC", "NL RUNDOWN", 3,
-                    "On -/July 28, 2026/-, **Anutin** spoke.", dry=False)
+                    "On ~~July 28, 2026~~, **Anutin** spoke.", dry=False)
 
     assert posted, "expected a batchUpdate POST"
     reqs = posted[0]["requests"]
@@ -1275,7 +1275,7 @@ def test_phase2_fill_nl_slot_requests(monkeypatch):
     s = rng["startIndex"] - 25   # subtract insert offset to get plain index
     e = rng["endIndex"] - 25
     assert plain[s:e] == "Anutin", (
-        f"bold span misaligned after -/date/-: got {plain[s:e]!r}"
+        f"bold span misaligned after ~~date~~: got {plain[s:e]!r}"
     )
 
 
