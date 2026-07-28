@@ -214,6 +214,16 @@ def test_radio_generate_stamps_calendar_per_doc(monkeypatch, capsys):
     assert stamped[0][1].endswith("2026")
 
 
+def test_radio_parse_title_and_body():
+    radio = _load_radio()
+    en, body = radio._parse_title_and_body(
+        "EN: Peace Talks\nTH: สันติภาพ\n\nOn ~~July~~, **X** spoke.")
+    assert en == "Peace Talks"
+    assert body == "On ~~July~~, **X** spoke."  # TH title dropped for radio
+    en2, body2 = radio._parse_title_and_body("plain body only")
+    assert en2 is None and body2 == "plain body only"  # backward compat
+
+
 def test_radio_preview_argv(monkeypatch):
     c, calls = _client(monkeypatch, out=b'{"dry_run": true}')
     assert c.post("/api/newsroom/radio/preview",
