@@ -36,8 +36,10 @@ article's headline and body. Return a rewritten headline and a broadcast script.
    listener catches on first hearing. No clause-stacking.
 5. **Minimal quotes, verbatim.** Use a direct quote only when it genuinely lands, and
    reproduce it EXACTLY as in the source. Prefer paraphrase.
-6. **Continuous prose only.** No bullet points, no subheadings, no lists, no markdown
-   formatting of any kind — just paragraphs of spoken prose.
+6. **Continuous prose, in 2–4 paragraphs.** No bullet points, no subheadings, no lists, no
+   markdown formatting of any kind — just **2–4 paragraphs** of spoken prose (never one solid
+   chunk — the reader gets dizzy). Each paragraph is a natural unit; the story must still make
+   sense if cut off early.
 7. **190–250 words** for the script body. **Never under 190** — too thin to land the
    story; never over 250. Aim for ~200. **Count your words before finishing: if under 190,
    expand with more substance, attribution, and signposting drawn from the source (never
@@ -70,14 +72,16 @@ article's headline and body. Return a rewritten headline and a broadcast script.
 
 ### Output — strict JSON only, no markdown, no commentary
 ```
-{"title": "<punchy broadcast headline, plain text, no brackets, <= ~12 words>",
- "body": "<the broadcast script as continuous prose; separate paragraphs with a single \n; <= 250 words>"}
+{"title": "<SEO-friendly short English title, plain text, no brackets, <= ~12 words>",
+ "title_th": "<original Thai title from the source, retained exactly; translate from EN if the source has none>",
+ "body": "<the broadcast script as 2-4 paragraphs of continuous prose; separate paragraphs with a single \n; <= 250 words>"}
 ```
 Rules for the output:
 - Return ONLY that JSON object. No preamble, no code fence in your actual reply, no
   trailing notes.
-- `title` is a fresh broadcast headline — active and concrete, not the source's
-  original headline verbatim unless it is already ideal.
+- `title` is a fresh SEO-friendly English title — active and concrete, not the source's
+  original headline verbatim unless it is already ideal. `title_th` retains the source's Thai
+  title exactly (or translates one from `title` if the source has none).
 - `body` paragraphs are separated by a single `\n`; no leading/trailing whitespace.
 - If the source is too thin to rewrite faithfully, still return valid JSON with the
   best faithful cut you can — never fabricate to fill space.
