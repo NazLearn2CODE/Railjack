@@ -72,9 +72,12 @@ modules:
       seo_media_cache_ttl_s: 86400                     # media library (~5750) pulled once/day
       seo_external_concurrency: 8                       # polite outbound HEAD concurrency (S2)
       seo_external_timeout_s: 10                        # per-external-link HEAD timeout (S2)
+      # due_weekdays: datetime.weekday() convention (0=Mon..6=Sun) — auto-computed due
+      # dates for writer desks (Naz: Paul due Mon/Wed/Fri, Teerin due Thu). tian is NOT
+      # given due_weekdays — its dates come from real scouted events via _date_rule.
       desks:
-        - {id: paul,   kind: article, drive_folder_id: 1w8ESeKzvW-Er36qjMjgfLU7fMwa8KSu6, trello_list_name: "To draft (Paul)",   doc_name: "[{yyyymm}] [CAT] #{nn}",               card_name: "Article | {mon} #{nn}", count: 12, labels: ["Quota", "Happening NOW"]}
-        - {id: teerin, kind: blog,    drive_folder_id: 1jUTZ5qchpViAioBWfUpIdu5PQCwdSWSq, trello_list_name: "To draft (Teerin)", doc_name: "[{yyyymm}] [CAT] Working Title #{nn}", card_name: "Blog | #{nn}",            count: 5, labels: ["Quota", "Happening NOW"]}
+        - {id: paul,   kind: article, drive_folder_id: 1w8ESeKzvW-Er36qjMjgfLU7fMwa8KSu6, trello_list_name: "To draft (Paul)",   doc_name: "[{yyyymm}] [CAT] #{nn}",               card_name: "Article | {mon} #{nn}", count: 12, labels: ["Quota", "Happening NOW"], due_weekdays: [0, 2, 4]}
+        - {id: teerin, kind: blog,    drive_folder_id: 1jUTZ5qchpViAioBWfUpIdu5PQCwdSWSq, trello_list_name: "To draft (Teerin)", doc_name: "[{yyyymm}] [CAT] Working Title #{nn}", card_name: "Blog | #{nn}",            count: 5, labels: ["Quota", "Happening NOW"], due_weekdays: [3]}
         - {id: tian,   kind: event,   drive_folder_id: 1_gJui6atpHTjaZWnkBNG6BwEgiZ2ZtUm, trello_list_name: "To draft (TIAN)",   doc_name: "[{yyyymm}] Empty Event Document #{nn}", card_name: "Event | Empty #{nn}",     count: 1, labels: ["Quota", "Events NOW"]}
   - id: n8n
     title: N8N

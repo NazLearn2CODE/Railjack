@@ -123,3 +123,32 @@ def test_scout_terminal_report(tmp_path, monkeypatch):
     # Check url-less row dropped and duplicate url deduped
     assert results[1]["url"] == "https://example.com/3"
     assert results[1]["snippet"] == "Snippet 3"
+
+
+def test_weekday_due_dates_within_month():
+    # July 2026: Mon/Wed/Fri — first 3 should be within the first week
+    dates = thailandnow._weekday_due_dates("202607", [0, 2, 4], 3)
+    assert len(dates) == 3
+    for d in dates:
+        from datetime import datetime as _dt
+        assert _dt.strptime(d, "%Y-%m-%d").weekday() in (0, 2, 4)
+    assert dates == sorted(dates)  # ascending
+
+
+def test_weekday_due_dates_thursdays():
+    dates = thailandnow._weekday_due_dates("202607", [3], 4)
+    assert len(dates) == 4
+    from datetime import datetime as _dt
+    for d in dates:
+        assert _dt.strptime(d, "%Y-%m-%d").weekday() == 3
+
+
+def test_weekday_due_dates_spills_into_next_month():
+    # Ask for more Thursdays than a single month reliably has (5) to prove the
+    # walk continues past month-end instead of raising/truncating.
+    dates = thailandnow._weekday_due_dates("202607", [3], 6)
+    assert len(dates) == 6
+    from datetime import datetime as _dt
+    for d in dates:
+        assert _dt.strptime(d, "%Y-%m-%d").weekday() == 3
+    assert dates == sorted(dates)

@@ -227,6 +227,20 @@ def _next_nn(template: str, yyyymm: str, mon: str, title: str | None, names: lis
     return mx + 1
 
 
+def _weekday_due_dates(yyyymm: str, weekdays: list[int], need: int) -> list[str]:
+    """First ``need`` ISO dates (YYYY-MM-DD) whose weekday() is in ``weekdays``,
+    walking forward from the 1st of ``yyyymm``. Spills into following months if
+    the given month doesn't have enough matching days (short month, few
+    Thursdays, etc.) so a full writer batch is always fully dated."""
+    d = datetime.strptime(yyyymm + "01", "%Y%m%d")
+    out: list[str] = []
+    while len(out) < need:
+        if d.weekday() in weekdays:
+            out.append(d.strftime("%Y-%m-%d"))
+        d += timedelta(days=1)
+    return out
+
+
 def _date_rule(start: str | None, end: str | None, signup: str | None) -> tuple[str | None, str | None]:
     """Trello card (start, due) ISO datetimes from raw event dates (R3). Pure + self-checked.
 
@@ -419,6 +433,11 @@ async def provision(payload: dict = Body(default={})):
     label_ids = await _trello_label_ids(board, desk.get("labels", []))
     cards = await _trello("GET", f"/lists/{list_id}/cards", {"fields": "name"})
     nn = _next_nn(card_name_tpl, yyyymm, mon, title, [c["name"] for c in cards])
+    # R4: writer desks (paul/teerin) get auto-computed due dates by weekday rule; the
+    # date for #NN must follow the same cross-rerun continuation as `nn` itself, so it's
+    # keyed by `cur` (the card's actual sequence number), not the loop index `i`.
+    due_weekdays = desk.get("due_weekdays")
+    weekday_dates = _weekday_due_dates(yyyymm, due_weekdays, nn + count - 1) if due_weekdays else None
 
     if not _google_token_path().exists():
         raise HTTPException(
@@ -436,13 +455,19 @@ async def provision(payload: dict = Body(default={})):
         doc_url = await _google_create_doc(token, desk["drive_folder_id"], doc_name, doc_body)
         card_params = {"idList": list_id, "name": card_name, "desc": card_desc,
                        "idLabels": ",".join(label_ids)}
-        if due:
-            card_params["due"] = due
-        if start:
-            card_params["start"] = start
+        if weekday_dates is not None:
+            card_params["due"] = f"{weekday_dates[cur - 1]}T00:00:00.000Z"
+        else:
+            if due:
+                card_params["due"] = due
+            if start:
+                card_params["start"] = start
         card = await _trello("POST", "/cards", card_params)
         await _trello("POST", f"/cards/{card['id']}/attachments",
                       body={"url": doc_url, "name": doc_name})
+        folder_url = f"https://drive.google.com/drive/folders/{desk['drive_folder_id']}"
+        await _trello("POST", f"/cards/{card['id']}/attachments",
+                      body={"url": folder_url, "name": "Parent folder"})
         out.append({"nn": cur, "doc_name": doc_name, "doc_url": doc_url,
                     "card_name": card_name, "card_url": card.get("url", "")})
     return {"desk_id": desk_id, "count": count, "yyyymm": yyyymm, "items": out}
