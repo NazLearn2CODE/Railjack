@@ -534,14 +534,28 @@ def test_rn_parse_rewrite_think_prefix():
     assert rn._parse_rewrite(raw, "orig") == ("T", "After think.")
 
 
+def test_rn_parse_rewrite_truncated_rescues():
+    """Regression (live bug, 2026-07-28): a reasoning model burned the token
+    budget on thinking and the JSON was cut mid-body — raw_decode failed and the
+    raw `{"title": ..., "body": ` dumped into the slot. Rescue title + body by
+    regex; the body has no closing quote, so match to end-of-text."""
+    rn = _load_radio_news()
+    raw = '{"title": "Argentina Debt Brightens", "body": "The IMF said debt hit 205 billion'
+    assert rn._parse_rewrite(raw, "orig") == ("Argentina Debt Brightens",
+                                              "The IMF said debt hit 205 billion")
+
+
 def test_rn_normalize_numbers_currency():
     """A leading-$ currency must read aloud as "<amount> dollars" — the gem is
-    told to but flakes, so code guarantees it. Magnitude word stays; bare
-    amounts get "dollars"; trailing sentence punctuation is untouched."""
+    told to but flakes, so code guarantees it. Abbreviations expand, magnitude
+    word stays, bare amounts get "dollars", and "dollars" never jams the next
+    letter (word-boundary anchored). Trailing sentence punctuation untouched."""
     rn = _load_radio_news()
     assert rn._normalize_numbers("debt of $205 billion was") == "debt of 205 billion dollars was"
     assert rn._normalize_numbers("$3.2 million") == "3.2 million dollars"
     assert rn._normalize_numbers("cost was $5.") == "cost was 5 dollars."
+    assert rn._normalize_numbers("$5bn deal") == "5 billion dollars deal"   # abbrev + no jam
+    assert rn._normalize_numbers("raised $5m") == "raised 5 million dollars"
     assert rn._normalize_numbers("no money here") == "no money here"
 
 
