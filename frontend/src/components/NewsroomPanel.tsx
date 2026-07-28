@@ -476,10 +476,14 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
     void runFormat(selectedDoc.id);
   };
 
-  // COPY ANTIGRAVITY PROMPT — build the paste-ready prompt with category + kind,
-  // copy to clipboard. No doc selection needed; just category.
+  // COPY ANTIGRAVITY PROMPT — build the paste-ready prompt with category + kind
+  // + EXACT counts (from cheapCounts, same source AUTOPILOT trusts), copy to
+  // clipboard. Kind defaults to weekday when no doc is picked; counts follow.
   const handleCopyAntigravityPrompt = async () => {
-    const promptText = `Read \`10-knowledge/radio-news-antigravity-handoff.md\` in this vault. Scout recent (dated, ≥190-word) news for category \`${newsCategory}\` from premium wire/broadcast outlets, rewrite each piece plus the slice-of-life into Editor Ben's ≤250-word broadcast voice (rules in that note), tag SEA pieces, and write the result to \`/tmp/railjack-radio-news/latest.json\` in the exact shape shown — \`"rewritten": true\` on every piece. Do not touch any Google Doc.`;
+    const kind = selectedDoc?.kind ?? "weekday";
+    const { N, M, K } = cheapCounts;
+    const sliceClause = K > 0 ? ` plus ${K} slice-of-life piece` : " and no slice-of-life piece (no AM tab)";
+    const promptText = `Read \`10-knowledge/radio-news-antigravity-handoff.md\` in this vault. Scout recent (dated, ≥190-word) news for category \`${newsCategory}\`, kind \`${kind}\` — gather EXACTLY ${N} results (${M} of them SEA-led)${sliceClause} — from premium wire/broadcast outlets, rewrite each piece plus the slice-of-life into Editor Ben's ≤250-word broadcast voice (rules in that note), tag SEA pieces, and write the result to \`/tmp/railjack-radio-news/latest.json\` in the exact shape shown — \`"rewritten": true\` on every piece. Do not touch any Google Doc.`;
     try {
       await navigator.clipboard.writeText(promptText);
       setError(null);
@@ -1178,11 +1182,13 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
                     <button
                       className="btn btn--compact"
                       onClick={() => void handleCopyAntigravityPrompt()}
-                      title="Copy the paste-ready Antigravity prompt for this category (swap to IDE)"
+                      title="Copy the paste-ready Antigravity prompt (category + kind + exact counts) → swap to IDE"
                     >
                       📋 COPY ANTIGRAVITY PROMPT
                     </button>
-                    <span style={{ color: "var(--color-muted)" }}>for {newsCategory} category → IDE</span>
+                    <span style={{ color: "var(--color-muted)" }}>
+                      {newsCategory} · {selectedDoc?.kind ?? "weekday"} · {cheapCounts.N}/{cheapCounts.M} SEA/{cheapCounts.K} slice → IDE
+                    </span>
                   </div>
                 </div>
               </div>
