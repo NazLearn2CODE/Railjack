@@ -444,7 +444,36 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
   const [newsFormatResult, setNewsFormatResult] = useState<NewsFormatResponse | null>(null);
 
   // ---- Phase 2: NL slot-fill state ----
-  const NL_HOME_FOLDER = "0BxI14z7NX9CIc3VJNGJwTGlJcG8";
+  // NL docs live at <archive>/YYYY/"YYYYMM MONTH"/"NL & NWB DDMMYY". Resolve the
+  // CURRENT month folder so the picker opens straight on this month's daily docs
+  // — pinning a month id rots on the 1st (e.g. 202607 JULY → 202608 AUG). Month
+  // folder names share a consistent "YYYYMM " prefix, so the match is reliable;
+  // falls back to the archive root if the year/month folder isn't found yet.
+  const NL_ARCHIVE = "0BxI14z7NX9CIc3VJNGJwTGlJcG8";
+  const [nlRoot, setNlRoot] = useState<BrowseFolder>({ id: NL_ARCHIVE, name: "NL Home" });
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      const d = new Date();
+      const yyyy = String(d.getFullYear());
+      const ym = yyyy + String(d.getMonth() + 1).padStart(2, "0");
+      try {
+        const yr = (await fetchJSON<NewsBrowseResponse>(
+          `/api/newsroom/radio/news/browse?parent=${encodeURIComponent(NL_ARCHIVE)}`,
+        )).folders?.find((f) => f.name === yyyy);
+        if (!yr) return;
+        const mo = (await fetchJSON<NewsBrowseResponse>(
+          `/api/newsroom/radio/news/browse?parent=${encodeURIComponent(yr.id)}`,
+        )).folders?.find((f) => f.name.startsWith(ym));
+        if (mo && alive) setNlRoot(mo);
+      } catch {
+        /* keep archive-root fallback */
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, []);
   const [nlTab, setNlTab] = useState<string>("NL");
   const [nlPickedDoc, setNlPickedDoc] = useState<NewsDoc | null>(null);
   const [nlFilling, setNlFilling] = useState(false);
@@ -1120,8 +1149,8 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
                     </label>
 
                     <DocPicker
-                      rootId={NL_HOME_FOLDER}
-                      rootLabel="NL Home"
+                      rootId={nlRoot.id}
+                      rootLabel={nlRoot.name}
                       picked={nlPickedDoc}
                       onPick={setNlPickedDoc}
                       label="DOC"
