@@ -64,7 +64,7 @@ export default function CockpitControls() {
 
   const { data: catalog, refetch: refetchCatalog } = usePolling<Catalog>("/api/catalog", 60_000);
 
-  const insert = async (text: string) => {
+  const insert = async (text: string): Promise<boolean> => {
     try {
       await fetchJSON("/api/terminal/insert", {
         method: "POST",
@@ -73,8 +73,10 @@ export default function CockpitControls() {
       });
       const tmux = useStore.getState().config?.modules.find((m) => m.id === "tmux");
       if (tmux) useStore.getState().setActive(tmux.id);
+      return true;
     } catch (e) {
       console.error("terminal insert failed", e);
+      return false;
     }
   };
 
@@ -133,7 +135,7 @@ export default function CockpitControls() {
 1. Append a full, self-contained replicate/implement prompt under the "## Sister handoffs (ack-by-deleting)" section in ~/Cephalon/readme-naz.md. Match the format of the existing entries there exactly: a ### heading, a dash-bracket todo line, a fenced self-contained prompt block, and a ctx: line of wikilinks to the design note.
 2. Add a one-line pointer under the "Pending sister handoffs" block in ~/Cephalon/hot.md.
 3. git pull --ff-only first, preserve frontmatter, commit and push both files, and append a one-line entry to ~/Cephalon/logs/memory-log.md.
-If it is ambiguous what feature just finished, ask me before writing. The recipient is ${recipient}.`;
+If it is ambiguous what feature just finished, ask me before writing. The recipient is ${recipient}.`.replace(/\s+/g, " ").trim();
 
   const skills = grouped(catalog?.skills ?? []);
   const mktSkills = grouped(catalog?.marketplace_skills ?? []);
@@ -239,7 +241,10 @@ If it is ambiguous what feature just finished, ask me before writing. The recipi
 
       <button
         className="btn btn--compact"
-        onClick={() => void insert(handoffMeta(handoffTo))}
+        onClick={async () => {
+          if (!(await insert(handoffMeta(handoffTo))))
+            alert("✍ HANDOFF failed to type into the terminal — is the tmux pane open? (see browser console)");
+        }}
         title="Type a prompt into the terminal that tells the agent to write a port/implementation handoff to the selected sister and file it in readme-naz.md + hot.md"
       >
         ✍ HANDOFF

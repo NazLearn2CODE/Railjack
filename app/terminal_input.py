@@ -4,7 +4,7 @@ ttyd serves ``tmux new -A -s main`` writable; we inject via
 ``tmux send-keys -t <session> -l -- <text>`` (``-l`` = literal, ``--`` guards
 text starting with ``-`` or ``/``). **Type-only**: newlines are rejected (400)
 so nothing can auto-execute — Naz reviews and presses Enter in the pane.
->500 chars also rejected. tmux runs as an argv list (never ``shell=True``).
+>4000 chars rejected (raised from 500 — agent prompts like the HANDOFF meta run ~760). tmux runs as an argv list (never ``shell=True``).
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ from .config import CONFIG
 
 router = APIRouter()
 
-_MAX = 500
+_MAX = 4000  # raised from 500 — agent prompts (HANDOFF meta ~760) need the room; tmux send-keys handles long argv fine
 
 
 class InsertBody(BaseModel):
