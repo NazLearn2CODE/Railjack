@@ -28,6 +28,7 @@ SCRIPTS = Path.home() / "Cephalon" / "10-knowledge" / "skills" / "newsroom" / "s
 QUEUE = SCRIPTS / "queue.py"
 APPEND = SCRIPTS / "nl_append.py"
 RADIO = SCRIPTS / "radio.py"
+NEWSLINE = SCRIPTS / "newsline.py"
 # The Rules Gem drives REWRITE (news-producer prompt → two-layer broadcast
 # script). ~/Gems is the office canonical copy; home has no ~/Gems, so the
 # vault-synced gem is the source here — _gem_text falls through to it.
@@ -238,6 +239,38 @@ async def api_radio_fill(body: dict = Body(...)):
         argv += ["--year", str(year), "--month", str(month), "--day", str(day)]
     return await _script(argv, timeout=60)
 
+
+
+# ---------------------------------------------------------------- newsline
+# Monthly Drive batch generator (NEWSLINE): one daily Google Doc per calendar
+# day, copied from the fixed template + date-stamped, inside year/month folders
+# it ensures under the Newsline home folder. `newsline.py` is the contract —
+# this panel only builds argv and surfaces `_fatal` (→ 400) vs stderr (→ 502).
+
+
+def _newsline_argv(body: dict) -> list[str]:
+    """Year/month required (mirrors _radio_argv's 400 on a missing year/month).
+    The command (generate/preview) is appended by the route so the argv lands as
+    `newsline.py --year Y --month M generate|preview` — the flat argparse in
+    newsline.py accepts flags-then-positional."""
+    year, month = body.get("year"), body.get("month")
+    if year is None or month is None:
+        raise HTTPException(400, "year and month required")
+    return [PY, str(NEWSLINE), "--year", str(year), "--month", str(month)]
+
+
+@router.post("/api/newsroom/newsline/preview")
+async def api_newsline_preview(body: dict = Body(...)):
+    """Dry-run plan (no writes, no folder creation): folder flags + counts +
+    the to_create day list."""
+    return await _script(_newsline_argv(body) + ["preview"])
+
+
+@router.post("/api/newsroom/newsline/generate")
+async def api_newsline_generate(body: dict = Body(...)):
+    """Real run — copies + stamps every planned daily doc (up to 31 days × 2
+    calls: copy + batchUpdate), hence the generous 300s cap."""
+    return await _script(_newsline_argv(body) + ["generate"], timeout=300)
 
 
 # ---------------------------------------------------------------- rewrite

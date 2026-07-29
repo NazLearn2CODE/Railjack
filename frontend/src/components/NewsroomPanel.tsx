@@ -104,6 +104,36 @@ interface RadioResponse {
   _fatal?: string;
 }
 
+interface NewslineFolder {
+  id?: string;
+  name: string;
+  created?: boolean;
+}
+
+interface NewslineCounts {
+  planned: number;
+  to_create: number;
+  skipped: number;
+}
+
+interface NewslineItem {
+  name: string;
+  day?: number;
+  id?: string;
+  link?: string;
+}
+
+interface NewslineResponse {
+  year_folder?: NewslineFolder;
+  month_folder?: NewslineFolder;
+  dry_run?: boolean;
+  counts?: NewslineCounts;
+  to_create?: NewslineItem[];
+  created?: NewslineItem[];
+  skipped?: NewslineItem[];
+  _fatal?: string;
+}
+
 interface NewsDoc {
   id: string;
   name: string;
@@ -361,6 +391,16 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
   const [radioLoading, setRadioLoading] = useState<boolean>(false);
   const [radioGenerating, setRadioGenerating] = useState<boolean>(false);
 
+  // NEWSLINE Document Generator state (mirrors radio docgen; no sheet-name field
+  // — newsline has no spreadsheet, just daily docs date-stamped from a template).
+  const [docGenMode, setDocGenMode] = useState<"radio" | "newsline">("radio");
+  const [nlGenYear, setNlGenYear] = useState<number>(now.getFullYear());
+  const [nlGenMonth, setNlGenMonth] = useState<number>(now.getMonth() + 1);
+  const [nlGenPreview, setNlGenPreview] = useState<NewslineResponse | null>(null);
+  const [nlGenResult, setNlGenResult] = useState<NewslineResponse | null>(null);
+  const [nlGenLoading, setNlGenLoading] = useState<boolean>(false);
+  const [nlGenGenerating, setNlGenGenerating] = useState<boolean>(false);
+
   // RADIO News Fill state — folder browser (RT-2026 → month → day)
   const RRT_PARENT = "1LSw5NwDhwg7PE9pJUO6jKPcd3yFBCOI9";
   const [browseStack, setBrowseStack] = useState<BrowseFolder[]>([
@@ -468,6 +508,55 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setRadioGenerating(false);
+    }
+  };
+
+  const handleNewslinePreview = async () => {
+    setNlGenLoading(true);
+    setError(null);
+    setNlGenPreview(null);
+    setNlGenResult(null);
+    try {
+      const res = await fetch("/api/newsroom/newsline/preview", {
+        method: "POST",
+        headers: CT,
+        body: JSON.stringify({ year: nlGenYear, month: nlGenMonth }),
+      });
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({ detail: res.statusText }));
+        setError(typeof d.detail === "string" ? d.detail : JSON.stringify(d.detail));
+      } else {
+        const data: NewslineResponse = await res.json();
+        setNlGenPreview(data);
+      }
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setNlGenLoading(false);
+    }
+  };
+
+  const handleNewslineGenerate = async () => {
+    if (!nlGenPreview) return;
+    setNlGenGenerating(true);
+    setError(null);
+    try {
+      const res = await fetch("/api/newsroom/newsline/generate", {
+        method: "POST",
+        headers: CT,
+        body: JSON.stringify({ year: nlGenYear, month: nlGenMonth }),
+      });
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({ detail: res.statusText }));
+        setError(typeof d.detail === "string" ? d.detail : JSON.stringify(d.detail));
+      } else {
+        const data: NewslineResponse = await res.json();
+        setNlGenResult(data);
+      }
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setNlGenGenerating(false);
     }
   };
 
@@ -1211,6 +1300,25 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
       {tab === "docgen" && (
         <div className="hud hud--bracket reveal reveal-1 flex min-h-0 flex-1 flex-col gap-3 p-3">
           <span className="label">DOCUMENT GENERATOR</span>
+          {/* Mode toggle: RADIO (spreadsheet + per-day scripts) vs NEWSLINE
+              (one daily doc per calendar day, date-stamped from a template). */}
+          <div className="flex items-center gap-2">
+            <button
+              className={`btn btn--compact ${docGenMode === "radio" ? "btn--signal" : ""}`}
+              onClick={() => setDocGenMode("radio")}
+            >
+              RADIO MODE
+            </button>
+            <button
+              className={`btn btn--compact ${docGenMode === "newsline" ? "btn--signal" : ""}`}
+              onClick={() => setDocGenMode("newsline")}
+            >
+              NEWSLINE MODE
+            </button>
+          </div>
+
+          {docGenMode === "radio" && (
+          <>
           {/* Document Generator Form controls */}
           <div className="flex flex-wrap items-center gap-3">
             <label className="flex items-center gap-1.5 mono text-xs">
@@ -1384,6 +1492,181 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
               </div>
             )}
           </div>
+          </>
+          )}
+
+          {docGenMode === "newsline" && (
+          <>
+          {/* Newsline Generator Form controls (no sheet-name — daily docs only) */}
+          <div className="flex flex-wrap items-center gap-3">
+            <label className="flex items-center gap-1.5 mono text-xs">
+              <span className="label">Year</span>
+              <input
+                type="number"
+                className="input mono px-2 py-1 text-xs"
+                style={{ width: 80 }}
+                value={nlGenYear}
+                onChange={(e) => {
+                  setNlGenYear(Number(e.target.value));
+                  setNlGenPreview(null);
+                  setNlGenResult(null);
+                }}
+              />
+            </label>
+
+            <label className="flex items-center gap-1.5 mono text-xs">
+              <span className="label">Month</span>
+              <select
+                className="mono label"
+                style={{
+                  background: "var(--color-panel-2)",
+                  color: "var(--color-phosphor-dim)",
+                  border: "1px solid var(--color-edge)",
+                  padding: "4px 6px",
+                  fontSize: "11px",
+                }}
+                value={nlGenMonth}
+                onChange={(e) => {
+                  setNlGenMonth(Number(e.target.value));
+                  setNlGenPreview(null);
+                  setNlGenResult(null);
+                }}
+              >
+                {Array.from({ length: 12 }, (_, i) => i + 1).map((m) => (
+                  <option key={m} value={m}>
+                    {m < 10 ? `0${m}` : m} — {new Date(2000, m - 1, 1).toLocaleString("en-US", { month: "long" })}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <div className="ml-auto flex gap-2">
+              <button
+                className="btn btn--compact"
+                onClick={() => void handleNewslinePreview()}
+                disabled={nlGenLoading || nlGenGenerating}
+              >
+                {nlGenLoading ? "PREVIEWING…" : "PREVIEW"}
+              </button>
+              <button
+                className="btn btn--compact btn--signal"
+                onClick={() => void handleNewslineGenerate()}
+                disabled={!nlGenPreview || nlGenLoading || nlGenGenerating}
+                title={!nlGenPreview ? "Run PREVIEW first" : "Generate daily docs in Google Drive"}
+              >
+                {nlGenGenerating ? "GENERATING…" : "GENERATE"}
+              </button>
+            </div>
+          </div>
+
+          {/* Folder & Counts summary (year + month folders, created flags) */}
+          {(nlGenPreview || nlGenResult) && (
+            <div className="flex flex-col gap-1.5 border border-edge px-3 py-2 text-xs mono" style={{ background: "var(--color-void)" }}>
+              {(nlGenPreview?.year_folder || nlGenResult?.year_folder) && (() => {
+                const y = nlGenResult?.year_folder || nlGenPreview?.year_folder!;
+                return (
+                  <div className="flex items-center gap-2">
+                    <span className="label" style={{ color: "var(--color-signal)" }}>YEAR FOLDER:</span>
+                    <span style={{ color: "var(--color-phosphor)" }}>{y.name}</span>
+                    {y.id && (
+                      <span style={{ color: "var(--color-muted)" }}>({y.id})</span>
+                    )}
+                    {y.created && (
+                      <span className="label" style={{ color: "var(--color-go)" }}>NEW</span>
+                    )}
+                  </div>
+                );
+              })()}
+              {(nlGenPreview?.month_folder || nlGenResult?.month_folder) && (() => {
+                const m = nlGenResult?.month_folder || nlGenPreview?.month_folder!;
+                return (
+                  <div className="flex items-center gap-2">
+                    <span className="label" style={{ color: "var(--color-signal)" }}>MONTH FOLDER:</span>
+                    <span style={{ color: "var(--color-phosphor)" }}>{m.name}</span>
+                    {m.id && (
+                      <span style={{ color: "var(--color-muted)" }}>({m.id})</span>
+                    )}
+                    {m.created && (
+                      <span className="label" style={{ color: "var(--color-go)" }}>NEW</span>
+                    )}
+                  </div>
+                );
+              })()}
+              {(nlGenResult?.counts || nlGenPreview?.counts) && (() => {
+                const c = nlGenResult?.counts || nlGenPreview?.counts!;
+                return (
+                  <div className="flex items-center gap-2 text-xs">
+                    <span className="label">SUMMARY:</span>
+                    <span style={{ color: "var(--color-phosphor-dim)" }}>
+                      {c.planned} planned · {c.to_create} to create · {c.skipped} skip
+                    </span>
+                  </div>
+                );
+              })()}
+            </div>
+          )}
+
+          {/* Output items list */}
+          <div className="flex min-h-0 flex-1 flex-col gap-1 overflow-auto border border-edge p-2" style={{ background: "var(--color-void)" }}>
+            {nlGenResult ? (
+              <>
+                <span className="label mb-1" style={{ color: "var(--color-go)" }}>
+                  CREATED FILES ({nlGenResult.created?.length || 0})
+                </span>
+                {nlGenResult.created?.map((item, idx) => (
+                  <div key={idx} className="mono flex items-center gap-2 border-b border-edge-soft py-1 text-xs">
+                    <span className="pip pip--go" />
+                    <span className="flex-1 truncate" style={{ color: "var(--color-phosphor)" }}>
+                      {item.name}
+                    </span>
+                    {item.link ? (
+                      <a
+                        href={item.link}
+                        target="_blank"
+                        rel="noreferrer"
+                        style={{ color: "var(--color-signal)" }}
+                      >
+                        open ↗
+                      </a>
+                    ) : null}
+                  </div>
+                ))}
+                {nlGenResult.skipped && nlGenResult.skipped.length > 0 && (
+                  <div className="mt-2 flex flex-col gap-1">
+                    <span className="label" style={{ color: "var(--color-hazard)" }}>
+                      SKIPPED FILES ({nlGenResult.skipped.length})
+                    </span>
+                    {nlGenResult.skipped.map((item, idx) => (
+                      <div key={idx} className="mono flex items-center gap-2 py-0.5 text-xs">
+                        <span className="pip pip--hazard" />
+                        <span style={{ color: "var(--color-muted)" }}>{item.name}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </>
+            ) : nlGenPreview ? (
+              <>
+                <span className="label mb-1" style={{ color: "var(--color-signal)" }}>
+                  PLAN TO CREATE ({nlGenPreview.to_create?.length || 0})
+                </span>
+                {nlGenPreview.to_create?.map((item, idx) => (
+                  <div key={idx} className="mono flex items-center gap-2 border-b border-edge-soft py-1 text-xs">
+                    <span className="pip pip--signal" />
+                    <span className="flex-1 truncate" style={{ color: "var(--color-phosphor-dim)" }}>
+                      {item.name}
+                    </span>
+                  </div>
+                ))}
+              </>
+            ) : (
+              <div className="flex flex-1 items-center justify-center">
+                <span className="label">— Select year & month, then click PREVIEW —</span>
+              </div>
+            )}
+          </div>
+          </>
+          )}
         </div>
       )}
 

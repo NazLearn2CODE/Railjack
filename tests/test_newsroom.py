@@ -301,6 +301,214 @@ def test_radio_requires_year_and_month(monkeypatch):
     assert calls == []  # nothing exec'd on a bad body
 
 
+# ---------------------------------------------------------------- newsline
+# `newsline.py` lives in the newsroom skill dir (vault copy = the deployed one),
+# loaded by path exactly like radio.py above. Pure helpers are tested directly;
+# the Drive/Docs calls stay offline via monkeypatch.
+
+
+def _load_newsline():
+    import importlib.util
+
+    for p in (newsroom.SCRIPTS / "newsline.py",
+              Path.home() / ".claude" / "skills" / "newsroom" / "scripts" / "newsline.py"):
+        if p.exists():
+            spec = importlib.util.spec_from_file_location("newsline_mod", p)
+            mod = importlib.util.module_from_spec(spec)
+            assert spec.loader is not None
+            spec.loader.exec_module(mod)
+            return mod
+    pytest.skip("newsline.py not on a skill path yet (canonical writes pending)")
+
+
+def test_nl_doc_name_for_format():
+    nl = _load_newsline()
+    assert nl.doc_name_for(2026, 7, 1) == "NL & NWB 010726"
+    assert nl.doc_name_for(2026, 7, 31) == "NL & NWB 310726"
+    # YY wraps mod 100 (year 2100 → 00).
+    assert nl.doc_name_for(2100, 12, 9) == "NL & NWB 091200"
+
+
+def test_nl_ddmmyy_str():
+    nl = _load_newsline()
+    from datetime import date
+    assert nl._ddmmyy_str(date(2026, 7, 1)) == "01.JULY.2026"
+    assert nl._ddmmyy_str(date(2026, 7, 31)) == "31.JULY.2026"
+
+
+def test_nl_date_long_str_weekday_and_ordinal():
+    nl = _load_newsline()
+    from datetime import date
+    # 2026-07-31 = Friday; ordinal 31st.
+    assert nl._date_long_str(date(2026, 7, 31)) == "Friday, July 31st of 2026"
+    # 2026-07-01 = Wednesday; day 1 → 1st (no leading zero).
+    assert nl._date_long_str(date(2026, 7, 1)) == "Wednesday, July 1st of 2026"
+    # ordinal edge cases (11th–13th → th; 21st → st).
+    assert nl._date_long_str(date(2026, 7, 11)).endswith("11th of 2026")
+    assert nl._date_long_str(date(2026, 7, 21)).endswith("21st of 2026")
+    assert nl._date_long_str(date(2026, 7, 13)).endswith("13th of 2026")
+
+
+def test_nl_build_plan_day_counts():
+    nl = _load_newsline()
+    jul = nl.build_plan(2026, 7)
+    assert len(jul) == 31
+    assert jul[0]["name"] == "NL & NWB 010726"
+    assert jul[-1]["name"] == "NL & NWB 310726"
+    # every entry carries its datetime.date for stamping.
+    from datetime import date
+    assert jul[0]["date"] == date(2026, 7, 1)
+    assert all("date" in it and "day" in it for it in jul)
+    # Feb 2026 is not a leap year → 28 days.
+    assert len(nl.build_plan(2026, 2)) == 28
+
+
+def test_nl_preview_makes_no_writes(monkeypatch, capsys):
+    """Preview is read-only: no folder creation, no copy, no stamping — it only
+    reads folder existence + names. google_token + create_folder + copy_file +
+    stamp_dates must never fire."""
+    nl = _load_newsline()
+
+    def boom(*a, **k):
+        raise AssertionError("preview touched a write path")
+
+    monkeypatch.setattr(nl, "google_token", boom)
+    monkeypatch.setattr(nl, "create_folder", boom)
+    monkeypatch.setattr(nl, "copy_file", boom)
+    monkeypatch.setattr(nl, "stamp_dates", boom)
+    # Both folders reported as missing → dry path returns would-create flags
+    # without touching the network beyond the read (which we stub to "absent").
+    monkeypatch.setattr(nl, "_find_folder_by_name", lambda *a, **k: (None, None))
+    monkeypatch.setattr(nl, "_find_folder_by_prefix", lambda *a, **k: (None, None))
+
+    nl.main(["--year", "2026", "--month", "7", "preview"])
+    out = json.loads(capsys.readouterr().out)
+    assert out["dry_run"] is True
+    assert out["year_folder"] == {"id": None, "name": "2026", "created": True}
+    assert out["month_folder"] == {"id": None, "name": "202607 JUL", "created": True}
+    assert out["counts"] == {"planned": 31, "to_create": 31, "skipped": 0}
+    assert out["created"] == []
+    assert out["to_create"][0] == {"name": "NL & NWB 010726", "day": 1}
+    assert len(out["to_create"]) == 31
+
+
+def test_nl_preview_skips_existing_docs(monkeypatch, capsys):
+    nl = _load_newsline()
+    monkeypatch.setattr(nl, "google_token", lambda *a, **k: pytest.fail("net"))
+    monkeypatch.setattr(nl, "copy_file", lambda *a, **k: pytest.fail("write"))
+    # year + month folders exist; a couple of daily docs already present.
+    monkeypatch.setattr(nl, "_find_folder_by_name",
+                        lambda parent, name: ("YID", name) if name == "2026" else (None, None))
+    monkeypatch.setattr(nl, "_find_folder_by_prefix",
+                        lambda parent, prefix: ("MID", "202607 JUL"))
+    monkeypatch.setattr(nl, "existing_names",
+                        lambda fid: {"NL & NWB 010726", "NL & NWB 020726"} if fid == "MID" else set())
+    nl.main(["--year", "2026", "--month", "7", "preview"])
+    out = json.loads(capsys.readouterr().out)
+    assert out["counts"]["planned"] == 31
+    assert out["counts"]["to_create"] == 29
+    assert out["counts"]["skipped"] == 2
+    assert out["year_folder"]["created"] is False
+    assert out["month_folder"]["created"] is False
+
+
+def test_nl_generate_creates_folders_and_stamps(monkeypatch, capsys):
+    """Real generate: missing folders are created, each missing daily doc is
+    copied + stamped exactly once; existing docs are skipped (never re-stamped)."""
+    nl = _load_newsline()
+    created_folders = []
+    monkeypatch.setattr(nl, "_find_folder_by_name", lambda *a, **k: (None, None))
+    monkeypatch.setattr(nl, "_find_folder_by_prefix", lambda *a, **k: (None, None))
+    monkeypatch.setattr(nl, "create_folder",
+                        lambda name, parent: created_folders.append((name, parent)) or f"id-{name}")
+    monkeypatch.setattr(nl, "existing_names", lambda fid: set())
+    copied = []
+    stamped = []
+    monkeypatch.setattr(nl, "copy_file",
+                        lambda tid, name, fid: (copied.append(name) or (f"doc-{name}", name, f"link-{name}")))
+    monkeypatch.setattr(nl, "stamp_dates",
+                        lambda doc_id, d: stamped.append((doc_id, d)))
+    nl.main(["--year", "2026", "--month", "7", "generate"])
+    out = json.loads(capsys.readouterr().out)
+    # year folder created, then month folder created inside it.
+    assert created_folders == [("2026", nl.NL_HOME), ("202607 JUL", "id-2026")]
+    assert out["dry_run"] is False
+    assert out["year_folder"]["created"] is True
+    assert out["month_folder"]["created"] is True
+    # 31 days → 31 copies + 31 stamps, each stamped with its own date.
+    assert len(copied) == 31
+    assert len(stamped) == 31
+    from datetime import date
+    assert stamped[0] == ("doc-NL & NWB 010726", date(2026, 7, 1))
+    assert stamped[-1][1] == date(2026, 7, 31)
+    assert out["created"][0]["link"] == "link-NL & NWB 010726"
+    assert len(out["created"]) == 31
+
+
+def test_nl_generate_skips_existing_never_restamps(monkeypatch, capsys):
+    """Idempotency: a full month re-run copies + stamps NOTHING (everything skipped)."""
+    nl = _load_newsline()
+    monkeypatch.setattr(nl, "_find_folder_by_name",
+                        lambda parent, name: ("YID", name) if name == "2026" else (None, None))
+    monkeypatch.setattr(nl, "_find_folder_by_prefix",
+                        lambda parent, prefix: ("MID", "202607 JUL"))
+    # every daily doc already exists.
+    all_names = {nl.doc_name_for(2026, 7, d) for d in range(1, 32)}
+    monkeypatch.setattr(nl, "existing_names", lambda fid: all_names)
+
+    def boom(*a, **k):
+        raise AssertionError("generate re-touched an existing doc")
+    monkeypatch.setattr(nl, "copy_file", boom)
+    monkeypatch.setattr(nl, "stamp_dates", boom)
+    monkeypatch.setattr(nl, "create_folder", boom)
+    nl.main(["--year", "2026", "--month", "7", "generate"])
+    out = json.loads(capsys.readouterr().out)
+    assert out["counts"]["to_create"] == 0
+    assert out["counts"]["skipped"] == 31
+    assert out["created"] == []
+    assert len(out["skipped"]) == 31
+
+
+def test_nl_requires_valid_month(monkeypatch, capsys):
+    nl = _load_newsline()
+    # _fatal prints the contract payload then sys.exit(1) — catch the exit and
+    # read the captured stdout (the route layer turns _fatal into a clean 400).
+    with pytest.raises(SystemExit):
+        nl.main(["--year", "2026", "--month", "13", "preview"])
+    out = json.loads(capsys.readouterr().out)
+    assert out["_fatal"] == "month must be 1-12"
+
+
+def test_nl_preview_argv(monkeypatch):
+    c, calls = _client(monkeypatch, out=b'{"dry_run": true}')
+    assert c.post("/api/newsroom/newsline/preview",
+                  json={"year": 2026, "month": 7}).status_code == 200
+    argv = calls[0]
+    assert argv[0] == "python3"
+    assert argv[1].endswith("newsline.py")
+    assert argv[2:6] == ["--year", "2026", "--month", "7"]
+    assert argv[-1] == "preview"
+
+
+def test_nl_generate_argv(monkeypatch):
+    c, calls = _client(monkeypatch, out=b'{"created": []}')
+    assert c.post("/api/newsroom/newsline/generate",
+                  json={"year": 2026, "month": 7}).status_code == 200
+    argv = calls[0]
+    assert argv[1].endswith("newsline.py")
+    assert argv[2:6] == ["--year", "2026", "--month", "7"]
+    assert argv[-1] == "generate"
+
+
+def test_nl_requires_year_and_month(monkeypatch):
+    c, calls = _client(monkeypatch)
+    assert c.post("/api/newsroom/newsline/preview", json={"year": 2026}).status_code == 400
+    assert c.post("/api/newsroom/newsline/preview", json={"month": 7}).status_code == 400
+    assert c.post("/api/newsroom/newsline/preview", json={}).status_code == 400
+    assert c.post("/api/newsroom/newsline/generate", json={}).status_code == 400
+    assert calls == []  # nothing exec'd on a bad body
+
+
 # ---------------------------------------------------------------- radio/news
 # RADIO ▸ News Fill: `radio_news.py` fronts the radio-news skill script.
 # `_rn_client` mirrors `_client` but mounts radio_news.router and captures the
