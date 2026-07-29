@@ -1137,15 +1137,19 @@ def test_df_format_route_requires_doc_id(monkeypatch):
 def test_rewrite_success_and_prompt_assembly(monkeypatch):
     """POST /api/newsroom/rewrite loads Ben's gem (not news-producer), includes the
     v2 name overlay rule ([English(Thai)] / Thai fallback / source-only carve-out),
-    instructs ~~date~~ underline markers, fires a separate SEO call with AI Block
-    Version A+B override, and returns {"rewritten", "seo"}."""
+    instructs ~~date~~ underline markers, asks Ben for a {title, title_th, body} JSON
+    object (which is reassembled into the EN:/TH: + body blob the panel sends), fires a
+    separate SEO call with a Version-A-only override, and returns {"rewritten", "seo"}."""
     calls = []
 
     async def fake_zai_message(prompt: str, max_tokens: int = 400, system: str | None = None, model: str | None = None, timeout: float = 30.0) -> str:
         calls.append({"prompt": prompt, "system": system, "max_tokens": max_tokens})
         if system:
-            return "### Version A — AI Summary\nSummary text.\n\n### Version B — AI Key Points\n- WHAT: Fact."
-        return "This is broadcast prose by **[Ben(เบ็น)]** mentioning **นายกฯ** on ~~July 15, 2026~~."
+            return "### Version A — AI Summary\nSummary text."
+        return (
+            '{"title": "Rail crash payout ordered", "title_th": "หัวข้อไทย", '
+            '"body": "This is broadcast prose by **[Ben(เบ็น)]** mentioning **นายกฯ** on ~~July 15, 2026~~."}'
+        )
 
     monkeypatch.setattr(newsroom.zai, "zai_message", fake_zai_message)
     app = FastAPI()
@@ -1156,6 +1160,9 @@ def test_rewrite_success_and_prompt_assembly(monkeypatch):
     assert r.status_code == 200
     data = r.json()
     assert "rewritten" in data and "seo" in data
+    # JSON pieces reassembled into the sendable EN:/TH: + body blob:
+    assert "EN: Rail crash payout ordered" in data["rewritten"]
+    assert "TH: หัวข้อไทย" in data["rewritten"]
     assert "broadcast prose" in data["rewritten"]
     assert "Version A" in data["seo"]
 
@@ -1163,8 +1170,10 @@ def test_rewrite_success_and_prompt_assembly(monkeypatch):
     ben_call = [c for c in calls if not c["system"]][0]
     seo_call = [c for c in calls if c["system"]][0]
 
-    # Ben call — v2 name overlay rule:
+    # Ben call — JSON output schema + v2 name overlay rule:
     assert "editor of Thailand NOW" in ben_call["prompt"]           # Ben's gem body
+    assert "single JSON object" in ben_call["prompt"]               # JSON output override
+    assert '"title_th"' in ben_call["prompt"]                       # JSON schema keys
     assert "NAME OVERLAY RULE" in ben_call["prompt"]                # overlay heading present
     assert "[OfficialEnglish(Thai)]" in ben_call["prompt"]          # overlay format spec
     assert "NO transliteration" in ben_call["prompt"]               # no-guess rule
@@ -1178,9 +1187,10 @@ def test_rewrite_success_and_prompt_assembly(monkeypatch):
     # PERSON'S NAME" sentence must NOT appear in v2:
     assert "leave every name and honorific in the ORIGINAL THAI SCRIPT" not in ben_call["prompt"]
 
-    # SEO call asserts:
-    assert "AI SEO Block" in seo_call["system"]             # SEO gem body
-    assert "Version A (40-60w summary)" in seo_call["system"]  # A+B override
+    # SEO call asserts — Version A only (no Version B):
+    assert "AI SEO Block" in seo_call["system"]                    # SEO gem body
+    assert "Version A (40-60w summary)" in seo_call["system"]      # A-only override
+    assert "Do NOT produce Version B" in seo_call["system"]        # B dropped
 
 
 def test_rewrite_requires_text(monkeypatch):

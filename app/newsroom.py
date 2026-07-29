@@ -317,6 +317,26 @@ def _seo_gem_text() -> str:
     return md.strip()
 
 
+def _parse_ben_json(raw: str) -> tuple[str, str, str]:
+    """Parse the model's ``{title, title_th, body}`` reply (the gem's ### Output
+    schema). Tolerates a stray code fence or preamble by slicing the outermost
+    braces. Falls back to ``("", "", <raw>)`` so a parse miss still surfaces the
+    copy as the body rather than dropping it."""
+    i, j = raw.find("{"), raw.rfind("}")
+    if i >= 0 and j > i:
+        try:
+            d = json.loads(raw[i:j + 1])
+            if isinstance(d, dict):
+                return (
+                    str(d.get("title", "")).strip(),
+                    str(d.get("title_th", "")).strip(),
+                    str(d.get("body", "")).strip(),
+                )
+        except (ValueError, TypeError):
+            pass
+    return "", "", raw.strip()
+
+
 @router.post("/api/newsroom/rewrite")
 async def api_rewrite(body: dict = Body(...)):
     """Run the Script-box text through Ben's gem (broadcast prose + **name** markers)
@@ -328,17 +348,20 @@ async def api_rewrite(body: dict = Body(...)):
         raise HTTPException(400, "nothing to rewrite — the Script box is empty")
     ben_prompt = (
         _gem_text()
-        + "\n\n=== OUTPUT OVERRIDE (replaces JSON instructions) ===\n"
-        "Output the broadcast rewrite as readable prose (Ben's hard rules and voice still apply). "
-        "Do NOT output JSON. Structure the prose as 2-4 separate paragraphs, each separated by a "
-        "blank line (\\n\\n) — never one unbroken block of text. "
-        "Wrap every person's NAME in **double-stars** per the NAME OVERLAY rule below. "
-        "Wrap every date, time, and relative-time expression in ~~…~~ markers "
-        "(e.g. ~~July 15, 2026~~, ~~3:00 PM~~, ~~next month~~). These become underlined in the Doc. "
-        "These are the ONLY allowed markup. FIRST output the title pair on two lines — "
-        "'EN: <a short SEO-friendly English title>' and 'TH: <the original Thai title from the "
-        "source, retained exactly; translate from EN if the source has none>'. Then a blank line, "
-        "then the broadcast rewrite as 2-4 paragraphs. No JSON, no other preamble, no commentary.\n\n"
+        + "\n\n=== OUTPUT OVERRIDE (this replaces the ### Output schema) ===\n"
+        "Return ONLY a single JSON object — no code fence, no preamble, no commentary — with "
+        "EXACTLY these keys:\n"
+        '{"title": "<a short, SEO-friendly English title>", '
+        '"title_th": "<the original Thai title from the source, retained exactly; translate from '
+        'the English title if the source has none>", '
+        '"body": "<the broadcast rewrite>"}\n'
+        "Rules for the `body` string (Ben's hard rules and voice still apply):\n"
+        "- Readable broadcast prose in 2-4 separate paragraphs; separate paragraphs with a blank "
+        "line, written as \\n\\n inside the JSON string. Never one unbroken block.\n"
+        "- Wrap every person's NAME in **double-stars** per the NAME OVERLAY rule below.\n"
+        "- Wrap every date, time, and relative-time expression in ~~…~~ markers "
+        "(e.g. ~~July 15, 2026~~, ~~3:00 PM~~, ~~next month~~). These become underlined in the Doc.\n"
+        "- **double-stars** and ~~tildes~~ are the ONLY markup allowed in `body`; no other markdown.\n\n"
         "=== NAME OVERLAY RULE ===\n"
         "For each person the SOURCE names, render their name as follows:\n"
         "- If you can CONFIDENTLY confirm that person's official English name (the established public "
@@ -365,9 +388,9 @@ async def api_rewrite(body: dict = Body(...)):
     seo_system = (
         _seo_gem_text()
         + "\n\n=== CRITICAL OUTPUT OVERRIDE ===\n"
-        "Produce ONLY the AI SEO Block — Version A (40-60w summary) + Version B (key points).\n"
-        "SKIP focus keyphrases, meta descriptions, and hashtags entirely. Do not output keyphrase lists or hashtags.\n"
-        "Output ONLY the AI SEO Block (Version A and Version B)."
+        "Produce ONLY the AI SEO Block — Version A (40-60w summary). "
+        "Do NOT produce Version B (Key Points), focus keyphrases, meta descriptions, or hashtags.\n"
+        "Output ONLY the Version A summary paragraph."
     )
     out_ben, out_seo = await asyncio.gather(
         zai.zai_message(ben_prompt, max_tokens=9000, timeout=120),
@@ -377,7 +400,12 @@ async def api_rewrite(body: dict = Body(...)):
         raise HTTPException(502, "rewrite came back empty")
     if not out_seo.strip():
         raise HTTPException(502, "seo generation came back empty")
-    return {"rewritten": out_ben, "seo": out_seo}
+    title, title_th, body = _parse_ben_json(out_ben)
+    # Reassemble the sendable blob the panel already understands: EN/TH title
+    # lines, then the marked-up body. Downstream (Script box, SEND TO NL/RADIO)
+    # is unchanged — the JSON is only a more reliable transport for the pieces.
+    rewritten = f"EN: {title}\nTH: {title_th}\n\n{body}" if (title or title_th) else body
+    return {"rewritten": rewritten, "seo": out_seo}
 
 
 # ---------------------------------------------------------------- health

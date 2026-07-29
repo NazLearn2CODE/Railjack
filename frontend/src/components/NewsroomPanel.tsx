@@ -29,9 +29,24 @@ const rewriteDoc = (body: string, muted = false) =>
   `white-space:pre-wrap;word-wrap:break-word}</style></head><body>${escapeHtml(body)}</body></html>`;
 
 const renderRewritePreview = (text: string, seoBlock: string) => {
+  // Peel a leading "EN: … / TH: …" title pair (from the JSON rewrite) into a
+  // styled header; the rest is the body. Falls back to rendering the whole text
+  // if the header isn't present, so older/plain output still shows correctly.
+  let headerHtml = "";
+  let bodyText = text;
+  const m = text.match(/^EN:[ \t]*(.*)\r?\nTH:[ \t]*(.*)\r?\n+([\s\S]*)$/);
+  if (m) {
+    const [, en, th, rest] = m;
+    headerHtml =
+      `<div style="margin-bottom:12px;border-bottom:1px solid #445566;padding-bottom:8px;line-height:1.55">` +
+      (en ? `<div><span style="color:#5f7285;font-size:12px">EN&nbsp;&nbsp;</span><span style="color:#e6edf3;font-weight:600">${escapeHtml(en)}</span></div>` : "") +
+      (th ? `<div><span style="color:#5f7285;font-size:12px">TH&nbsp;&nbsp;</span><span style="color:#e6edf3;font-weight:600">${escapeHtml(th)}</span></div>` : "") +
+      `</div>`;
+    bodyText = rest;
+  }
   // Convert **name** → <strong> and ~~date~~ → <u>; escape everything else.
   // Split on both marker patterns in one pass so they can interleave naturally.
-  const htmlText = text
+  const htmlText = bodyText
     .split(/(\*\*[^*]+\*\*|~~[^~]+~~)/g)
     .map((part) => {
       if (part.startsWith("**") && part.endsWith("**")) {
@@ -53,7 +68,7 @@ const renderRewritePreview = (text: string, seoBlock: string) => {
     `body{margin:0;padding:12px;background:#0b0f14;color:#c8d3df;font:17px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre-wrap;word-wrap:break-word}` +
     `strong{color:#7dd3fc;font-weight:600}` +
     `u{text-decoration:underline;text-underline-offset:3px;color:#fbbf60}` +
-    `</style></head><body>${htmlText}${seoHtml}</body></html>`
+    `</style></head><body>${headerHtml}${htmlText}${seoHtml}</body></html>`
   );
 };
 
