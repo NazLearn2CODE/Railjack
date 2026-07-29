@@ -122,13 +122,17 @@ async def api_ledger():
 
 @router.post("/api/newsroom/append")
 async def api_append(body: dict = Body(...)):
-    """Drop a finished script beneath ***END CREDIT*** in the day's NL RUNDOWN
-    tab. `nl_append.py` resolves the doc (--today via Drive, or explicit
-    --doc) and needs the google-workspace MCP OAuth creds on this machine."""
+    """Append a finished script to the **bottom** of the day's NL & NWB rundown
+    tab (default NL RUNDOWN; pass ``tab`` for AM/MID/EVE). `nl_append.py`
+    resolves the doc (--today via Drive, or explicit --doc) and needs the
+    google-workspace MCP OAuth creds on this machine."""
     text = body.get("text", "")
     if not text.strip():
         raise HTTPException(400, "text required")
     argv = [PY, str(APPEND)]
+    tab = str(body.get("tab") or "NL").strip().upper()
+    if tab != "NL":  # NL is the script default — only override for other tabs
+        argv += ["--tab", tab]
     if body.get("doc_id"):
         argv += ["--doc", body["doc_id"]]
     else:

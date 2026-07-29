@@ -90,6 +90,15 @@ def test_append_today_vs_doc(monkeypatch):
     assert calls[1][2:] == ["--doc", "D", "--text", "s"]
 
 
+def test_append_tab_passthrough(monkeypatch):
+    """tab AM/MID/EVE → --tab in argv; NL (default, any case) → no --tab."""
+    c, calls = _client(monkeypatch, out=b'{"appended": true}')
+    assert c.post("/api/newsroom/append", json={"text": "s", "tab": "MID"}).status_code == 200
+    assert calls[0][2:] == ["--tab", "MID", "--today", "--text", "s"]
+    assert c.post("/api/newsroom/append", json={"text": "s", "tab": "nl"}).status_code == 200
+    assert calls[1][2:] == ["--today", "--text", "s"]  # NL normalised → default, no --tab
+
+
 # ---------------------------------------------------------------- errors
 
 

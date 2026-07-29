@@ -5,11 +5,12 @@ import type { ModuleConfig } from "../store";
 /**
  * NEWSROOM panel — thin HUD over the newsroom skill CLI (queue.py +
  * nl_append.py). Queue list with author filter, story detail pane with an
- * editable script area, SEND TO NL (slot-fill + auto-mark), SEND TO RADIO
- * (section/block/slot fill), and a Document Generator tab.
+ * editable script area, SEND TO NL (append to bottom of selected tab + auto-mark),
+ * SEND TO RADIO (section/block/slot fill), and a Document Generator tab.
  *
- * Phase 2: SEND TO NL replaces append with slot-fill (/api/newsroom/fill);
- * SEND TO RADIO fills a slot in the daily Radio script (/api/newsroom/radio/fill).
+ * SEND TO NL appends the script to the bottom of the chosen rundown tab
+ * (/api/newsroom/append — NL/AM/MID/EVE); SEND TO RADIO fills a slot in the
+ * daily Radio script (/api/newsroom/radio/fill).
  *
  * REWRITE runs the Script-box text through the backend Rules-Gem pass
  * (/api/newsroom/rewrite, source-only — keeps Thai names/titles in the
@@ -429,7 +430,6 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
   // ---- Phase 2: NL slot-fill state ----
   const NL_HOME_FOLDER = "0BxI14z7NX9CIc3VJNGJwTGlJcG8";
   const [nlTab, setNlTab] = useState<string>("NL");
-  const [nlSlot, setNlSlot] = useState<number>(1);
   const [nlPickedDoc, setNlPickedDoc] = useState<NewsDoc | null>(null);
   const [nlFilling, setNlFilling] = useState(false);
   const [nlFillResult, setNlFillResult] = useState<{ filled: boolean; chars: number; bold_spans: number; underline_spans: number } | null>(null);
@@ -832,23 +832,22 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
     setSendText(s.detail);
   };
 
-  // SEND TO NL — Phase 2 slot-fill: replace slot body in the selected tab.
+  // SEND TO NL — append the script to the bottom of the selected tab.
   // Marks the story on success and refreshes queue.
   const sendToNLFill = async () => {
     if (!selected || !sendText.trim()) return;
     setNlFilling(true);
     setNlFillResult(null);
-    const body: { today?: boolean; doc_id?: string; text: string; tab: string; slot: number } = {
+    const body: { today?: boolean; doc_id?: string; text: string; tab: string } = {
       text: sendText,
       tab: nlTab,
-      slot: nlSlot,
     };
     if (nlPickedDoc) {
       body.doc_id = nlPickedDoc.id;
     } else {
       body.today = true;
     }
-    const ok = await post("/api/newsroom/fill", body);
+    const ok = await post("/api/newsroom/append", body);
     if (ok) {
       // Parse the JSON result from the last successful POST (the 'post' helper
       // doesn't return the body — re-fetch from the result stored in error state
@@ -1073,7 +1072,7 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
                     </button>
                   </div>
 
-                  {/* ---- Phase 2: SEND TO NL slot-fill controls ---- */}
+                  {/* ---- SEND TO NL append controls ---- */}
                   <div
                     className="flex flex-wrap items-end gap-2"
                     style={{ borderTop: "1px solid var(--color-edge)", paddingTop: 8 }}
@@ -1102,29 +1101,6 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
                       </select>
                     </label>
 
-                    {/* NL slot number */}
-                    <label className="flex flex-col gap-0.5">
-                      <span className="label" style={{ fontSize: 9 }}>SLOT</span>
-                      <select
-                        id="nl-slot-input"
-                        className="mono"
-                        style={{
-                          background: "var(--color-panel-2)",
-                          color: "var(--color-phosphor-dim)",
-                          border: "1px solid var(--color-edge)",
-                          padding: "3px 5px",
-                          fontSize: "11px",
-                          minWidth: 56,
-                        }}
-                        value={nlSlot}
-                        onChange={(e) => setNlSlot(Number(e.target.value))}
-                      >
-                        {Array.from({ length: 15 }, (_, i) => i + 1).map((n) => (
-                          <option key={n} value={n}>{n}</option>
-                        ))}
-                      </select>
-                    </label>
-
                     <DocPicker
                       rootId={NL_HOME_FOLDER}
                       rootLabel="NL Home"
@@ -1138,7 +1114,7 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
                       className="btn btn--compact"
                       onClick={() => void sendToNLFill()}
                       disabled={nlFilling || !sendText.trim()}
-                      title={`Fill slot ${nlSlot} in the ${nlTab} tab of ${nlPickedDoc ? nlPickedDoc.name : "today's NL & NWB doc"}`}
+                      title={`Append to the bottom of the ${nlTab} tab of ${nlPickedDoc ? nlPickedDoc.name : "today's NL & NWB doc"}`}
                     >
                       {nlFilling ? "SENDING…" : "SEND TO NL ▸"}
                     </button>
@@ -1244,7 +1220,7 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
                   {nlFillResult && (
                     <div className="mono flex items-center gap-2" style={{ fontSize: 11, color: "var(--color-go)" }}>
                       <span className="pip pip--go" />
-                      NL slot {nlSlot} filled — {nlFillResult.chars} chars
+                      Appended to {nlTab} — {nlFillResult.chars} chars
                     </div>
                   )}
 
