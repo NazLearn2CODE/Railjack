@@ -89,7 +89,9 @@ async def _script(argv: list[str], timeout: float = 90):
 async def api_queue(date: str | None = None, author: str = "Chompatsorn"):
     """Undone stories for the day (default author Chompatsorn; `all` = every
     reporter). Delegates to `queue.py list` — dedup ledger applied there."""
-    argv = [PY, str(QUEUE), "list", "--json", "--author", author]
+    # --all: include already-sent rows (stamped `done`) — the QUEUE panel dims +
+    # tags them "✓ SENT" instead of hiding; the ledger/mark path stays in queue.py.
+    argv = [PY, str(QUEUE), "list", "--json", "--all", "--author", author]
     if date:
         argv += ["--date", date]
     return await _script(argv)

@@ -42,7 +42,7 @@ def test_queue_defaults_to_chompatsorn(monkeypatch):
     assert argv[0] == "python3"  # exec via interpreter — vault scripts carry no exec bit
     assert argv[1].endswith("queue.py")
     assert argv[2:4] == ["list", "--json"]
-    assert argv[4:6] == ["--author", "Chompatsorn"]
+    assert argv[4:7] == ["--all", "--author", "Chompatsorn"]  # --all keeps sent rows (dimmed in UI)
     assert "--date" not in argv
 
 
@@ -50,8 +50,7 @@ def test_queue_passes_date_and_author(monkeypatch):
     c, calls = _client(monkeypatch, out=b"{}")
     assert c.get("/api/newsroom/queue?date=2026-07-21&author=all").status_code == 200
     argv = calls[0]
-    assert ["--author", "all"] == argv[4:6]
-    assert ["--date", "2026-07-21"] == argv[6:8]
+    assert argv[2:] == ["list", "--json", "--all", "--author", "all", "--date", "2026-07-21"]
 
 
 def test_story_show(monkeypatch):

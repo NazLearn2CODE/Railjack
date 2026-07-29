@@ -82,6 +82,7 @@ interface Story {
   shortdesc: string;
   detail: string;
   link: string;
+  done?: boolean;
 }
 interface Queue {
   date: string;
@@ -1012,9 +1013,11 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
                     background: "var(--color-void)",
                     color:
                       selected?.id === s.id ? "var(--color-signal)" : "var(--color-phosphor-dim)",
+                    opacity: s.done ? 0.45 : 1,
                   }}
                 >
                   <span className="flex-1 truncate text-xs">
+                    {s.done ? <span style={{ color: "var(--color-go)" }}>✓ SENT </span> : null}
                     {s.footage_code ? (
                       <span style={{ color: "var(--color-go)" }}>{s.footage_code} </span>
                     ) : null}
