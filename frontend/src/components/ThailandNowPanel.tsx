@@ -1080,6 +1080,7 @@ function EventsTab() {
   const [fetching, setFetching] = useState(false);
   const [busyLabel, setBusyLabel] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const [lastScoutAt, setLastScoutAt] = useState<number>(0);
   const [pickedKey, setPickedKey] = useState<string | null>(null);
   const [selNb, setSelNb] = useState<string | null>(null);
   const [seeding, setSeeding] = useState(false);
@@ -1158,6 +1159,40 @@ function EventsTab() {
       setErr(r.error ?? "SCOUT failed");
     }
   }, [query, weeks]);
+
+  // SCOUT ▸ CLAUDE — type the /f5-events-scout command into the LIVE terminal (ttyd/tmux dock).
+  // The injected skill does the agent-reach sweep + window filter, writes /tmp/railjack-events/latest.json.
+  const scoutViaClaude = useCallback(async () => {
+    const topic = (query || "").trim().replace(/["\n\r]/g, "'");   // no quotes/newlines: insert is type-only, <500 chars
+    const cmd = topic
+      ? `/f5-events-scout "${topic}" --weeks ${weeks}`
+      : `/f5-events-scout --weeks ${weeks}`;
+    const r = await post<{ status: string }>("/api/terminal/insert", { text: cmd });
+    if (!r.ok) { setErr(r.error || "couldn't reach the terminal — is ttyd/tmux up?"); return; }
+    setLastScoutAt(Date.now());
+    setErr("Typed into the LIVE terminal. Open the LIVE dock, press Enter to run, wait for it to finish, then click CONVERT.");
+  }, [query, weeks]);
+
+  // CONVERT ◂ JSON — read the handoff the skill wrote, merge into events via the same keyOf map.
+  const convertFromClaude = useCallback(async () => {
+    const res = await fetch("/api/thailandnow/events/terminal-report");
+    if (!res.ok) {
+      const d = await res.json().catch(() => ({ detail: res.statusText }));
+      setErr(typeof d.detail === "string" ? d.detail : "nothing to convert yet");
+      return;
+    }
+    const data = (await res.json()) as { events: TnEvent[]; count: number; mtime: number };
+    if (lastScoutAt && data.mtime * 1000 < lastScoutAt) {
+      setErr(`Handoff is older than your last SCOUT — did the Claude run finish? Showing ${data.count} anyway.`);
+    } else {
+      setErr(null);
+    }
+    setEvents((prev) => {
+      const map = new Map(prev.map((e) => [keyOf(e), e]));
+      for (const e of data.events) map.set(keyOf(e), e);
+      return [...map.values()];
+    });
+  }, [lastScoutAt]);
 
   // DEEP SEARCH — fire-and-forget (returns job id); browser-notifies on done
   const startDeep = useCallback(async () => {
@@ -1268,9 +1303,13 @@ function EventsTab() {
             onChange={(e) => setQuery(e.target.value)}
           />
           {mode === "scout" ? (
-            <button className="btn btn--signal" disabled={fetching} onClick={runScout}>
-              {fetching && !busyLabel ? "SCANNING…" : "SCOUT"}
-            </button>
+            <>
+              <button className="btn btn--compact btn--signal" disabled={fetching} onClick={runScout}>
+                {fetching && !busyLabel ? "SCANNING…" : "SCOUT"}
+              </button>
+              <button className="btn btn--compact" onClick={scoutViaClaude}>SCOUT ▸ CLAUDE</button>
+              <button className="btn btn--compact" onClick={convertFromClaude}>CONVERT ◂ JSON</button>
+            </>
           ) : (
             <>
               <button className="btn btn--signal" disabled={searching} onClick={startDeep}>
@@ -1338,7 +1377,9 @@ function EventsTab() {
 
         {mode === "scout" && (
           <div className="mono mt-1" style={{ color: "var(--color-muted)" }}>
-            instant keyless search (Jina + regex, no LLM). Switch to DEEP for NotebookLM research.
+            SCOUT ▸ CLAUDE types the command into the LIVE terminal — open the LIVE dock, press Enter
+            there, wait for Claude to finish, then CONVERT. (SCOUT is still the instant keyless search;
+            switch to DEEP for NotebookLM research.)
           </div>
         )}
       </section>
@@ -1728,7 +1769,7 @@ function StoryScoutTab() {
               <input type="checkbox" checked={exact} onChange={(e) => setExact(e.target.checked)} />
               Exact article
             </label>
-            <button className="btn btn--signal" disabled={searching} onClick={search}>
+            <button className="btn btn--compact btn--signal" disabled={searching} onClick={search}>
               {searching ? "SEARCHING…" : "SEARCH"}
             </button>
             <button className="btn btn--compact" onClick={scoutViaClaude}>SCOUT ▸ CLAUDE</button>

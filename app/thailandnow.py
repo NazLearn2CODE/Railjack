@@ -1491,6 +1491,50 @@ async def scout_terminal_report():
     return {"results": deduped, "count": len(deduped), "mtime": p.stat().st_mtime}
 
 
+_EVENTS_HANDOFF = Path("/tmp/railjack-events/latest.json")
+
+
+@router.get("/api/thailandnow/events/terminal-report")
+async def events_terminal_report():
+    """CONVERT — read the JSON the /f5-events-scout skill wrote to disk. Returns
+    {events, count, mtime} in the TnEvent card shape. 404 until the skill has
+    written a file; 422 if the handoff isn't a valid JSON array."""
+    p = _EVENTS_HANDOFF
+    if not p.exists():
+        raise HTTPException(404, "no events handoff yet — run SCOUT ▸ CLAUDE, let Claude finish (writes /tmp/railjack-events/latest.json)")
+    try:
+        raw = json.loads(p.read_text(encoding="utf-8"))
+    except Exception as e:
+        raise HTTPException(422, f"handoff isn't valid JSON: {e}")
+    if not isinstance(raw, list):
+        raise HTTPException(422, "handoff must be a JSON array")
+    events = []
+    for it in raw:
+        if not isinstance(it, dict):
+            continue
+        u = str(it.get("url") or "").strip()
+        if not u:
+            continue  # url is the React key + dedup key — must be present & unique
+        events.append({
+            "title":           str(it.get("title") or u).strip(),
+            "url":             u,
+            "start_date":      str(it.get("start_date") or "").strip(),
+            "end_date":        str(it.get("end_date") or "").strip(),
+            "signup_deadline": str(it.get("signup_deadline") or "").strip(),
+            "location":        str(it.get("location") or "").strip(),
+            "language":        str(it.get("language") or "").strip(),
+            "summary":         str(it.get("summary") or "").strip(),
+            "source":          str(it.get("source") or "").strip(),
+        })
+    # dedup on url, preserve order (dup urls would collide as React keys)
+    seen, deduped = set(), []
+    for e in events:
+        if e["url"] not in seen:
+            seen.add(e["url"])
+            deduped.append(e)
+    return {"events": deduped, "count": len(deduped), "mtime": p.stat().st_mtime}
+
+
 # --- EVENTS radar Tier 2 (R6): NotebookLM deep web research ---
 
 
