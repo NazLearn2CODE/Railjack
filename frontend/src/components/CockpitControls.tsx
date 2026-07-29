@@ -60,6 +60,7 @@ export default function CockpitControls() {
   const [mktSel, setMktSel] = useState("");
   const [mcpSel, setMcpSel] = useState("");
   const [restarting, setRestarting] = useState(false);
+  const [handoffTo, setHandoffTo] = useState("Tasai");
 
   const { data: catalog, refetch: refetchCatalog } = usePolling<Catalog>("/api/catalog", 60_000);
 
@@ -127,6 +128,12 @@ export default function CockpitControls() {
       }
     }, 500);
   };
+
+  const handoffMeta = (recipient: string) => `Write a port/implementation handoff for the feature I just finished, addressed to ${recipient}. Do all of this:
+1. Append a full, self-contained replicate/implement prompt under the "## Sister handoffs (ack-by-deleting)" section in ~/Cephalon/readme-naz.md. Match the format of the existing entries there exactly: a ### heading, a dash-bracket todo line, a fenced self-contained prompt block, and a ctx: line of wikilinks to the design note.
+2. Add a one-line pointer under the "Pending sister handoffs" block in ~/Cephalon/hot.md.
+3. git pull --ff-only first, preserve frontmatter, commit and push both files, and append a one-line entry to ~/Cephalon/logs/memory-log.md.
+If it is ambiguous what feature just finished, ask me before writing. The recipient is ${recipient}.`;
 
   const skills = grouped(catalog?.skills ?? []);
   const mktSkills = grouped(catalog?.marketplace_skills ?? []);
@@ -218,6 +225,24 @@ export default function CockpitControls() {
         title="Restart the railjack server itself — loads new backend code after Antigravity/Tawhan edit the app. ~2 s downtime."
       >
         {restarting ? "↻ SVC…" : "↻ SVC"}
+      </button>
+
+      <select
+        className="mono label"
+        style={SELECT_STYLE}
+        value={handoffTo}
+        onChange={(e) => setHandoffTo(e.target.value)}
+      >
+        <option value="Tasai">Tasai</option>
+        <option value="Tawhan">Tawhan</option>
+      </select>
+
+      <button
+        className="btn btn--compact"
+        onClick={() => void insert(handoffMeta(handoffTo))}
+        title="Type a prompt into the terminal that tells the agent to write a port/implementation handoff to the selected sister and file it in readme-naz.md + hot.md"
+      >
+        ✍ HANDOFF
       </button>
     </div>
   );
