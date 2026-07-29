@@ -95,13 +95,17 @@ async def api_docs(parent: str | None = None, limit: int | None = None):
 
 
 @router.get("/api/newsroom/radio/news/browse")
-async def api_browse(parent: str | None = None):
+async def api_browse(parent: str | None = None, all_docs: bool = False):
     """Folder browser: one level of the Drive tree under ``?parent=`` (default
     RT-2026). Returns ``{parent, folders, docs}`` — the panel drills folder by
-    folder instead of loading every script doc at once."""
+    folder instead of loading every script doc at once. ``?all_docs=true``
+    returns every child doc UNFILTERED (for the NL picker, whose "NL & NWB
+    DDMMYY" docs don't match the radio NAME_RE filter)."""
     argv = [PY, str(RNEWS), "browse"]
     if parent:
         argv += ["--parent", parent]
+    if all_docs:
+        argv += ["--all"]
     return await _script(argv)
 
 

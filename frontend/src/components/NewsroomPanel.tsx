@@ -155,8 +155,8 @@ interface NewsDoc {
   id: string;
   name: string;
   link?: string;
-  kind: "weekday" | "weekend";
-  date: string;
+  kind?: "weekday" | "weekend";
+  date?: string;
 }
 
 interface BrowseFolder {
@@ -234,12 +234,14 @@ function DocPicker({
   picked,
   onPick,
   label,
+  all,
 }: {
   rootId: string;
   rootLabel: string;
   picked: NewsDoc | null;
   onPick: (doc: NewsDoc | null) => void;
   label: string;
+  all?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const [stack, setStack] = useState<BrowseFolder[]>([{ id: rootId, name: rootLabel }]);
@@ -252,7 +254,7 @@ function DocPicker({
     setLoading(true);
     try {
       const data = await fetchJSON<NewsBrowseResponse>(
-        `/api/newsroom/radio/news/browse?parent=${encodeURIComponent(folderId)}`,
+        `/api/newsroom/radio/news/browse?parent=${encodeURIComponent(folderId)}${all ? "&all_docs=true" : ""}`,
       );
       setFolders(Array.isArray(data?.folders) ? data.folders : []);
       setDocs(Array.isArray(data?.docs) ? data.docs : []);
@@ -262,7 +264,7 @@ function DocPicker({
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [all]);
 
   useEffect(() => {
     if (open && loadedRoot.current !== rootId) {
@@ -1154,6 +1156,7 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
                       picked={nlPickedDoc}
                       onPick={setNlPickedDoc}
                       label="DOC"
+                      all
                     />
 
                     <button
@@ -1840,7 +1843,7 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
                             <span>{active ? "✓" : "📄"}</span>
                             <span className="flex-1 truncate">{doc.name}</span>
                             <span className="label" style={{ fontSize: "10px", color: "var(--color-muted)" }}>
-                              {doc.kind.toUpperCase()}
+                              {doc.kind?.toUpperCase()}
                             </span>
                           </button>
                         );
@@ -1852,7 +1855,7 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
                 {/* Current selection echo */}
                 <span className="mono text-xs" style={{ color: "var(--color-muted)" }}>
                   {selectedDoc
-                    ? `Selected: ${selectedDoc.name} [${selectedDoc.kind.toUpperCase()}]`
+                    ? `Selected: ${selectedDoc.name} [${selectedDoc.kind?.toUpperCase()}]`
                     : "— pick a script doc —"}
                 </span>
               </div>
