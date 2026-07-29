@@ -1818,17 +1818,31 @@ def _gem_path() -> Path:
     return _resolve_gem("gem_path", "app/gems/event-publicity.md")
 
 
-def _load_gem(path: Path) -> str:
-    """Read the publicity gem and extract just the prompt body. The module-local
-    file mirrors the vault canonical (frontmatter + intro + notes); the prompt
-    proper runs from '## Role & Purpose' to the trailing '---' separator."""
-    text = path.read_text(encoding="utf-8")
-    start = text.find("## Role & Purpose")
-    body = text[start:] if start != -1 else text
+def _extract_gem_body(text: str) -> str:
+    """Extract the '## Role & Purpose' … '\\n---\\n' prompt body from raw gem text.
+
+    Hardened against the intro/frontmatter trap (port bug 2026-07-29): an earlier
+    gem — or its intro notes — that mentioned the literal '## Role & Purpose' made
+    the old plain ``text.find()`` grab the wrong spot → garbage system prompt. We
+    drop leading YAML frontmatter and match the heading only when it STARTS a
+    line, so an inline mention (e.g. inside backticks in the notes) can't win.
+    """
+    if text.startswith("---"):
+        end = text.find("\n---", 3)
+        if end != -1:
+            text = text[end + 4:].lstrip()
+    m = re.search(r"(?m)^##\s+Role\s*&\s*Purpose\b", text)
+    body = text[m.start():] if m else text
     cut = body.find("\n---\n")
     if cut != -1:
         body = body[:cut]
     return body.strip()
+
+
+def _load_gem(path: Path) -> str:
+    """Read a system-prompt gem file and return its extracted prompt body
+    (see _extract_gem_body)."""
+    return _extract_gem_body(path.read_text(encoding="utf-8"))
 
 
 @router.post("/api/thailandnow/events/publicize")
@@ -3055,6 +3069,14 @@ if __name__ == "__main__":
     gem = _load_gem(_gem_path())
     assert "## Role & Purpose" in gem and "Output Layout" in gem, "gem extraction wrong"
     assert not gem.startswith("---"), "frontmatter not stripped"
+    # _load_gem trap: an intro that mentions the literal '## Role & Purpose'
+    # inline must NOT make a first-match find() grab the wrong spot (Somatic port
+    # bug 2026-07-29). Line-anchored match + frontmatter strip = the real heading wins.
+    _trap = ("---\ntitle: x\n---\n"
+             "Notes: see the `## Role & Purpose` heading below for the real prompt.\n\n"
+             "## Role & Purpose\nThis is the real body.\n\n---\n")
+    _tb = _extract_gem_body(_trap)
+    assert _tb.startswith("## Role & Purpose") and "real body" in _tb, "gem intro-trap regression"
     # ARCHIVE Stage 2: Q&A gem loads + extracts the source-only rules.
     agem = _load_gem(_archive_gem_path())
     assert agem.startswith("## Role & Purpose"), "archive gem extraction wrong"
