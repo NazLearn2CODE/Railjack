@@ -23,7 +23,7 @@
   --color-go: #3ddc97;
 
   --font-display: "Chakra Petch", "IBM Plex Mono", sans-serif;
-  --font-mono: "IBM Plex Mono", ui-monospace, monospace;
+  --font-mono: "Noto Sans Mono", ui-monospace, monospace;
 }
 
 @layer base {
