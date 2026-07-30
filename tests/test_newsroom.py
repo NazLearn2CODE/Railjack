@@ -59,6 +59,37 @@ def test_strip_fabricated_thai():
     assert "อนุทิน" in out and "ชาญวีรกุล" in out, out
 
 
+def test_rewrite_convert_missing_and_valid(tmp_path, monkeypatch):
+    """IDE rewrite CONVERT relay: soft-fail on missing/unparseable handoff, verbatim relay
+    (Thai UTF-8 + **name**/~~date~~ markers preserved) on a valid one. Mirrors office
+    test_rewrite_convert, but steers the module-level _REWRITE_HANDOFF constant (no Path patch)."""
+    import asyncio
+    from app import newsroom
+    from app.newsroom import rewrite_convert
+
+    miss = {"rewritten": "", "seo": "", "errors": ["no IDE handoff file — run 📋 IDE REWRITE first"]}
+
+    monkeypatch.setattr(newsroom, "_REWRITE_HANDOFF", tmp_path / "absent.json")
+    assert asyncio.run(rewrite_convert()) == miss                      # missing → soft-fail
+
+    bad = tmp_path / "bad.json"
+    bad.write_text("{not json", encoding="utf-8")
+    monkeypatch.setattr(newsroom, "_REWRITE_HANDOFF", bad)
+    assert asyncio.run(rewrite_convert()) == miss                      # unparseable → soft-fail
+
+    handoff = tmp_path / "latest.json"
+    handoff.write_text(json.dumps({
+        "rewritten": "EN: Title\nTH: หัวข้อ\n\nBody with **name** and ~~date~~ markers.",
+        "seo": "## AI SEO BLOCK\nSummary.",
+    }), encoding="utf-8")
+    monkeypatch.setattr(newsroom, "_REWRITE_HANDOFF", handoff)
+    assert asyncio.run(rewrite_convert()) == {                         # valid → verbatim relay
+        "rewritten": "EN: Title\nTH: หัวข้อ\n\nBody with **name** and ~~date~~ markers.",
+        "seo": "## AI SEO BLOCK\nSummary.",
+        "errors": [],
+    }
+
+
 # ---------------------------------------------------------------- queue
 
 

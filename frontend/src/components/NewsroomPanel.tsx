@@ -399,6 +399,8 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
   const [rewritten, setRewritten] = useState("");
   const [seo, setSeo] = useState("");
   const [rewriting, setRewriting] = useState(false);
+  const [converting, setConverting] = useState(false);
+  const [copiedQueuePrompt, setCopiedQueuePrompt] = useState(false);
 
   // RADIO Document Generator state
   const now = new Date();
@@ -981,6 +983,44 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
     }
   };
 
+  // 📋 IDE REWRITE — copy a paste-ready Antigravity prompt that rewrites the Script-box
+  // article FREE in Editor Ben's voice → /tmp/newsroom-rewrite/latest.json (SHARED vault
+  // handoff note). Brief "COPIED ✓" flash. Disabled when the Script box is empty.
+  const handleCopyQueueAntigravityPrompt = async () => {
+    if (!sendText.trim()) return;
+    const promptText = `Read \`10-knowledge/newsroom-rewrite-antigravity-handoff.md\` in this vault. You are Ben, editor of Thailand NOW. Rewrite the source article below into a broadcast script + AI SEO block following that note (Ben's rules + voice + \`**name**\`/\`~~date~~\` markers + Thai-name overlay + EN/TH title pair + SEO Version A+B), matching the output format of \`app/newsroom.py::rewrite()\`. Write the result to \`/tmp/newsroom-rewrite/latest.json\` in the exact JSON shape shown in the note. Do NOT touch any Google Doc.\n\n=== SOURCE ARTICLE ===\n${sendText}`;
+    try {
+      await navigator.clipboard.writeText(promptText);
+      setError(null);
+      setCopiedQueuePrompt(true);
+      setTimeout(() => setCopiedQueuePrompt(false), 2000);
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "Failed to copy prompt");
+    }
+  };
+
+  // CONVERT — relay the IDE rewrite handoff through the backend (no LLM) into the SAME
+  // setters REWRITE uses, so the preview / SEND TO NL / SEND TO RADIO path is identical.
+  const convertRewrite = async () => {
+    setConverting(true);
+    setError(null);
+    try {
+      const res = await fetch("/api/newsroom/rewrite/convert", {
+        method: "POST",
+        headers: CT,
+        body: JSON.stringify({}),
+      });
+      const d = await res.json().catch(() => ({}));
+      if (!d.rewritten && d.errors?.length) setError(d.errors[0]);
+      setRewritten(d.rewritten || "");
+      setSeo(d.seo || "");
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : "convert failed");
+    } finally {
+      setConverting(false);
+    }
+  };
+
   return (
     <div className="flex h-full w-full flex-col gap-2 overflow-auto p-3">
       {/* Tab toggle + author filter */}
@@ -1109,7 +1149,7 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
                     />
                   </label>
 
-                  {/* ---- Action controls: REWRITE + SEND TO NL + SEND TO RADIO ---- */}
+                  {/* ---- Action controls: REWRITE (metered) + 📋 IDE REWRITE + CONVERT (free) ---- */}
                   <div className="flex gap-2">
                     <button
                       className="btn"
@@ -1118,6 +1158,22 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
                       title="Run the Script-box text through the Rules Gem (source-only) → two-layer script"
                     >
                       {rewriting ? "REWRITING…" : "REWRITE"}
+                    </button>
+                    <button
+                      className="btn"
+                      onClick={() => void handleCopyQueueAntigravityPrompt()}
+                      disabled={!sendText.trim()}
+                      title="Copy an Antigravity prompt that rewrites this article free in Editor Ben's voice → /tmp/newsroom-rewrite/latest.json"
+                    >
+                      {copiedQueuePrompt ? "COPIED ✓" : "📋 IDE REWRITE"}
+                    </button>
+                    <button
+                      className="btn btn--signal"
+                      onClick={() => void convertRewrite()}
+                      disabled={converting}
+                      title="Fetch + convert the latest IDE rewrite handoff (/tmp/newsroom-rewrite/latest.json)"
+                    >
+                      {converting ? "LOADING…" : "CONVERT"}
                     </button>
                   </div>
 

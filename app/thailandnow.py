@@ -729,6 +729,36 @@ def _normalize_event(ev, today_iso: str, window_end_iso: str, source: str = "sco
     }
 
 
+def _dedup_merge_events(rows, today_iso: str, window_end_iso: str, source: str = "ide") -> list[dict]:
+    """Normalize + dedupe event rows, collapsing same-event duplicates (the same event
+    found via multiple sources) into one row that keeps ALL their source URLs. Key =
+    normalized title prefix + start_date. Used by the IDE CONVERT lane, whose handoff
+    routinely lists one event across several sources. ``url`` stays the first non-empty
+    (ThickBox reads it); the merged ``urls`` list carries the rest."""
+    out: dict[str, dict] = {}
+    for ev in rows or []:
+        n = _normalize_event(ev, today_iso, window_end_iso, source)
+        if not n:
+            continue
+        norm = re.sub(r"[^a-z0-9]+", "", (n["title"] or "").lower())[:30]
+        key = f"{norm}|{n['start_date']}"
+        cur = out.get(key)
+        incoming = list(ev.get("urls") or []) if isinstance(ev, dict) and ev.get("urls") else []
+        if cur is None:
+            urls = incoming[:]
+            if n["url"] and n["url"] not in urls:
+                urls.insert(0, n["url"])
+            n["urls"] = urls or ([n["url"]] if n["url"] else [])
+            out[key] = n
+            continue
+        for u in (incoming or ([n["url"]] if n["url"] else [])):
+            if u and u not in cur["urls"]:
+                cur["urls"].append(u)
+        if not cur["url"]:
+            cur["url"] = n["url"]
+    return list(out.values())
+
+
 # DuckDuckGo HTML hides the real URL in the urlencoded uddg= query param.
 _DDG_RE = re.compile(r"##\s*\[([^\]]+)\]\(https://duckduckgo\.com/l/\?uddg=([^)&]+)")
 
@@ -890,6 +920,40 @@ async def scout_events(payload: dict = Body(default={})):
     ordered = sorted(events.values(), key=lambda e: e.get("start_date") or "9999")
     return {"events": ordered, "count": len(ordered), "errors": errors,
             "window": {"from": today_iso, "to": window_end_iso, "weeks": weeks}}
+
+
+# Antigravity IDE scout writes its handoff here (see 10-knowledge/thailandnow-events-
+# antigravity-handoff.md). Module-level so tests can monkeypatch it off real /tmp.
+_IDE_HANDOFF = Path("/tmp/thailand-now-events/latest.json")
+
+
+@router.post("/api/thailandnow/events/convert")
+async def convert_ide_events(payload: dict = Body(default={})):
+    """IDE CONVERT — read the Antigravity-scout handoff (``_IDE_HANDOFF`` JSON) and return
+    Tier-1-shaped events: window-filtered, multi-source dupes merged (all URLs kept),
+    sorted by start_date. SAME shape as ``scout_events`` so the frontend merges identically.
+    Keyless, no LLM. Soft-fails to HTTP 200 ``{events:[], count:0, errors:[...]}`` when the
+    handoff is missing/unparseable — points the user at 📋 IDE SCOUT first."""
+    body = payload or {}
+    weeks = max(1, min(52, int(body.get("weeks") or 4)))
+    today = datetime.now()
+    window_end = today + timedelta(weeks=weeks)
+    today_iso, window_end_iso = today.strftime("%Y-%m-%d"), window_end.strftime("%Y-%m-%d")
+
+    missing = {"events": [], "count": 0, "errors": ["no IDE handoff file — run 📋 IDE SCOUT first"]}
+    if not _IDE_HANDOFF.exists():
+        return missing
+    try:
+        data = json.loads(_IDE_HANDOFF.read_text(encoding="utf-8"))
+        rows = data.get("events") if isinstance(data, dict) else (data if isinstance(data, list) else [])
+        if not isinstance(rows, list):
+            rows = []
+    except Exception:
+        return missing
+
+    merged = _dedup_merge_events(rows, today_iso, window_end_iso, source="ide")
+    ordered = sorted(merged, key=lambda e: e.get("start_date") or "9999")
+    return {"events": ordered, "count": len(ordered), "errors": []}
 
 
 # --- STORY SCOUT (news pitch discovery + make-a-pitch) ---

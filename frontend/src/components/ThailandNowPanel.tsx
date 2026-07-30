@@ -1080,7 +1080,8 @@ function EventsTab() {
   const [fetching, setFetching] = useState(false);
   const [busyLabel, setBusyLabel] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
-  const [lastScoutAt, setLastScoutAt] = useState<number>(0);
+  const [copied, setCopied] = useState(false);
+  const copyTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [pickedKey, setPickedKey] = useState<string | null>(null);
   const [selNb, setSelNb] = useState<string | null>(null);
   const [seeding, setSeeding] = useState(false);
@@ -1112,6 +1113,9 @@ function EventsTab() {
       Notification.requestPermission().then(setNotifyPerm);
     }
   }, [mode]);
+
+  // clear the 📋 IDE SCOUT "COPIED ✓" flash timer on unmount
+  useEffect(() => () => { if (copyTimeoutRef.current) clearTimeout(copyTimeoutRef.current); }, []);
 
   // browser-notify when a deep-search job flips to done (and refresh the notebook list)
   const prevDone = useRef<Set<string>>(new Set());
@@ -1160,39 +1164,44 @@ function EventsTab() {
     }
   }, [query, weeks]);
 
-  // SCOUT ▸ CLAUDE — type the /f5-events-scout command into the LIVE terminal (ttyd/tmux dock).
-  // The injected skill does the agent-reach sweep + window filter, writes /tmp/railjack-events/latest.json.
-  const scoutViaClaude = useCallback(async () => {
-    const topic = (query || "").trim().replace(/["\n\r]/g, "'");   // no quotes/newlines: insert is type-only, <500 chars
-    const cmd = topic
-      ? `/f5-events-scout "${topic}" --weeks ${weeks}`
-      : `/f5-events-scout --weeks ${weeks}`;
-    const r = await post<{ status: string }>("/api/terminal/insert", { text: cmd });
-    if (!r.ok) { setErr(r.error || "couldn't reach the terminal — is ttyd/tmux up?"); return; }
-    setLastScoutAt(Date.now());
-    setErr("Typed into the LIVE terminal. Open the LIVE dock, press Enter to run, wait for it to finish, then click CONVERT.");
+  // 📋 IDE SCOUT — copy a paste-ready Antigravity prompt (reads the SHARED vault handoff
+  // note, writes /tmp/thailand-now-events/latest.json). Brief "COPIED ✓" flash on success.
+  const handleCopyAntigravityPrompt = useCallback(async () => {
+    const q = query.trim();
+    const promptText = `Read \`10-knowledge/thailandnow-events-antigravity-handoff.md\` in this vault. Scout UPCOMING Thailand events (start date within the next ${weeks} week(s), i.e. today through today+${weeks}w)${q ? ` focused on: ${q}` : ""}. Use your full web browsing/search — prefer TAT + reputable event listings + Thai-language sources, broadening to any reputable source. Extract each event into the exact JSON shape in that note, dedupe the same event across sources into one row (keep all URLs), drop anything with no start date or outside the window, and write the result to \`/tmp/thailand-now-events/latest.json\` in that exact shape. Do NOT create any Google Doc or Trello card — provisioning stays a human step in the panel.`;
+    try {
+      await navigator.clipboard.writeText(promptText);
+      setCopied(true);
+      if (copyTimeoutRef.current) clearTimeout(copyTimeoutRef.current);
+      copyTimeoutRef.current = setTimeout(() => setCopied(false), 2000);
+    } catch (e: unknown) {
+      setErr(e instanceof Error ? e.message : "Failed to copy prompt");
+    }
   }, [query, weeks]);
 
-  // CONVERT ◂ JSON — read the handoff the skill wrote, merge into events via the same keyOf map.
-  const convertFromClaude = useCallback(async () => {
-    const res = await fetch("/api/thailandnow/events/terminal-report");
-    if (!res.ok) {
-      const d = await res.json().catch(() => ({ detail: res.statusText }));
-      setErr(typeof d.detail === "string" ? d.detail : "nothing to convert yet");
-      return;
-    }
-    const data = (await res.json()) as { events: TnEvent[]; count: number; mtime: number };
-    if (lastScoutAt && data.mtime * 1000 < lastScoutAt) {
-      setErr(`Handoff is older than your last SCOUT — did the Claude run finish? Showing ${data.count} anyway.`);
+  // CONVERT — POST the IDE handoff through the backend (window filter + multi-source dedup),
+  // merge into events via the same keyOf map the free SCOUT uses.
+  const runConvert = useCallback(async () => {
+    setFetching(true);
+    setErr(null);
+    setBusyLabel("CONVERTING IDE handoff…");
+    const r = await post<ScoutResp>("/api/thailandnow/events/convert", { query, weeks });
+    setFetching(false);
+    setBusyLabel(null);
+    if (r.ok && r.data) {
+      if (r.data.events.length === 0 && r.data.errors.length > 0) {
+        setErr(r.data.errors[0]);
+      } else {
+        setEvents((prev) => {
+          const map = new Map(prev.map((e) => [keyOf(e), e]));
+          for (const e of r.data!.events) map.set(keyOf(e), e);
+          return [...map.values()];
+        });
+      }
     } else {
-      setErr(null);
+      setErr(r.error ?? "CONVERT failed");
     }
-    setEvents((prev) => {
-      const map = new Map(prev.map((e) => [keyOf(e), e]));
-      for (const e of data.events) map.set(keyOf(e), e);
-      return [...map.values()];
-    });
-  }, [lastScoutAt]);
+  }, [query, weeks]);
 
   // DEEP SEARCH — fire-and-forget (returns job id); browser-notifies on done
   const startDeep = useCallback(async () => {
@@ -1307,8 +1316,22 @@ function EventsTab() {
               <button className="btn btn--compact btn--signal" disabled={fetching} onClick={runScout}>
                 {fetching && !busyLabel ? "SCANNING…" : "SCOUT"}
               </button>
-              <button className="btn btn--compact" onClick={scoutViaClaude}>SCOUT ▸ CLAUDE</button>
-              <button className="btn btn--compact" onClick={convertFromClaude}>CONVERT ◂ JSON</button>
+              <button
+                className="btn btn--compact"
+                disabled={fetching}
+                onClick={() => void handleCopyAntigravityPrompt()}
+                title="Copy paste-ready prompt for Antigravity IDE scout"
+              >
+                {copied ? "COPIED ✓" : "📋 IDE SCOUT"}
+              </button>
+              <button
+                className="btn btn--compact btn--signal"
+                disabled={fetching}
+                onClick={() => void runConvert()}
+                title="Convert /tmp/thailand-now-events/latest.json handoff"
+              >
+                {fetching && busyLabel?.startsWith("CONVERT") ? "CONVERTING…" : "CONVERT"}
+              </button>
             </>
           ) : (
             <>
@@ -1377,9 +1400,9 @@ function EventsTab() {
 
         {mode === "scout" && (
           <div className="mono mt-1" style={{ color: "var(--color-muted)" }}>
-            SCOUT ▸ CLAUDE types the command into the LIVE terminal — open the LIVE dock, press Enter
-            there, wait for Claude to finish, then CONVERT. (SCOUT is still the instant keyless search;
-            switch to DEEP for NotebookLM research.)
+            📋 IDE SCOUT copies a paste-ready prompt for Antigravity — paste it there, let it scout +
+            write the handoff, then CONVERT to pull the deduped events back here. (SCOUT is still the
+            instant keyless search; switch to DEEP for NotebookLM research.)
           </div>
         )}
       </section>

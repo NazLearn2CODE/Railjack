@@ -445,6 +445,31 @@ async def api_rewrite(body: dict = Body(...)):
     return {"rewritten": rewritten, "seo": out_seo}
 
 
+# Antigravity IDE rewrite writes its handoff here (see 10-knowledge/newsroom-rewrite-
+# antigravity-handoff.md). Module-level so tests monkeypatch it off real /tmp.
+_REWRITE_HANDOFF = Path("/tmp/newsroom-rewrite/latest.json")
+
+
+@router.post("/api/newsroom/rewrite/convert")
+async def rewrite_convert() -> dict:
+    """FREE IDE CONVERT — relay the Antigravity rewrite handoff (``_REWRITE_HANDOFF`` JSON) as
+    ``{rewritten, seo}``, the SAME shape ``api_rewrite`` returns so the frontend path is identical.
+    No LLM, no body. Soft-fails to HTTP 200 ``{rewritten:"", seo:"", errors:[...]}`` when the
+    handoff is missing/unparseable — points the user at 📋 IDE REWRITE first."""
+    miss = {"rewritten": "", "seo": "", "errors": ["no IDE handoff file — run 📋 IDE REWRITE first"]}
+    if not _REWRITE_HANDOFF.exists():
+        return miss
+    try:
+        data = json.loads(_REWRITE_HANDOFF.read_text(encoding="utf-8"))
+    except Exception:
+        return miss
+    return {
+        "rewritten": (data.get("rewritten") or "").strip(),
+        "seo": (data.get("seo") or "").strip(),
+        "errors": [],
+    }
+
+
 # ---------------------------------------------------------------- health
 
 
