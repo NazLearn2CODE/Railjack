@@ -29,6 +29,36 @@ def _client(monkeypatch, rc=0, out=b"{}", err=b""):
     return TestClient(app), calls
 
 
+def test_strip_fabricated_thai():
+    """Code guard: fabricated Thai (not in source) stripped across all observed
+    formats; source-faithful Thai kept. Mirrors office Somatic 9befe5f."""
+    from app.newsroom import _strip_fabricated_thai, _THAI_RUN_RE
+
+    def has_thai(s: str) -> bool:
+        return bool(_THAI_RUN_RE.search(s))
+
+    src_en = "Bangkok Governor Chadchart Sittipunt spoke at the event."
+
+    # 1. **[English(fabricated Thai)]** wrapper
+    out = _strip_fabricated_thai(
+        "Governor **[Chadchart Sittipunt(ชัชชัย วิษณุพงศ์)]** spoke.", src_en)
+    assert "Chadchart Sittipunt" in out and not has_thai(out), out
+
+    # 2. [English](fabricated Thai) markdown-link wrapper
+    out = _strip_fabricated_thai("**[Sorasak](ศรัณย์ พงษ์เจริญวรกุล)** led.", src_en)
+    assert "Sorasak" in out and not has_thai(out), out
+
+    # 3. inline fabricated Thai, no wrapper
+    out = _strip_fabricated_thai("The ministry กระทรวงศึกษาธิการ announced.", src_en)
+    assert not has_thai(out), out
+
+    # 4. source-faithful Thai is KEPT (source contains it)
+    src_th = "รัฐมนตรี อนุทิน ชาญวีรกุล แถลงข่าว"
+    out = _strip_fabricated_thai(
+        "Minister **[Anutin Charnvirakul(อนุทิน ชาญวีรกุล)]** spoke.", src_th)
+    assert "อนุทิน" in out and "ชาญวีรกุล" in out, out
+
+
 # ---------------------------------------------------------------- queue
 
 

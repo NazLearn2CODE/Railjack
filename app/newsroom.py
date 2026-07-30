@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from pathlib import Path
 
 from fastapi import APIRouter, Body, HTTPException
@@ -287,6 +288,33 @@ async def api_newsline_generate(body: dict = Body(...)):
 # render those themselves.
 
 
+_THAI_RUN_RE = re.compile(r'[฀-๿]{3,}')
+
+
+def _strip_fabricated_thai(body: str, source: str) -> str:
+    """Remove Thai text not present verbatim in the source.
+
+    The overlay rule forbids transliterating/guessing Thai names, but the LLM
+    fabricates Thai renderings anyway -- in ever-shifting formats (**[Eng(Thai)]**,
+    [Eng](Thai), inline Thai, ...). Format-independent guard: every Thai run >=3 chars
+    not found verbatim in the source is fabricated -> stripped, along with its wrapper.
+    Source-faithful Thai (titles, real names) is kept.
+    """
+    for m in reversed(list(_THAI_RUN_RE.finditer(body))):
+        if m.group(0) in source:
+            continue
+        s, e = m.start(), m.end()
+        # Consume parentheses wrapping the fabricated Thai: "English(Thai)"
+        if s > 0 and body[s - 1] == '(' and e < len(body) and body[e] == ')':
+            s -= 1
+            e += 1
+        body = body[:s] + body[e:]
+    # Tidy: empty parens from multi-word Thai stripped separately, then orphaned brackets
+    body = re.sub(r'\(\s*\)', '', body)
+    body = re.sub(r'\[([^\[\]()]+)\]', r'\1', body)
+    return body
+
+
 def _gem_text() -> str:
     """Load Ben's voice gem body (## Role & Purpose -> ### Output)."""
     if not BEN_GEM.exists():
@@ -366,12 +394,14 @@ async def api_rewrite(body: dict = Body(...)):
         "- **double-stars** and ~~tildes~~ are the ONLY markup allowed in `body`; no other markdown.\n\n"
         "=== NAME OVERLAY RULE ===\n"
         "For each person the SOURCE names, render their name as follows:\n"
-        "- If you can CONFIDENTLY confirm that person's official English name (the established public "
-        "rendering — e.g. a minister's known English spelling): output **[OfficialEnglish(Thai)]** "
-        "(e.g. **[Anutin Charnvirakul(อนุทิน ชาญวีรกูล)]**). "
-        "Keep the person's rank/title in the ORIGINAL THAI SCRIPT exactly as the source gives it.\n"
-        "- If you CANNOT confidently confirm an official English name: output **Thai name** as-is "
-        "(bold-marked, NO transliteration, NO guessing — e.g. **นายกฯ**). Editors fix gaps.\n"
+        "- If the SOURCE gives the name in ENGLISH: use that English name exactly as written, bolded "
+        "(**EnglishName**). Do NOT generate or invent Thai script for an English-source name.\n"
+        "- If the SOURCE gives the name in THAI and you can CONFIDENTLY confirm the official English "
+        "rendering: output **[OfficialEnglish(Thai)]** (e.g. **[Anutin Charnvirakul(อนุทิน ชาญวีรกูล)]**).\n"
+        "- If the SOURCE gives the name in THAI and you CANNOT confirm an official English name: "
+        "output **Thai name** as-is (bold-marked, NO transliteration, NO guessing — e.g. **นายกฯ**).\n"
+        "NEVER transliterate, romanize, or invent a Thai rendering for a name the source does not "
+        "contain in Thai. When in doubt, copy the source's name verbatim. Editors fix gaps.\n"
         "NARROW CARVE-OUT: knowledge is allowed ONLY to supply a named person's official English "
         "name-form. Never use knowledge to ADD names, dates, figures, events, or any other facts — "
         "all other content is SOURCE-ONLY.\n\n"
@@ -403,6 +433,11 @@ async def api_rewrite(body: dict = Body(...)):
     if not out_seo.strip():
         raise HTTPException(502, "seo generation came back empty")
     title, title_th, body = _parse_ben_json(out_ben)
+    # ponytail: code-level guard -- LLM fabricates Thai-name overlays despite the rule.
+    # Scoped to the BODY (the on-air read); title_th is an editor/translation field the
+    # guard must not clobber (office guards the whole blob, but office returns it raw --
+    # Railjack surfaces title_th as "TH:", so protect it). Strips Thai not in the source.
+    body = _strip_fabricated_thai(body, text)
     # Reassemble the sendable blob the panel already understands: EN/TH title
     # lines, then the marked-up body. Downstream (Script box, SEND TO NL/RADIO)
     # is unchanged — the JSON is only a more reliable transport for the pieces.
