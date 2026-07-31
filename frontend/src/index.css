@@ -344,6 +344,36 @@
   box-shadow: inset 0 0 18px color-mix(in srgb, var(--color-critical) 12%, transparent);
 }
 
+/* ---------- Queue story grid ----------
+   The queue stacks above the script instead of sitting in a side column.
+   minmax(480px, 1fr) resolves to two wide cells on a standard panel, so a
+   headline gets ~35% more room than the old 38% column had — and the height a
+   short queue used to waste goes to the script + dispatch controls instead.
+   Height is capped so a long queue scrolls rather than crushing the script box. */
+.queue-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(480px, 1fr));
+  gap: 4px;
+  flex: 0 0 auto;
+  max-height: 26vh;
+  overflow-y: auto;
+  padding-right: 2px;
+}
+/* In a grid, position no longer signals focus the way a highlighted row in a
+   single column did — hence the left accent bar on the selected story. */
+.queue-card {
+  background: var(--color-void);
+  border-left: 2px solid transparent;
+  transition: border-left-color 0.15s ease, background 0.15s ease;
+}
+.queue-card:hover {
+  background: var(--color-panel-2);
+}
+.queue-card--on {
+  border-left-color: var(--color-signal);
+  background: color-mix(in srgb, var(--color-signal) 8%, var(--color-void));
+}
+
 /* ---------- Action lanes ----------
    Groups buttons that form ONE route to an outcome. The queue's rewrite step has
    three competing lanes (metered / free-via-IDE / advisory); a flat row of peers
@@ -396,6 +426,13 @@
   align-items: center;
   gap: 6px;
 }
+/* Lanes holding labelled fields: align on the control baseline, not the middle,
+   so the 9px field captions don't drag the buttons upward. */
+.lane__row--fields {
+  align-items: flex-end;
+  flex-wrap: wrap;
+}
+.lane--dispatch .lane__tag { color: color-mix(in srgb, var(--color-signal) 60%, var(--color-faint)); }
 /* Chain arrow: IDE REWRITE hands off to CONVERT, it isn't a sibling choice.
    Reads at --color-muted; --color-faint disappeared against the panel. */
 .lane__link {

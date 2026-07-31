@@ -1172,16 +1172,22 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
           <span className="label">
             QUEUE {queue ? `— ${queue.date} — ${queue.count} stories` : ""}
           </span>
-          <div className="flex min-h-0 flex-1 gap-2 overflow-hidden">
-            {/* Story list */}
-            <div className="flex flex-col gap-1 overflow-auto" style={{ width: "38%", minWidth: 180 }}>
+          {/* Stacked, not side-by-side: the queue reads across the top and the
+              script owns the full width underneath. A 38% list column wasted
+              ~800px of height on a 4-story day while truncating every headline,
+              and squeezed the script + its 10 dispatch controls into 60% of the
+              panel — which is what made the buttons feel piled up. */}
+          <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-hidden">
+            {/* Story list — grid, two wide cells on a standard panel */}
+            <div className="queue-grid">
               {queue?.articles.map((s) => (
                 <div
                   key={s.id}
                   onClick={() => selectStory(s)}
-                  className="row-in mono flex cursor-pointer items-center gap-2 border border-edge px-2 py-1"
+                  className={`row-in queue-card mono flex cursor-pointer items-center gap-2 border border-edge px-2 py-1 ${
+                    selected?.id === s.id ? "queue-card--on" : ""
+                  }`}
                   style={{
-                    background: "var(--color-void)",
                     color:
                       selected?.id === s.id ? "var(--color-signal)" : "var(--color-phosphor-dim)",
                     opacity: s.done ? 0.45 : 1,
@@ -1196,12 +1202,19 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
                   </span>
                 </div>
               ))}
-              {queue && queue.count === 0 && <span className="label px-1 py-1">— no stories —</span>}
-              {!queue && !error && <span className="label px-1 py-1">loading…</span>}
+              {queue && queue.count === 0 && (
+                <span className="label px-1 py-1" style={{ gridColumn: "1 / -1" }}>— no stories —</span>
+              )}
+              {!queue && !error && (
+                <span className="label px-1 py-1" style={{ gridColumn: "1 / -1" }}>loading…</span>
+              )}
             </div>
 
-            {/* Detail pane */}
-            <div className="flex min-w-0 flex-1 flex-col gap-2 overflow-auto">
+            {/* Detail pane — now full-width, below the queue */}
+            <div
+              className="flex min-w-0 flex-1 flex-col gap-2 overflow-auto"
+              style={{ borderTop: "1px solid var(--color-edge-soft)", paddingTop: 8 }}
+            >
               {selected ? (
                 <>
                   <div className="flex flex-wrap items-center gap-2">
@@ -1239,12 +1252,17 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
                   )}
 
                   {/* Editable script area — paste the rewritten text here before sending */}
-                  <label className="flex min-h-0 flex-1 flex-col gap-1">
+                  {/* Floor the script box: stacked, it is the only flex-1 element in
+                      the pane, so on a short viewport it absorbed the whole deficit
+                      and collapsed to ~20px. The floor sits on the wrapper, not the
+                      textarea — on the textarea it just overflowed a shrunk label and
+                      painted underneath the lanes. Below the floor the pane scrolls. */}
+                  <label className="flex flex-1 flex-col gap-1" style={{ minHeight: 220 }}>
                     <span className="label">Script (edit before sending)</span>
                     <textarea
                       value={sendText}
                       onChange={(e) => setSendText(e.target.value)}
-                      className="input mono flex-1"
+                      className="input mono min-h-0 flex-1"
                       style={{ resize: "none", fontSize: "1.0625rem", whiteSpace: "pre-wrap" }}
                     />
                   </label>
@@ -1306,166 +1324,176 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
                     </div>
                   </div>
 
-                  {/* ---- SEND TO NL append controls ---- */}
+                  {/* ---- Dispatch lanes — same bracket language as the action row.
+                       One flat row worked at 60% width; at full width it left a
+                       ~700px void between the NL and RADIO clusters and stranded
+                       two identically-labelled DOC pickers on one line. The
+                       brackets say which doc belongs to which destination. ---- */}
                   <div
-                    className="flex flex-wrap items-end gap-2"
+                    className="lane-row"
                     style={{ borderTop: "1px solid var(--color-edge)", paddingTop: 8 }}
                   >
-                    {/* NL tab selector */}
-                    <label className="flex flex-col gap-0.5">
-                      <span className="label" style={{ fontSize: 9 }}>TAB</span>
-                      <select
-                        id="nl-tab-select"
-                        className="mono"
-                        style={{
-                          background: "var(--color-panel-2)",
-                          color: "var(--color-phosphor-dim)",
-                          border: "1px solid var(--color-edge)",
-                          padding: "3px 5px",
-                          fontSize: "11px",
-                          minWidth: 72,
-                        }}
-                        value={nlTab}
-                        onChange={(e) => setNlTab(e.target.value)}
-                      >
-                        <option value="NL">NL</option>
-                        <option value="AM">AM</option>
-                        <option value="MID">MID</option>
-                        <option value="EVE">EVE</option>
-                      </select>
-                    </label>
+                    <div className="lane lane--dispatch">
+                      <span className="lane__tag">to newsline</span>
+                      <div className="lane__row lane__row--fields">
+                        {/* NL tab selector */}
+                        <label className="flex flex-col gap-0.5">
+                          <span className="label" style={{ fontSize: 9 }}>TAB</span>
+                          <select
+                            id="nl-tab-select"
+                            className="mono"
+                            style={{
+                              background: "var(--color-panel-2)",
+                              color: "var(--color-phosphor-dim)",
+                              border: "1px solid var(--color-edge)",
+                              padding: "3px 5px",
+                              fontSize: "11px",
+                              minWidth: 72,
+                            }}
+                            value={nlTab}
+                            onChange={(e) => setNlTab(e.target.value)}
+                          >
+                            <option value="NL">NL</option>
+                            <option value="AM">AM</option>
+                            <option value="MID">MID</option>
+                            <option value="EVE">EVE</option>
+                          </select>
+                        </label>
 
-                    <DocPicker
-                      rootId={nlRoot.id}
-                      rootLabel={nlRoot.name}
-                      picked={nlPickedDoc}
-                      onPick={setNlPickedDoc}
-                      label="DOC"
-                      all
-                    />
+                        <DocPicker
+                          rootId={nlRoot.id}
+                          rootLabel={nlRoot.name}
+                          picked={nlPickedDoc}
+                          onPick={setNlPickedDoc}
+                          label="DOC"
+                          all
+                        />
 
-                    <button
-                      id="send-to-nl-btn"
-                      className="btn btn--compact"
-                      onClick={() => void sendToNLFill()}
-                      disabled={nlFilling || !sendText.trim()}
-                      title={`Append to the bottom of the ${nlTab} tab of ${nlPickedDoc ? nlPickedDoc.name : "today's NL & NWB doc"}`}
-                    >
-                      {nlFilling ? "SENDING…" : "SEND TO NL ▸"}
-                    </button>
-
-                    {/* ---- SEND TO RADIO ---- */}
-                    <div
-                      style={{
-                        marginLeft: "auto",
-                        display: "flex",
-                        flexWrap: "wrap",
-                        alignItems: "flex-end",
-                        gap: 6,
-                      }}
-                    >
-                      {/* Section */}
-                      <label className="flex flex-col gap-0.5">
-                        <span className="label" style={{ fontSize: 9 }}>SECTION</span>
-                        <select
-                          id="radio-section-select"
-                          className="mono"
-                          style={{
-                            background: "var(--color-panel-2)",
-                            color: "var(--color-phosphor-dim)",
-                            border: "1px solid var(--color-edge)",
-                            padding: "3px 5px",
-                            fontSize: "11px",
-                          }}
-                          value={radioFillSection}
-                          onChange={(e) => setRadioFillSection(e.target.value as "AM" | "MIDDAY" | "EVE")}
+                        <button
+                          id="send-to-nl-btn"
+                          className="btn btn--compact"
+                          onClick={() => void sendToNLFill()}
+                          disabled={nlFilling || !sendText.trim()}
+                          title={`Append to the bottom of the ${nlTab} tab of ${nlPickedDoc ? nlPickedDoc.name : "today's NL & NWB doc"}`}
                         >
-                          <option value="AM">AM</option>
-                          <option value="MIDDAY">MIDDAY</option>
-                          <option value="EVE">EVE</option>
-                        </select>
-                      </label>
+                          {nlFilling ? "SENDING…" : "SEND TO NL ▸"}
+                        </button>
+                      </div>
+                    </div>
 
-                      {/* Block */}
-                      <label className="flex flex-col gap-0.5">
-                        <span className="label" style={{ fontSize: 9 }}>BLOCK</span>
-                        <select
-                          id="radio-block-select"
-                          className="mono"
-                          style={{
-                            background: "var(--color-panel-2)",
-                            color: "var(--color-phosphor-dim)",
-                            border: "1px solid var(--color-edge)",
-                            padding: "3px 5px",
-                            fontSize: "11px",
-                          }}
-                          value={radioFillBlock}
-                          onChange={(e) => setRadioFillBlock(e.target.value as "NATIONAL" | "GLOBAL" | "BUSINESS")}
+                    <div className="lane lane--dispatch">
+                      <span className="lane__tag">to radio</span>
+                      <div className="lane__row lane__row--fields">
+                        {/* Section */}
+                        <label className="flex flex-col gap-0.5">
+                          <span className="label" style={{ fontSize: 9 }}>SECTION</span>
+                          <select
+                            id="radio-section-select"
+                            className="mono"
+                            style={{
+                              background: "var(--color-panel-2)",
+                              color: "var(--color-phosphor-dim)",
+                              border: "1px solid var(--color-edge)",
+                              padding: "3px 5px",
+                              fontSize: "11px",
+                            }}
+                            value={radioFillSection}
+                            onChange={(e) => setRadioFillSection(e.target.value as "AM" | "MIDDAY" | "EVE")}
+                          >
+                            <option value="AM">AM</option>
+                            <option value="MIDDAY">MIDDAY</option>
+                            <option value="EVE">EVE</option>
+                          </select>
+                        </label>
+
+                        {/* Block */}
+                        <label className="flex flex-col gap-0.5">
+                          <span className="label" style={{ fontSize: 9 }}>BLOCK</span>
+                          <select
+                            id="radio-block-select"
+                            className="mono"
+                            style={{
+                              background: "var(--color-panel-2)",
+                              color: "var(--color-phosphor-dim)",
+                              border: "1px solid var(--color-edge)",
+                              padding: "3px 5px",
+                              fontSize: "11px",
+                            }}
+                            value={radioFillBlock}
+                            onChange={(e) => setRadioFillBlock(e.target.value as "NATIONAL" | "GLOBAL" | "BUSINESS")}
+                          >
+                            <option value="NATIONAL">NATIONAL</option>
+                            <option value="GLOBAL">GLOBAL</option>
+                            <option value="BUSINESS">BUSINESS</option>
+                          </select>
+                        </label>
+
+                        {/* Slot */}
+                        <label className="flex flex-col gap-0.5">
+                          <span className="label" style={{ fontSize: 9 }}>SLOT</span>
+                          <select
+                            id="radio-slot-input"
+                            className="mono"
+                            style={{
+                              background: "var(--color-panel-2)",
+                              color: "var(--color-phosphor-dim)",
+                              border: "1px solid var(--color-edge)",
+                              padding: "3px 5px",
+                              fontSize: "11px",
+                              minWidth: 52,
+                            }}
+                            value={radioFillSlot}
+                            onChange={(e) => setRadioFillSlot(Number(e.target.value))}
+                          >
+                            {Array.from({ length: 15 }, (_, i) => i + 1).map((n) => (
+                              <option key={n} value={n}>{n}</option>
+                            ))}
+                          </select>
+                        </label>
+
+                        <DocPicker
+                          rootId={RADIO_HOME_FOLDER}
+                          rootLabel="RT 2026"
+                          picked={radioPickedDoc}
+                          onPick={setRadioPickedDoc}
+                          label="DOC"
+                        />
+
+                        <button
+                          id="send-to-radio-btn"
+                          className="btn btn--compact"
+                          onClick={() => void sendToRadio()}
+                          disabled={radioFilling || !sendText.trim()}
+                          title={`Fill ${radioFillSection} / ${radioFillBlock} slot ${radioFillSlot} in ${radioPickedDoc ? radioPickedDoc.name : "today's Radio script"}`}
                         >
-                          <option value="NATIONAL">NATIONAL</option>
-                          <option value="GLOBAL">GLOBAL</option>
-                          <option value="BUSINESS">BUSINESS</option>
-                        </select>
-                      </label>
+                          {radioFilling ? "SENDING…" : "SEND TO RADIO ▸"}
+                        </button>
+                      </div>
+                    </div>
 
-                      {/* Slot */}
-                      <label className="flex flex-col gap-0.5">
-                        <span className="label" style={{ fontSize: 9 }}>SLOT</span>
-                        <select
-                          id="radio-slot-input"
-                          className="mono"
-                          style={{
-                            background: "var(--color-panel-2)",
-                            color: "var(--color-phosphor-dim)",
-                            border: "1px solid var(--color-edge)",
-                            padding: "3px 5px",
-                            fontSize: "11px",
-                            minWidth: 52,
-                          }}
-                          value={radioFillSlot}
-                          onChange={(e) => setRadioFillSlot(Number(e.target.value))}
+                    {/* Rundown writes the monthly SHEET, not the script doc — its
+                        own bracket so it stops reading as a third radio button. */}
+                    <div className="lane">
+                      <span className="lane__tag">rundown sheet</span>
+                      <div className="lane__row">
+                        <button
+                          className="btn btn--compact"
+                          onClick={() => void fillRundown(true)}
+                          disabled={rundownFilling}
+                          title="Dry-run: show the planned rundown cells without writing (do this first)"
                         >
-                          {Array.from({ length: 15 }, (_, i) => i + 1).map((n) => (
-                            <option key={n} value={n}>{n}</option>
-                          ))}
-                        </select>
-                      </label>
+                          {rundownFilling ? "…" : "RUNDOWN DRY-RUN"}
+                        </button>
 
-                      <DocPicker
-                        rootId={RADIO_HOME_FOLDER}
-                        rootLabel="RT 2026"
-                        picked={radioPickedDoc}
-                        onPick={setRadioPickedDoc}
-                        label="DOC"
-                      />
-
-                      <button
-                        id="send-to-radio-btn"
-                        className="btn btn--compact"
-                        onClick={() => void sendToRadio()}
-                        disabled={radioFilling || !sendText.trim()}
-                        title={`Fill ${radioFillSection} / ${radioFillBlock} slot ${radioFillSlot} in ${radioPickedDoc ? radioPickedDoc.name : "today's Radio script"}`}
-                      >
-                        {radioFilling ? "SENDING…" : "SEND TO RADIO ▸"}
-                      </button>
-
-                      <button
-                        className="btn btn--compact"
-                        onClick={() => void fillRundown(true)}
-                        disabled={rundownFilling}
-                        title="Dry-run: show the planned rundown cells without writing (do this first)"
-                      >
-                        {rundownFilling ? "…" : "RUNDOWN DRY-RUN"}
-                      </button>
-
-                      <button
-                        className="btn btn--compact"
-                        onClick={() => void fillRundown(false)}
-                        disabled={rundownFilling}
-                        title={`Fill the ${radioPickedDoc ? radioPickedDoc.name : "today's"} titles into the monthly Rundown sheet + flip red cells green`}
-                      >
-                        {rundownFilling ? "FILLING…" : "FILL RUNDOWN ⤢"}
-                      </button>
+                        <button
+                          className="btn btn--compact"
+                          onClick={() => void fillRundown(false)}
+                          disabled={rundownFilling}
+                          title={`Fill the ${radioPickedDoc ? radioPickedDoc.name : "today's"} titles into the monthly Rundown sheet + flip red cells green`}
+                        >
+                          {rundownFilling ? "FILLING…" : "FILL RUNDOWN ⤢"}
+                        </button>
+                      </div>
                     </div>
                   </div>
 
