@@ -1721,3 +1721,50 @@ def test_phase2_api_radio_fill_argv(monkeypatch):
     no_text = {k: v for k, v in body.items() if k != "text"}
     assert c.post("/api/newsroom/radio/fill", json=no_text).status_code == 400
 
+
+
+# ---------------------------------------------------------------- infographics
+
+
+_INFO_SCRIPT = (
+    "Intro paragraph with no data.\n\n"
+    "The country welcomed 35.2 million arrivals, generating 1.2 trillion baht.\n\n"
+    "\"A quote paragraph,\" said **Somchai Pattana**.\n\n"
+    "A soft closing paragraph."
+)
+
+
+def test_annotate_infographics_never_touches_the_news():
+    """The prose is copied verbatim and paragraph 1 is unannotatable — the two ways
+    the LLM-reproduces-the-script version corrupted real scripts (block above the
+    lede; lede deleted outright)."""
+    from app.newsroom import _annotate_infographics
+
+    picks = [
+        {"paragraph": 2, "headline": "Arrivals", "why": "w", "intake": "i",
+         "facts": "35.2 million, 1.2 trillion baht"},
+        {"paragraph": 1, "headline": "LEDE", "why": "w", "intake": "i", "facts": "f"},
+        {"paragraph": 99, "headline": "OOB", "why": "w", "intake": "i", "facts": "f"},
+        {"paragraph": "bad", "headline": "NAN", "why": "w", "intake": "i", "facts": "f"},
+    ]
+    out = _annotate_infographics(_INFO_SCRIPT, picks)
+
+    # every original paragraph survives, in order, byte-for-byte
+    pos = -1
+    for para in _INFO_SCRIPT.split("\n\n"):
+        i = out.find(para)
+        assert i > pos, "paragraph dropped or reordered: %r" % para
+        pos = i
+    # the lede is still first — no block may precede it
+    assert out.startswith("Intro paragraph with no data.")
+    # out-of-range / non-numeric / paragraph-1 picks are all discarded
+    assert "LEDE" not in out and "OOB" not in out and "NAN" not in out
+    # the one valid pick landed directly above its paragraph, figures verbatim
+    assert out.index("----- INFOGRAPHIC: Arrivals") < out.index("The country welcomed")
+    assert "News fact + data point:  35.2 million, 1.2 trillion baht" in out
+
+
+def test_annotate_infographics_empty_picks_is_identity():
+    """Zero qualifying paragraphs is a valid result — the script must come back unchanged."""
+    from app.newsroom import _annotate_infographics
+    assert _annotate_infographics(_INFO_SCRIPT, []) == _INFO_SCRIPT

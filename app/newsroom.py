@@ -247,6 +247,31 @@ async def api_radio_fill(body: dict = Body(...)):
     return await _script(argv, timeout=60)
 
 
+@router.post("/api/newsroom/radio/rundown")
+async def api_radio_rundown(body: dict = Body(...)):
+    """Auto-fill the monthly ``{YYYYMM}_Rundown`` tab for one day, then flip that
+    tab's red "not done" cells to green.
+
+    Body: {year, month, day, doc_id?, sheet_id?, dry_run?}. y/m/d are ALWAYS
+    required — they locate the day tab ("01".."31") even when doc_id is given.
+    ``dry_run`` returns the planned writes + red-cell count without writing.
+    Reads 3 tabs of a doc + recolors, so it gets a longer cap than radio/fill.
+    """
+    try:
+        ymd = [int(body[f]) for f in ("year", "month", "day")]
+    except (KeyError, TypeError, ValueError):
+        raise HTTPException(400, "year, month and day required (integers)")
+    argv = [PY, str(RADIO), "rundown",
+            "--year", str(ymd[0]), "--month", str(ymd[1]), "--day", str(ymd[2])]
+    if body.get("doc_id"):
+        argv += ["--doc", str(body["doc_id"])]
+    if body.get("sheet_id"):
+        argv += ["--sheet-id", str(body["sheet_id"])]
+    if body.get("dry_run"):
+        argv.append("--dry-run")
+    return await _script(argv, timeout=180)
+
+
 
 # ---------------------------------------------------------------- newsline
 # Monthly Drive batch generator (NEWSLINE): one daily Google Doc per calendar
@@ -443,6 +468,99 @@ async def api_rewrite(body: dict = Body(...)):
     # is unchanged — the JSON is only a more reliable transport for the pieces.
     rewritten = f"EN: {title}\nTH: {title_th}\n\n{body}" if (title or title_th) else body
     return {"rewritten": rewritten, "seo": out_seo}
+
+
+# ------------------------------------------------------- infographics
+
+# Advisory director pass: marks which BODY paragraphs deserve a motion graphic and
+# emits a paste-ready prompt for Naz's Google Flow "Broadcast Infographic Pro" app.
+# That app owns ALL styling/art/color, and its Information Intake section has
+# exactly TWO inputs — so emitting art direction here would be noise the app ignores.
+_INFO_SYSTEM = """You are a broadcast infographics director for Thailand NOW.
+
+You receive a TV news script as NUMBERED paragraphs. Decide which paragraphs should be
+backed by a motion infographic. You do NOT rewrite, summarize, reorder, or reproduce the
+script — you only return your picks as JSON. The script itself is reassembled by code.
+
+RULES:
+1. NEVER pick paragraph 1 (the intro/lede). Valid picks start at paragraph 2.
+2. SOURCE-ONLY: `facts` may contain ONLY figures already present in that paragraph.
+   Never invent, round, extrapolate, or add a statistic — copy them verbatim.
+3. BE SELECTIVE. Pick only paragraphs with genuinely visual content: numbers, money,
+   percentages, counts, comparisons, rankings, timelines, before/after, routes, or
+   process steps. Skip pure quotes and soft narrative. An EMPTY list is a valid,
+   correct answer when nothing qualifies.
+
+Return ONLY a JSON object — no code fence, no commentary:
+{"picks": [{"paragraph": <int>, "headline": "<5-8 words>", "why": "<one line: the data worth showing>",
+            "intake": "<editorial beat + short framing clause>",
+            "facts": "<the exact figures from that paragraph, verbatim, comma-separated>"}]}
+
+`intake` and `facts` are the ONLY two fields the target app accepts. Never emit
+Aesthetic, Art Style, Background, Color, Tone, or Dimension — the app sets those itself."""
+
+
+def _annotate_infographics(text: str, picks: list) -> str:
+    """Reassemble the script with INFOGRAPHIC blocks above the picked paragraphs.
+
+    The LLM only chooses paragraphs; the prose is copied verbatim here. Earlier
+    versions asked the model to reproduce the script and it twice corrupted the
+    news — once prepending a block above the lede, once DELETING the lede outright.
+    Rebuilding in code makes 'never edits the news' true by construction, so
+    paragraph 1 can't be annotated and no wording can drift.
+    """
+    paras = [p for p in re.split(r"\n\s*\n", text.strip()) if p.strip()]
+    by_para: dict[int, list] = {}
+    for p in picks:
+        try:
+            i = int(p.get("paragraph"))
+        except (TypeError, ValueError):
+            continue
+        # 1-based from the model; paragraph 1 (lede) is never annotatable.
+        if 2 <= i <= len(paras):
+            by_para.setdefault(i, []).append(p)
+
+    out: list[str] = []
+    for n, para in enumerate(paras, start=1):
+        for p in by_para.get(n, []):
+            out.append(
+                "----- INFOGRAPHIC: %s -----\n"
+                "Why: %s\n"
+                "Broadcast Infographic Pro:\n"
+                "  Information Intake:      %s\n"
+                "  News fact + data point:  %s\n"
+                "-----------------------------------------------------------"
+                % (p.get("headline", ""), p.get("why", ""), p.get("intake", ""), p.get("facts", ""))
+            )
+        out.append(para)
+    return "\n\n".join(out)
+
+
+@router.post("/api/newsroom/infographic/suggest")
+async def api_infographic_suggest(body: dict = Body(...)):
+    """Annotate the Script-box text with Broadcast Infographic Pro prompts.
+
+    Advisory only — returns ``{"annotated": ..., "count": n}``; touches no Google
+    Doc, and the news prose is copied verbatim (see ``_annotate_infographics``)."""
+    text = (body.get("text") or "").strip()
+    if not text:
+        raise HTTPException(400, "nothing to analyse — the Script box is empty")
+    numbered = "\n\n".join(
+        "[%d] %s" % (i, p)
+        for i, p in enumerate(
+            [p for p in re.split(r"\n\s*\n", text) if p.strip()], start=1)
+    )
+    out = await zai.zai_message(numbered, system=_INFO_SYSTEM, max_tokens=4000, timeout=120)
+    if not out.strip():
+        raise HTTPException(502, "infographic pass came back empty")
+    raw = out.strip()
+    if raw.startswith("```"):  # strip a stray code fence
+        raw = re.sub(r"^```[a-z]*\n?|\n?```$", "", raw).strip()
+    try:
+        picks = json.loads(raw).get("picks") or []
+    except Exception:
+        raise HTTPException(502, "infographic pass returned unparseable JSON")
+    return {"annotated": _annotate_infographics(text, picks), "count": len(picks)}
 
 
 # Antigravity IDE rewrite writes its handoff here (see 10-knowledge/newsroom-rewrite-

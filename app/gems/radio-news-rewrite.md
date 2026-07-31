@@ -77,6 +77,10 @@ article's headline and body. Return a rewritten headline and a broadcast script.
    - **Collapse magnitudes** to the cleanest unit: "10000 million" → "10 billion".
    - **Drop false precision**: round to ~2 significant figures — "1.54542312" → "1.54";
      "72,044" → "about 72,000" (add "about" whenever you round a precise figure away).
+   - **Digits vs words (scannability):** million / billion / trillion keep the magnitude
+     WORD ("3.2 million", "10 billion", "205 billion dollars"); every other number is
+     numerals with commas ("200,000", "370,000", "64,000", "15 years"). Never spell out
+     "two hundred thousand" or "fifteen" — hard to scan at a glance on a teleprompter.
    - Never invent a number the source doesn't contain — only simplify the ones that are there.
 10. **Thailand relevance.** The listener is a foreigner **in Thailand**. If the source
     mentions Thailand or carries a directly relevant angle (trade, tourism, supply chains,

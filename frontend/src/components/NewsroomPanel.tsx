@@ -72,6 +72,37 @@ const renderRewritePreview = (text: string, seoBlock: string) => {
   );
 };
 
+// "load into Script" used to drop the SEO block and the footage code on the floor.
+// Compose all three, skipping whatever is absent, so the Script box holds what
+// SEND TO NL / SEND TO RADIO should actually carry.
+const buildLoadText = (body: string, seoBlock: string, footage?: string) =>
+  [footage?.trim(), body.trim(), seoBlock.trim()].filter(Boolean).join("\n\n");
+
+// Annotated-script preview: same mono shell as the rewrite preview, but the
+// ----- INFOGRAPHIC … ----- blocks and their field lines are amber so Naz can
+// see at a glance which paragraphs got picked.
+const renderInfographicPreview = (text: string) => {
+  const html = text
+    .split("\n")
+    .map((line) => {
+      const esc = escapeHtml(line);
+      if (/^-{3,}\s*INFOGRAPHIC:|^-{5,}$/.test(line.trim())) {
+        return `<div style="color:#fbbf60;font-weight:600">${esc}</div>`;
+      }
+      if (/^\s*(Why:|Broadcast Infographic Pro:|Information Intake:|News fact \+ data point:)/.test(line)) {
+        return `<div style="color:#fbbf60">${esc}</div>`;
+      }
+      return `<div>${esc || "&nbsp;"}</div>`;
+    })
+    .join("");
+  return (
+    `<!doctype html><html><head><meta charset="utf-8"><style>` +
+    `body{margin:0;padding:12px;background:#0b0f14;color:#c8d3df;` +
+    `font:16px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace;word-wrap:break-word}` +
+    `</style></head><body>${html}</body></html>`
+  );
+};
+
 interface Story {
   id: string;
   date: string;
@@ -399,6 +430,8 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
   const [rewritten, setRewritten] = useState("");
   const [seo, setSeo] = useState("");
   const [rewriting, setRewriting] = useState(false);
+  const [infoSuggesting, setInfoSuggesting] = useState(false);
+  const [infoAnnotated, setInfoAnnotated] = useState("");
   const [converting, setConverting] = useState(false);
   const [copiedQueuePrompt, setCopiedQueuePrompt] = useState(false);
 
@@ -490,6 +523,10 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
   const [radioFillSlot, setRadioFillSlot] = useState<number>(1);
   const [radioPickedDoc, setRadioPickedDoc] = useState<NewsDoc | null>(null);
   const [radioFilling, setRadioFilling] = useState(false);
+  const [rundownFilling, setRundownFilling] = useState(false);
+  const [rundownResult, setRundownResult] = useState<{
+    filled?: boolean; dry_run?: boolean; sheet: string; tab: string; cells: number; recolored?: number; recolor?: number;
+  } | null>(null);
   const [radioFillResult, setRadioFillResult] = useState<{ filled: boolean; doc: string; section: string; block: string; slot: number; chars: number } | null>(null);
   // Radio fill uses today's date (computed once per render; stable across the session).
   const nowFill = new Date();
@@ -953,6 +990,41 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
   };
 
 
+  // FILL RUNDOWN — read the day's script doc and write its titles into that day's
+  // tab of the monthly {YYYYMM}_Rundown sheet, then flip the tab's red "not done"
+  // cells to green. Y/M/D come from the picked doc's name (20260730_… ) so the
+  // button follows the DocPicker; falls back to today when nothing is picked.
+  const fillRundown = async (dryRun = false) => {
+    setRundownFilling(true);
+    setRundownResult(null);
+    setError(null);
+    const m = radioPickedDoc?.name.match(/^(\d{4})(\d{2})(\d{2})/);
+    const body = {
+      year: m ? Number(m[1]) : rfYear,
+      month: m ? Number(m[2]) : rfMonth,
+      day: m ? Number(m[3]) : rfDay,
+      ...(radioPickedDoc ? { doc_id: radioPickedDoc.id } : {}),
+      ...(dryRun ? { dry_run: true } : {}),
+    };
+    try {
+      const res = await fetch("/api/newsroom/radio/rundown", {
+        method: "POST",
+        headers: CT,
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({ detail: res.statusText }));
+        setError(typeof d.detail === "string" ? d.detail : JSON.stringify(d.detail));
+      } else {
+        setRundownResult(await res.json().catch(() => ({})));
+      }
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setRundownFilling(false);
+    }
+  };
+
   // REWRITE: POST the Script-box text to the backend Rules-Gem pass (which
   // rides the OmniRoute gateway), then render the finished two-layer script in
   // the iframe. Inlined (not via `post`) because we need the response body.
@@ -980,6 +1052,34 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setRewriting(false);
+    }
+  };
+
+  // 📊 INFOGRAPHICS — advisory director pass over the Script-box text. Renders in its
+  // OWN preview so the Script box stays clean for SEND TO NL (the blocks are notes for
+  // Naz's Google Flow app, not broadcast copy).
+  const suggestInfographics = async () => {
+    if (!sendText.trim()) return;
+    setInfoSuggesting(true);
+    setInfoAnnotated("");
+    setError(null);
+    try {
+      const res = await fetch("/api/newsroom/infographic/suggest", {
+        method: "POST",
+        headers: CT,
+        body: JSON.stringify({ text: sendText }),
+      });
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({ detail: res.statusText }));
+        setError(typeof d.detail === "string" ? d.detail : JSON.stringify(d.detail));
+      } else {
+        const d = await res.json().catch(() => ({}));
+        setInfoAnnotated(d.annotated || "");
+      }
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setInfoSuggesting(false);
     }
   };
 
@@ -1175,6 +1275,14 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
                     >
                       {converting ? "LOADING…" : "CONVERT"}
                     </button>
+                    <button
+                      className="btn"
+                      onClick={() => void suggestInfographics()}
+                      disabled={infoSuggesting || !sendText.trim()}
+                      title="Mark which body paragraphs deserve a motion infographic (advisory — never rewrites the news)"
+                    >
+                      {infoSuggesting ? "READING…" : "📊 INFOGRAPHICS"}
+                    </button>
                   </div>
 
                   {/* ---- SEND TO NL append controls ---- */}
@@ -1319,8 +1427,39 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
                       >
                         {radioFilling ? "SENDING…" : "SEND TO RADIO ▸"}
                       </button>
+
+                      <button
+                        className="btn btn--compact"
+                        onClick={() => void fillRundown(true)}
+                        disabled={rundownFilling}
+                        title="Dry-run: show the planned rundown cells without writing (do this first)"
+                      >
+                        {rundownFilling ? "…" : "RUNDOWN DRY-RUN"}
+                      </button>
+
+                      <button
+                        className="btn btn--compact"
+                        onClick={() => void fillRundown(false)}
+                        disabled={rundownFilling}
+                        title={`Fill the ${radioPickedDoc ? radioPickedDoc.name : "today's"} titles into the monthly Rundown sheet + flip red cells green`}
+                      >
+                        {rundownFilling ? "FILLING…" : "FILL RUNDOWN ⤢"}
+                      </button>
                     </div>
                   </div>
+
+                  {/* Fill feedback (Rundown) */}
+                  {rundownResult && (
+                    <div className="mono flex items-center gap-2" style={{ fontSize: 11, color: "var(--color-go)" }}>
+                      <span className="pip pip--go" />
+                      {rundownResult.dry_run ? "Dry-run — " : ""}
+                      Rundown {rundownResult.sheet} tab {rundownResult.tab} — {rundownResult.cells} cells
+                      {rundownResult.dry_run ? " planned" : " filled"}
+                      {(rundownResult.recolored ?? rundownResult.recolor) !== undefined
+                        ? `, ${rundownResult.recolored ?? rundownResult.recolor} greened`
+                        : ""}
+                    </div>
+                  )}
 
                   {/* Fill feedback (NL) */}
                   {nlFillResult && (
@@ -1350,7 +1489,7 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
                           <button
                             className="btn btn--compact ml-auto"
                             style={{ padding: "2px 8px" }}
-                            onClick={() => setSendText(rewritten)}
+                            onClick={() => setSendText(buildLoadText(rewritten, seo, selected?.footage_code))}
                           >
                             ⇐ load into Script
                           </button>
@@ -1359,6 +1498,37 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
                       <iframe
                         title="rewritten article"
                         srcDoc={rewriting ? rewriteDoc("processing rewrite…", true) : renderRewritePreview(rewritten, seo)}
+                        style={{
+                          width: "100%",
+                          minHeight: 140,
+                          border: "1px solid var(--color-edge)",
+                          background: "var(--color-void)",
+                        }}
+                      />
+                    </div>
+                  )}
+
+                  {/* Infographic-annotated script — advisory pass, own preview */}
+                  {(infoSuggesting || infoAnnotated) && (
+                    <div className="flex min-h-0 flex-col gap-1" style={{ minHeight: 160 }}>
+                      <div className="flex items-center gap-2">
+                        <span className="label">
+                          Infographic suggestions{infoSuggesting ? " — reading…" : ""}
+                        </span>
+                        {infoAnnotated && (
+                          <button
+                            className="btn btn--compact ml-auto"
+                            style={{ padding: "2px 8px" }}
+                            onClick={() => setSendText(infoAnnotated)}
+                            title="Drop the annotated version into the Script box (remove the blocks before SEND TO NL)"
+                          >
+                            ⇐ load into Script
+                          </button>
+                        )}
+                      </div>
+                      <iframe
+                        title="infographic suggestions"
+                        srcDoc={infoSuggesting ? rewriteDoc("reading the script…", true) : renderInfographicPreview(infoAnnotated)}
                         style={{
                           width: "100%",
                           minHeight: 140,
