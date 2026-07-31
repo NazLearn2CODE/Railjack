@@ -1249,40 +1249,61 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
                     />
                   </label>
 
-                  {/* ---- Action controls: REWRITE (metered) + 📋 IDE REWRITE + CONVERT (free) ---- */}
-                  <div className="flex gap-2">
-                    <button
-                      className="btn"
-                      onClick={() => void rewrite()}
-                      disabled={rewriting || !sendText.trim()}
-                      title="Run the Script-box text through the Rules Gem (source-only) → two-layer script"
-                    >
-                      {rewriting ? "REWRITING…" : "REWRITE"}
-                    </button>
-                    <button
-                      className="btn"
-                      onClick={() => void handleCopyQueueAntigravityPrompt()}
-                      disabled={!sendText.trim()}
-                      title="Copy an Antigravity prompt that rewrites this article free in Editor Ben's voice → /tmp/newsroom-rewrite/latest.json"
-                    >
-                      {copiedQueuePrompt ? "COPIED ✓" : "📋 IDE REWRITE"}
-                    </button>
-                    <button
-                      className="btn btn--signal"
-                      onClick={() => void convertRewrite()}
-                      disabled={converting}
-                      title="Fetch + convert the latest IDE rewrite handoff (/tmp/newsroom-rewrite/latest.json)"
-                    >
-                      {converting ? "LOADING…" : "CONVERT"}
-                    </button>
-                    <button
-                      className="btn"
-                      onClick={() => void suggestInfographics()}
-                      disabled={infoSuggesting || !sendText.trim()}
-                      title="Mark which body paragraphs deserve a motion infographic (advisory — never rewrites the news)"
-                    >
-                      {infoSuggesting ? "READING…" : "📊 INFOGRAPHICS"}
-                    </button>
+                  {/* ---- Action lanes: the rewrite step has three routes, not four peers.
+                       Grouped so the metered vs free cost is visible and the IDE
+                       chain (copy prompt -> IDE writes -> CONVERT relays) reads as
+                       one hand-off instead of two unrelated buttons. ---- */}
+                  <div className="lane-row">
+                    <div className="lane lane--metered">
+                      <span className="lane__tag">metered</span>
+                      <div className="lane__row">
+                        <button
+                          className="btn"
+                          onClick={() => void rewrite()}
+                          disabled={rewriting || !sendText.trim()}
+                          title="Run the Script-box text through the Rules Gem (source-only) → two-layer script"
+                        >
+                          {rewriting ? "REWRITING…" : "REWRITE"}
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="lane lane--free">
+                      <span className="lane__tag">free · via ide</span>
+                      <div className="lane__row">
+                        <button
+                          className="btn"
+                          onClick={() => void handleCopyQueueAntigravityPrompt()}
+                          disabled={!sendText.trim()}
+                          title="Copy an Antigravity prompt that rewrites this article free in Editor Ben's voice → /tmp/newsroom-rewrite/latest.json"
+                        >
+                          {copiedQueuePrompt ? "COPIED ✓" : "📋 IDE REWRITE"}
+                        </button>
+                        <span className="lane__link" aria-hidden="true">─▸</span>
+                        <button
+                          className="btn btn--signal"
+                          onClick={() => void convertRewrite()}
+                          disabled={converting}
+                          title="Fetch + convert the latest IDE rewrite handoff (/tmp/newsroom-rewrite/latest.json)"
+                        >
+                          {converting ? "LOADING…" : "CONVERT"}
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="lane">
+                      <span className="lane__tag">advisory</span>
+                      <div className="lane__row">
+                        <button
+                          className="btn btn--hazard"
+                          onClick={() => void suggestInfographics()}
+                          disabled={infoSuggesting || !sendText.trim()}
+                          title="Mark which body paragraphs deserve a motion infographic (advisory — never rewrites the news)"
+                        >
+                          {infoSuggesting ? "READING…" : "📊 INFOGRAPHICS"}
+                        </button>
+                      </div>
+                    </div>
                   </div>
 
                   {/* ---- SEND TO NL append controls ---- */}
