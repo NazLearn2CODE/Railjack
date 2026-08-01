@@ -124,8 +124,15 @@ def test_context_limit_resolves_glm52_to_1m():
     assert session_stats._resolve_context_limit("glm-5.2", 200_000) == 1_000_000
 
 
-def test_context_limit_claude_family_200k():
-    assert session_stats._resolve_context_limit("claude-opus-4-8", 200_000) == 200_000
+def test_context_limit_claude_family_1m():
+    # Current Claude line (Opus 5/4.8/4.7, Sonnet 5/4.6, ...) is 1M, not 200K —
+    # the generic ^claude- fallback used to under-report by 5x.
+    assert session_stats._resolve_context_limit("claude-opus-4-8", 200_000) == 1_000_000
+    assert session_stats._resolve_context_limit("claude-sonnet-5", 200_000) == 1_000_000
+
+
+def test_context_limit_claude_haiku_200k():
+    assert session_stats._resolve_context_limit("claude-haiku-4-5", 200_000) == 200_000
 
 
 def test_context_limit_unknown_model_uses_fallback():
@@ -191,8 +198,8 @@ def test_session_state_parses_newest_transcript(monkeypatch, tmp_path):
     assert st["model"] == "claude-fable-5"
     # input (2 + 104314 + 433) + output (280) = post-turn context fill
     assert st["context_tokens"] == 2 + 104314 + 433 + 280
-    assert st["context_limit"] == 200_000
-    assert st["context_pct"] == round((105029 / 200_000) * 100)  # 53
+    assert st["context_limit"] == 1_000_000
+    assert st["context_pct"] == round((105029 / 1_000_000) * 100)  # 11
     assert st["idle"] is False  # fresh mtime
     # block start floored to the hour of the first (40m-ago) event
     assert st["reset_at"] is not None

@@ -21,6 +21,14 @@ interface Session {
   idle: boolean;
 }
 
+// 1_000_000 -> "1M", 200_000 -> "200K" — labels the CTX gauge with its
+// actual per-model denominator so a stale table entry is visible at a glance.
+function formatCtxLimit(n: number): string {
+  if (n >= 1_000_000) return `${Math.round(n / 1_000_000)}M`;
+  if (n >= 1_000) return `${Math.round(n / 1_000)}K`;
+  return `${n}`;
+}
+
 export default function ModuleRail() {
   const machine = useStore((s) => s.config?.machine);
   const modules = useStore((s) => s.config?.modules) ?? [];
@@ -105,7 +113,9 @@ export default function ModuleRail() {
             </div>
 
             <div className="flex items-center justify-between px-1">
-              <span className="label">CTX</span>
+              <span className="label">
+                CTX{session.context_limit ? `(${formatCtxLimit(session.context_limit)})` : ""}
+              </span>
               <span className="pct">{session.context_pct}%</span>
             </div>
 
