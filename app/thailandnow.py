@@ -2399,6 +2399,50 @@ async def _wp(method: str, path: str, params: dict | None = None, json_body: dic
         return r.json() if r.content else None
 
 
+_WP_RB_CACHE: dict[int, str] = {}           # post_id -> rest_base (process-lifetime)
+_WP_CONTENT_RBS: tuple[str, ...] | None = None
+
+
+async def _wp_content_rest_bases() -> tuple[str, ...]:
+    """Content-bearing WP REST bases (posts, pages, event, + public CPTs). Cached.
+
+    The SEO fix endpoints need this: a record id (e.g. an event) is NOT reachable
+    via /posts/{id} — WP REST has no cross-type lookup-by-id, so we resolve by
+    probing each base. ponytail: process cache; types rarely change, restart refreshes."""
+    global _WP_CONTENT_RBS
+    if _WP_CONTENT_RBS:
+        return _WP_CONTENT_RBS
+    bases = ["posts", "pages"]
+    _skip = {"attachment", "revision", "nav_menu_item", "wp_block",
+             "wp_template", "wp_template_part", "wp_navigation", "user"}
+    try:
+        types_obj = await _wp("GET", "/types", {})
+        if isinstance(types_obj, dict):
+            for slug, info in types_obj.items():
+                rb = (info or {}).get("rest_base") if isinstance(info, dict) else None
+                if rb and "{" not in rb and slug not in _skip and rb not in bases:
+                    bases.append(rb)
+    except HTTPException:
+        pass
+    _WP_CONTENT_RBS = tuple(bases)
+    return _WP_CONTENT_RBS
+
+
+async def _wp_resolve_rest_base(post_id: int) -> str:
+    """Which content rest_base owns post_id? Cached per-id; falls back to 'posts'
+    (the caller then surfaces an honest 404). Probes with context=view (read perm)."""
+    if post_id in _WP_RB_CACHE:
+        return _WP_RB_CACHE[post_id]
+    for rb in await _wp_content_rest_bases():
+        try:
+            if await _wp("GET", f"/{rb}/{post_id}", {"context": "view"}):
+                _WP_RB_CACHE[post_id] = rb
+                return rb
+        except HTTPException:
+            continue
+    return "posts"
+
+
 _WP_MEDIA_MAX_BYTES = 15 * 1024 * 1024  # 15 MB guard
 _BROWSER_UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
@@ -3036,14 +3080,15 @@ async def seo_preview_fix(req: SeoFixReq):
     """Preview removing a broken link or image from a WP post.
     Reads content.raw via GET /wp/v2/posts/{post_id}?context=edit.
     Does NOT modify WP. Returns {post_id, matches, before, after}."""
+    rb = await _wp_resolve_rest_base(req.post_id)
     try:
-        post = await _wp("GET", f"/posts/{req.post_id}", {"context": "edit"})
+        post = await _wp("GET", f"/{rb}/{req.post_id}", {"context": "edit"})
     except HTTPException as e:
         if e.status_code in (401, 403):
             raise HTTPException(403, f"WP edit context permission denied for post {req.post_id}. Verify WP credentials app-password has edit capabilities.")
         raise
     if not post or not isinstance(post, dict):
-        raise HTTPException(404, f"WP post {req.post_id} not found")
+        raise HTTPException(404, f"WP {rb[:-1] if rb.endswith('s') else rb} {req.post_id} not found")
 
     raw_content = (post.get("content") or {}).get("raw", "")
     new_html, matches, before, after = _seo_strip_target(raw_content, req.kind, req.target)
@@ -3062,14 +3107,15 @@ async def seo_apply_fix(req: SeoFixReq):
     """Apply fix: remove broken link or image from WP post.
     Reads content.raw, strips target, POSTs {content: new_raw} to /wp/v2/posts/{post_id}.
     Idempotent: 0 matches -> returns {ok: true, matches: 0}, no PUT/POST."""
+    rb = await _wp_resolve_rest_base(req.post_id)
     try:
-        post = await _wp("GET", f"/posts/{req.post_id}", {"context": "edit"})
+        post = await _wp("GET", f"/{rb}/{req.post_id}", {"context": "edit"})
     except HTTPException as e:
         if e.status_code in (401, 403):
             raise HTTPException(403, f"WP edit context permission denied for post {req.post_id}.")
         raise
     if not post or not isinstance(post, dict):
-        raise HTTPException(404, f"WP post {req.post_id} not found")
+        raise HTTPException(404, f"WP {rb[:-1] if rb.endswith('s') else rb} {req.post_id} not found")
 
     raw_content = (post.get("content") or {}).get("raw", "")
     new_html, matches, before, after = _seo_strip_target(raw_content, req.kind, req.target)
@@ -3082,7 +3128,7 @@ async def seo_apply_fix(req: SeoFixReq):
             "post_link": post.get("link", ""),
         }
 
-    await _wp("POST", f"/posts/{req.post_id}", json_body={"content": new_html})
+    await _wp("POST", f"/{rb}/{req.post_id}", json_body={"content": new_html})
     return {
         "ok": True,
         "matches": matches,
@@ -3107,10 +3153,16 @@ async def seo_apply_fix_bulk(req: SeoApplyFixBulkReq):
                 "post_id": item.post_id,
                 "target": item.target,
             })
+    removed = len([r for r in results if r.get("ok") and r.get("matches", 0) > 0])
+    noop = len([r for r in results if r.get("ok") and r.get("matches", 0) == 0])
+    failed = len([r for r in results if not r.get("ok")])
     return {
         "results": results,
         "total": len(req.items),
-        "successful": len([r for r in results if r.get("ok")]),
+        "removed": removed,      # actually stripped from WP content
+        "noop": noop,            # ok but target not in content (already gone / format mismatch)
+        "failed": failed,        # WP error (wrong type 404, perms, etc.)
+        "successful": removed,   # honest alias: a real removal (was: any ok, incl. no-ops)
     }
 
 

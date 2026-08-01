@@ -260,6 +260,46 @@ function healthCopyText(r: HealthReport): string {
   return L.join("\n");
 }
 
+/** Optimistic local trim: drop fixed (post_id,target) rows from the cached report
+ *  so counts shrink the instant a fix applies — no re-scan needed to see progress.
+ *  Only trims fixes the server confirmed (removed = matches>0); no-ops leave the row. */
+function trimFixed(
+  r: HealthReport,
+  fixes: { post_id: number; kind: "link" | "image"; target: string; removed: boolean }[],
+): HealthReport {
+  const links = new Map<number, Set<string>>();   // postId -> link targets removed
+  const imgs = new Map<number, Set<string>>();    // postId -> image targets removed
+  const extUrls = new Set<string>();              // external urls touched (key the ext record)
+  for (const f of fixes) {
+    if (!f.removed) continue;
+    const bucket = f.kind === "image" ? imgs : links;
+    if (!bucket.has(f.post_id)) bucket.set(f.post_id, new Set());
+    bucket.get(f.post_id)!.add(f.target);
+    if (f.kind === "link") extUrls.add(f.target);
+  }
+  const has = (m: Map<number, Set<string>>, pid?: number, t = "") =>
+    !!pid && !!m.get(pid)?.has(t);
+
+  const broken_internal_links = r.broken_internal_links.filter(
+    (b) => !has(links, b.from_id, b.href || b.to));
+  const broken_internal_images = r.broken_internal_images.filter(
+    (b) => !has(imgs, b.from_id, b.src));
+
+  // external links aggregate by url with a from[] source list: drop the trimmed
+  // source post, and drop the whole record once its last known source is gone.
+  let broken_external_links = r.broken_external_links;
+  if (extUrls.size) {
+    const next: typeof broken_external_links = [];
+    for (const b of broken_external_links) {
+      if (!extUrls.has(b.url)) { next.push(b); continue; }
+      const from = (b.from || []).filter((f) => !has(links, f.from_id, b.url));
+      if (from.length) next.push({ ...b, from });
+    }
+    broken_external_links = next;
+  }
+  return { ...r, broken_internal_links, broken_internal_images, broken_external_links };
+}
+
 function HealthList({ title, count, accent, hint, action, children }: {
   title: string; count: number; accent: string; hint?: string; action?: ReactNode; children: ReactNode;
 }) {
@@ -363,6 +403,7 @@ function BulkConfirm({
   bulkProgress,
   setBulkProgress,
   onClose,
+  onApplied,
 }: {
   title: string;
   description: string;
@@ -370,6 +411,7 @@ function BulkConfirm({
   bulkProgress: string | null;
   setBulkProgress: (s: string | null) => void;
   onClose: () => void;
+  onApplied: (fixes: { post_id: number; kind: "link" | "image"; target: string; removed: boolean }[]) => void;
 }) {
   return (
     <div className="p-2 border border-critical bg-shade flex flex-col gap-2 my-1">
@@ -385,9 +427,20 @@ function BulkConfirm({
           onClick={async () => {
             setBulkProgress("Applying bulk removal...");
             const items = getItems();
-            const res = await post<{ successful: number; total: number }>("/api/thailandnow/seo/apply-fix-bulk", { items });
+            const res = await post<{
+              successful: number; total: number; removed: number; noop: number; failed: number;
+              results: { ok: boolean; matches: number; post_id: number }[];
+            }>("/api/thailandnow/seo/apply-fix-bulk", { items });
             if (res.ok && res.data) {
-              setBulkProgress(`Finished: ${res.data.successful} / ${res.data.total} successful. Re-scan to verify.`);
+              const d = res.data;
+              onApplied(items.map((it, i) => ({
+                post_id: it.post_id, kind: it.kind, target: it.target,
+                removed: (d.results[i]?.matches ?? 0) > 0,
+              })));
+              const parts = [`Removed ${d.removed}/${d.total}`];
+              if (d.noop) parts.push(`${d.noop} already gone`);
+              if (d.failed) parts.push(`${d.failed} failed`);
+              setBulkProgress(parts.join(" · ") + ".");
             } else {
               setBulkProgress(`Error: ${res.error || "failed"}`);
             }
@@ -420,6 +473,12 @@ function HealthSubTab() {
   const [bulkConfirmSection, setBulkConfirmSection] = useState<string | null>(null);
   const [bulkProgress, setBulkProgress] = useState<string | null>(null);
 
+  const trimFixedFromReport = useCallback(
+    (fixes: { post_id: number; kind: "link" | "image"; target: string; removed: boolean }[]) =>
+      setReport((prev) => (prev ? trimFixed(prev, fixes) : prev)),
+    [setReport],
+  );
+
   const handleStartPreview = async (key: string, postId: number, kind: "link" | "image", target: string) => {
     setActivePreview({ key, postId, kind, target, loading: true });
     const res = await post<{ post_id: number; matches: number; before: string; after: string }>("/api/thailandnow/seo/preview-fix", {
@@ -441,6 +500,9 @@ function HealthSubTab() {
     });
     if (res.ok) {
       setActivePreview((prev) => prev ? { ...prev, loading: false, applied: true } : null);
+      if ((res.data?.matches ?? 0) > 0) {
+        setReport((prev) => prev ? trimFixed(prev, [{ post_id: postId, kind, target, removed: true }]) : prev);
+      }
     } else {
       setActivePreview((prev) => prev ? { ...prev, loading: false, error: res.error || "Failed to apply fix" } : null);
     }
@@ -548,6 +610,7 @@ function HealthSubTab() {
             {bulkConfirmSection === "internal" && (
               <BulkConfirm
                 title={`CONFIRM BULK REMOVE (${r.broken_internal_links.length} Broken Internal Links)`}
+                onApplied={trimFixedFromReport}
                 description="Strips all matching broken internal links across source posts, preserving inner text."
                 getItems={() =>
                   r.broken_internal_links
@@ -659,6 +722,7 @@ function HealthSubTab() {
             {bulkConfirmSection === "external" && (
               <BulkConfirm
                 title={`CONFIRM BULK REMOVE (${r.broken_external_links.length} Broken External Links)`}
+                onApplied={trimFixedFromReport}
                 description="Strips all matching broken external links across source posts, preserving inner text."
                 getItems={() => {
                   const items: SeoFixItem[] = [];
@@ -771,6 +835,7 @@ function HealthSubTab() {
             {bulkConfirmSection === "images" && (
               <BulkConfirm
                 title={`CONFIRM BULK REMOVE (${r.broken_internal_images.length} Broken Images)`}
+                onApplied={trimFixedFromReport}
                 description="Drops all matching broken img tags across source posts."
                 getItems={() =>
                   r.broken_internal_images
