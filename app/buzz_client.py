@@ -21,6 +21,7 @@ import httpx
 
 from .nostr_event import build_event
 
+KIND_PROFILE = 0
 KIND_MESSAGE = 9
 KIND_CREATE_CHANNEL = 9007
 KIND_JOIN = 9021
@@ -114,3 +115,33 @@ class BuzzClient:
         events = await self.query(filt)
         events.sort(key=lambda e: e.get("created_at", 0))
         return events
+
+    async def set_profile(self, display_name: str) -> None:
+        content = json.dumps({"display_name": display_name, "name": display_name})
+        event = build_event(self.privkey_hex, KIND_PROFILE, content, [])
+        await self.submit_event(event)
+
+    async def get_profiles(self, pubkeys: list[str]) -> dict[str, str]:
+        """pubkey -> display_name for every kind:0 profile found among `pubkeys`.
+        Pubkeys with no profile event (or an unparseable one) are simply absent
+        from the result — callers fall back to a raw pubkey label."""
+        if not pubkeys:
+            return {}
+        events = await self.query({"kinds": [KIND_PROFILE], "authors": pubkeys})
+        # Kind 0 is replaceable — same author can have multiple stored copies;
+        # keep only the newest per pubkey.
+        latest: dict[str, dict] = {}
+        for ev in events:
+            pk = ev.get("pubkey")
+            if pk and (pk not in latest or ev.get("created_at", 0) > latest[pk].get("created_at", 0)):
+                latest[pk] = ev
+        names: dict[str, str] = {}
+        for pk, ev in latest.items():
+            try:
+                data = json.loads(ev.get("content") or "{}")
+            except ValueError:
+                continue
+            name = (data.get("display_name") or data.get("name") or "").strip()
+            if name:
+                names[pk] = name
+        return names

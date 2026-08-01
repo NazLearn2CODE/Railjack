@@ -87,9 +87,20 @@ def _save_state(state: dict) -> None:
 _clients: dict[str, BuzzClient] = {}
 
 
-def _get_client(identity: str) -> BuzzClient:
+async def _get_client(identity: str) -> BuzzClient:
     if identity not in _clients:
-        _clients[identity] = BuzzClient(_relay_url(), _load_privkey(identity))
+        client = BuzzClient(_relay_url(), _load_privkey(identity))
+        _clients[identity] = client
+        # Publish this identity's display name as a kind:0 profile (NIP-01)
+        # so ANY client on the relay — including a future cross-machine one
+        # that doesn't share this machine's local _IDENTITIES dict — can
+        # resolve "who sent this" from the relay itself rather than a
+        # per-machine hardcoded roster. Best-effort: a relay hiccup here
+        # shouldn't block the identity from being usable.
+        try:
+            await client.set_profile(_display_name(identity))
+        except Exception:
+            pass
     return _clients[identity]
 
 
@@ -103,16 +114,28 @@ async def _ensure_channel(client: BuzzClient) -> str:
     return channel_id
 
 
+async def _roster() -> list[dict]:
+    return [
+        {
+            "id": identity,
+            "display_name": _display_name(identity),
+            "pubkey": pubkey_from_privkey(_load_privkey(identity)),
+        }
+        for identity in sorted(_IDENTITIES)
+    ]
+
+
 @router.get("/api/buzz/identities")
 async def api_identities():
-    """Which local identities exist on this machine — drives the panel's identity switcher."""
-    return {"identities": sorted(_IDENTITIES), "default": "sister"}
+    """Local identities + their pubkeys — drives the switcher and lets the panel
+    label any known sender by name instead of a raw pubkey prefix."""
+    return {"identities": await _roster(), "default": "sister"}
 
 
 @router.get("/api/buzz/state")
 async def api_state(identity: str = "sister"):
     """Identity + channel + relay reachability — drives the panel's header."""
-    client = _get_client(identity)
+    client = await _get_client(identity)
     pubkey = pubkey_from_privkey(client.privkey_hex)
     try:
         channel_id = await _ensure_channel(client)
@@ -136,7 +159,7 @@ async def api_state(identity: str = "sister"):
 
 @router.get("/api/buzz/messages")
 async def api_get_messages(identity: str = "sister", since: int | None = None, limit: int = 100):
-    client = _get_client(identity)
+    client = await _get_client(identity)
     try:
         channel_id = await _ensure_channel(client)
         events = await client.get_messages(channel_id, limit=limit, since=since)
@@ -144,12 +167,25 @@ async def api_get_messages(identity: str = "sister", since: int | None = None, l
         raise HTTPException(502, f"relay error: {e.body}")
     except Exception as e:
         raise HTTPException(502, f"relay unreachable: {e}")
+
+    # Any sender not in this machine's local _IDENTITIES roster (a sister on
+    # another machine, once cross-machine reachability exists) is resolved
+    # from the relay's kind:0 profiles instead — the panel no longer needs
+    # both machines to share a hardcoded pubkey->name table.
+    known_pubkeys = {i["pubkey"] for i in await _roster()}
+    unknown = sorted({ev.get("pubkey") for ev in events if ev.get("pubkey") not in known_pubkeys})
+    try:
+        remote_names = await client.get_profiles(unknown) if unknown else {}
+    except Exception:
+        remote_names = {}
+
     return {
         "channel_id": channel_id,
         "messages": [
             {
                 "id": ev.get("id"),
                 "pubkey": ev.get("pubkey"),
+                "display_name": remote_names.get(ev.get("pubkey")),
                 "content": ev.get("content"),
                 "created_at": ev.get("created_at"),
             }
@@ -163,7 +199,7 @@ async def api_send_message(body: dict = Body(...)):
     content = (body.get("content") or "").strip()
     if not content:
         raise HTTPException(400, "content required")
-    client = _get_client(str(body.get("identity") or "sister"))
+    client = await _get_client(str(body.get("identity") or "sister"))
     try:
         channel_id = await _ensure_channel(client)
         result = await client.send_message(channel_id, content)

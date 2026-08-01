@@ -28,6 +28,7 @@ interface BuzzState {
 interface BuzzMessage {
   id: string;
   pubkey: string;
+  display_name: string | null;
   content: string;
   created_at: number;
 }
@@ -35,8 +36,13 @@ interface MessagesResp {
   channel_id: string;
   messages: BuzzMessage[];
 }
+interface IdentityInfo {
+  id: string;
+  display_name: string;
+  pubkey: string;
+}
 interface IdentitiesResp {
-  identities: string[];
+  identities: IdentityInfo[];
   default: string;
 }
 
@@ -72,6 +78,16 @@ export default function BuzzPanel({ module: _module }: { module: ModuleConfig })
   const prevCount = useRef(0);
 
   const messages = msgResp?.messages ?? [];
+
+  // Local roster first (this machine's own identities), else the relay-
+  // resolved kind:0 profile name the backend already attached per message
+  // (app/buzz.py's api_get_messages — covers senders from ANY machine, not
+  // just ones hardcoded here), else the raw pubkey prefix as a last resort.
+  const nameByPubkey = new Map(
+    (identitiesResp?.identities ?? []).map((i) => [i.pubkey, i.display_name]),
+  );
+  const nameFor = (m: BuzzMessage) =>
+    nameByPubkey.get(m.pubkey) ?? m.display_name ?? shortKey(m.pubkey);
 
   // Auto-scroll to the newest transmission — but only when it's actually new,
   // so scrolling up to read history doesn't get yanked back down by a poll tick.
@@ -134,13 +150,13 @@ export default function BuzzPanel({ module: _module }: { module: ModuleConfig })
         <div className="flex items-center gap-3">
           {identitiesResp && identitiesResp.identities.length > 1 && (
             <div className="flex gap-1">
-              {identitiesResp.identities.map((id) => (
+              {identitiesResp.identities.map((i) => (
                 <button
-                  key={id}
-                  className={`btn btn--compact ${id === identity ? "btn--signal" : ""}`}
-                  onClick={() => switchIdentity(id)}
+                  key={i.id}
+                  className={`btn btn--compact ${i.id === identity ? "btn--signal" : ""}`}
+                  onClick={() => switchIdentity(i.id)}
                 >
-                  {id.toUpperCase()}
+                  {i.id.toUpperCase()}
                 </button>
               ))}
             </div>
@@ -186,7 +202,7 @@ export default function BuzzPanel({ module: _module }: { module: ModuleConfig })
                 }}
                 title={m.pubkey}
               >
-                {own ? (state?.display_name ?? "ME").toUpperCase() : shortKey(m.pubkey)}
+                {own ? (state?.display_name ?? "ME").toUpperCase() : nameFor(m).toUpperCase()}
               </span>
               <span className="mono shrink-0 text-xs text-muted" style={{ minWidth: 72 }}>
                 {timeLabel(m.created_at)}
