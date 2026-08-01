@@ -1,4 +1,4 @@
-import { useEffect, memo } from "react";
+import { useEffect, memo, useState } from "react";
 import type { FC } from "react";
 import { fetchJSON, usePolling } from "./api";
 import { useStore, dockOpenFor, type AppConfig, type ModuleConfig } from "./store";
@@ -33,16 +33,28 @@ const LiveDock = memo(function LiveDock({
   url: string;
   height: number;
 }) {
+  // The dock iframe is pinned (memo, stable key) so health-poll re-renders never
+  // drop the tmux session. A ttyd restart leaves that one iframe stuck on the
+  // disconnect frame; this ↻ bumps key → forced remount → fresh reconnect, without
+  // reloading the whole dashboard. tmux `new -A` reattaches the same session (no loss).
+  const [reloadKey, setReloadKey] = useState(0);
   return (
     <section
       className="hud hud--glass hud--bracket m-2 mt-0 flex shrink-0 flex-col overflow-hidden"
       style={{ height }}
     >
-      <div className="flex shrink-0 items-center border-b border-edge px-3 py-1">
+      <div className="flex shrink-0 items-center gap-2 border-b border-edge px-3 py-1">
         <span className="panel-title">▸ {title}</span>
+        <button
+          className="btn btn--compact ml-auto"
+          title="Reconnect terminal — reloads the tmux client (use if the dock goes blank/stale)"
+          onClick={() => setReloadKey((k) => k + 1)}
+        >
+          ↻
+        </button>
       </div>
-      <div className="min-h-0 flex-1">
-        <iframe src={url} title={title} className="h-full w-full border-0" />
+      <div className="relative min-h-0 flex-1 bg-black">
+        <iframe key={reloadKey} src={url} title={title} className="absolute inset-0 h-full w-full border-0" />
       </div>
     </section>
   );
