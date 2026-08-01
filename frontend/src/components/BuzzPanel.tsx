@@ -16,6 +16,7 @@ import type { ModuleConfig } from "../store";
  */
 
 interface BuzzState {
+  identity: string;
   pubkey: string;
   display_name: string;
   relay_url: string;
@@ -34,6 +35,12 @@ interface MessagesResp {
   channel_id: string;
   messages: BuzzMessage[];
 }
+interface IdentitiesResp {
+  identities: string[];
+  default: string;
+}
+
+const ls = (k: string) => localStorage.getItem(k);
 
 const shortKey = (pk: string) => pk.slice(0, 8);
 
@@ -51,8 +58,13 @@ function timeLabel(unixSecs: number): string {
 }
 
 export default function BuzzPanel({ module: _module }: { module: ModuleConfig }) {
-  const { data: state } = usePolling<BuzzState>("/api/buzz/state", 10_000);
-  const { data: msgResp, refetch } = usePolling<MessagesResp>("/api/buzz/messages?limit=200", 3_000);
+  const { data: identitiesResp } = usePolling<IdentitiesResp>("/api/buzz/identities", 60_000);
+  const [identity, setIdentity] = useState(() => ls("buzz.identity") ?? "sister");
+  const { data: state } = usePolling<BuzzState>(`/api/buzz/state?identity=${identity}`, 10_000);
+  const { data: msgResp, refetch } = usePolling<MessagesResp>(
+    `/api/buzz/messages?limit=200&identity=${identity}`,
+    3_000,
+  );
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
@@ -70,6 +82,11 @@ export default function BuzzPanel({ module: _module }: { module: ModuleConfig })
     }
   }, [messages.length]);
 
+  function switchIdentity(next: string) {
+    setIdentity(next);
+    localStorage.setItem("buzz.identity", next);
+  }
+
   async function send() {
     const content = draft.trim();
     if (!content || sending) return;
@@ -79,7 +96,7 @@ export default function BuzzPanel({ module: _module }: { module: ModuleConfig })
       await fetchJSON("/api/buzz/messages", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ content }),
+        body: JSON.stringify({ content, identity }),
       });
       setDraft("");
       await refetch();
@@ -115,6 +132,19 @@ export default function BuzzPanel({ module: _module }: { module: ModuleConfig })
           </span>
         </div>
         <div className="flex items-center gap-3">
+          {identitiesResp && identitiesResp.identities.length > 1 && (
+            <div className="flex gap-1">
+              {identitiesResp.identities.map((id) => (
+                <button
+                  key={id}
+                  className={`btn btn--compact ${id === identity ? "btn--signal" : ""}`}
+                  onClick={() => switchIdentity(id)}
+                >
+                  {id.toUpperCase()}
+                </button>
+              ))}
+            </div>
+          )}
           {state && (
             <span className="label text-muted" title={state.pubkey}>
               {state.display_name.toUpperCase()} · {shortKey(state.pubkey)}
