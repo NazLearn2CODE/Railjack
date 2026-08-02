@@ -66,6 +66,13 @@ CREATE TABLE IF NOT EXISTS tasks (
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   completed_at TEXT
 );
+CREATE TABLE IF NOT EXISTS activity (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  text TEXT NOT NULL,
+  ts TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS activity_task_ts ON activity(task_id, ts);
 """
 
 
@@ -206,6 +213,10 @@ class MoveTask(BaseModel):
     before_task_id: int | None = None  # insert before this id; None = append
 
 
+class ActivityLine(BaseModel):
+    text: str
+
+
 # ---- endpoints ----
 
 @router.get("/api/kanban/board")
@@ -244,6 +255,20 @@ def board(project: int | None = None) -> dict:
                 (active,),
             ).fetchall()
         ]
+        # Live activity feed per task: prune anything older than a minute (so a card
+        # with no fresh line shows nothing), then attach the latest ≤2 lines each.
+        conn.execute("DELETE FROM activity WHERE ts < datetime('now','-1 minute')")
+        tids = [t["id"] for t in tasks]
+        by_task: dict[int, list[str]] = {}
+        if tids:
+            ph = ",".join("?" * len(tids))
+            for r in conn.execute(
+                f"SELECT task_id, text FROM activity WHERE task_id IN ({ph}) ORDER BY ts DESC",
+                tids,
+            ).fetchall():
+                by_task.setdefault(r[0], []).append(r[1])
+        for t in tasks:
+            t["activity"] = list(reversed(by_task.get(t["id"], [])[:2]))
         return {
             "projects": projects,
             "active_project": active,
@@ -370,6 +395,20 @@ def stop_task(task_id: int) -> dict:
         cur.execute("UPDATE tasks SET started_at=NULL WHERE id=?", (task_id,))
         if cur.rowcount == 0:
             raise HTTPException(404, "task not found")
+        return {"ok": True}
+
+
+@router.post("/api/kanban/task/{task_id}/activity")
+def post_activity(task_id: int, req: ActivityLine) -> dict:
+    """Append a progress line to a task's live feed (the working agent posts these).
+    Lines auto-expire after one minute — pruned on board read, so a card with no
+    fresh line shows nothing."""
+    text = req.text.strip()
+    if not text:
+        raise HTTPException(400, "empty activity line")
+    with _db() as conn:
+        cur = conn.cursor()
+        cur.execute("INSERT INTO activity (task_id, text) VALUES (?, ?)", (task_id, text))
         return {"ok": True}
 
 

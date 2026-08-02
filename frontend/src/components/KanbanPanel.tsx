@@ -14,6 +14,7 @@ interface Task {
   id: number; column_id: number; title: string; description: string | null;
   position: number; priority: number; assignee: string | null; due_date: string | null;
   started_at: string | null;
+  activity: string[];
 }
 interface Board { projects: Project[]; active_project: number | null; columns: Column[]; tasks: Task[] }
 
@@ -148,6 +149,9 @@ const KanbanPanel: FC<{ module: ModuleConfig }> = () => {
                   {t.started_at && (
                     <div className="mono text-xs" style={{ color: "var(--color-signal)" }}>▸ {elapsed(t.started_at, now)}</div>
                   )}
+                  {t.activity?.map((a, i) => (
+                    <div key={i} className="mono text-xs" style={{ color: "var(--color-phosphor-dim)" }}>· {a}</div>
+                  ))}
                   {(t.assignee || t.due_date) && (
                     <div className="mono text-xs text-muted">{t.assignee}{t.due_date ? ` · ${t.due_date}` : ""}</div>
                   )}
