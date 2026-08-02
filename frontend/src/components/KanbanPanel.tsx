@@ -14,6 +14,7 @@ interface Task {
   id: number; column_id: number; title: string; description: string | null;
   position: number; priority: number; assignee: string | null; due_date: string | null;
   started_at: string | null;
+  worker_pid: number | null;
   activity: string[];
 }
 interface Board { projects: Project[]; active_project: number | null; columns: Column[]; tasks: Task[] }
@@ -142,12 +143,15 @@ const KanbanPanel: FC<{ module: ModuleConfig }> = () => {
                     <button
                       className="mono text-xs shrink-0"
                       style={{ color: t.started_at ? "var(--color-signal)" : "var(--color-muted)" }}
-                      title={t.started_at ? "Stop timer" : "Start timer — mark as being worked on"}
+                      title={t.started_at ? "Stop timer & worker" : "Start timer & dispatch autonomous worker"}
                       onClick={(e) => { e.stopPropagation(); void (t.started_at ? stopTask(t.id) : startTask(t.id)); }}
                     >{t.started_at ? "⏸" : "▶"}</button>
                   </div>
                   {t.started_at && (
-                    <div className="mono text-xs" style={{ color: "var(--color-signal)" }}>▸ {elapsed(t.started_at, now)}</div>
+                    <div className="mono text-xs flex items-center justify-between gap-1" style={{ color: "var(--color-signal)" }}>
+                      <span>▸ {elapsed(t.started_at, now)}</span>
+                      {t.worker_pid && <span className="text-[10px]" style={{ color: "var(--color-phosphor)" }}>⚙ agent</span>}
+                    </div>
                   )}
                   {t.activity?.map((a, i) => (
                     <div key={i} className="mono text-xs" style={{ color: "var(--color-phosphor-dim)" }}>· {a}</div>

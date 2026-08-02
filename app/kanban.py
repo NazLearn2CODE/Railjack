@@ -12,8 +12,11 @@ Config in ``configs/tawhan.yaml`` → ``options.db_path`` / ``options.default_co
 from __future__ import annotations
 
 import os
+import signal
 import sqlite3
+import subprocess
 import threading
+import time
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -62,6 +65,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   assignee TEXT,
   due_date TEXT,
   started_at TEXT,
+  worker_pid INTEGER,
   is_active INTEGER NOT NULL DEFAULT 1,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   completed_at TEXT
@@ -138,6 +142,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
     cols = {r[1] for r in conn.execute("PRAGMA table_info(tasks)").fetchall()}
     if "started_at" not in cols:
         conn.execute("ALTER TABLE tasks ADD COLUMN started_at TEXT")
+    if "worker_pid" not in cols:
+        conn.execute("ALTER TABLE tasks ADD COLUMN worker_pid INTEGER")
 
 
 def _default_swimlane(conn: sqlite3.Connection, project_id: int) -> int:
@@ -179,6 +185,74 @@ def _place(
         ids.insert(ids.index(before_task_id), task_id)
     for pos, tid in enumerate(ids, start=1):
         cur.execute("UPDATE tasks SET position=? WHERE id=?", (pos, tid))
+
+
+CLAUDE_BIN = "/home/NAZ/.local/bin/claude"
+
+
+def _claude_env() -> dict[str, str]:
+    env = os.environ.copy()
+    key = env.get("ZAI_API_KEY")
+    env_file = Path.home() / ".config" / "railjack" / "env"
+    if not key and env_file.is_file():
+        for line in env_file.read_text().splitlines():
+            line = line.strip()
+            if line.startswith("ZAI_API_KEY="):
+                key = line.split("=", 1)[1].strip()
+                break
+    if key:
+        env["ANTHROPIC_BASE_URL"] = "https://api.z.ai/api/anthropic"
+        env["ANTHROPIC_AUTH_TOKEN"] = key
+    return env
+
+
+def _worker_prompt(
+    task_id: int, project_name: str, title: str, description: str | None, done_col_id: int
+) -> str:
+    desc_str = f"\n{description.strip()}" if description and description.strip() else ""
+    return (
+        f'You are autonomously working Kanban task #{task_id} (project "{project_name}"): {title}.{desc_str}\n'
+        'Goal: complete this task for real, using your tools (Bash, Read, Write, Edit).\n'
+        'After each meaningful step, post a SHORT (≤80 char) progress line:\n'
+        f'  curl -s -X POST http://localhost:8700/api/kanban/task/{task_id}/activity -H \'Content-Type: application/json\' -d \'{{"text":"<what you just did>"}}\'\n'
+        'When the task is FULLY complete:\n'
+        f'  curl -s -X POST http://localhost:8700/api/kanban/task/{task_id}/move -H \'Content-Type: application/json\' -d \'{{"column_id":{done_col_id},"before_task_id":null}}\'\n'
+        f'  curl -s -X POST http://localhost:8700/api/kanban/task/{task_id}/stop\n'
+        'If you cannot complete it, post a line saying why and stop (leave it in progress).\n'
+        'Be efficient; don\'t post trivia; stop once done.'
+    )
+
+
+# Worker lifecycle: track dispatched Popen handles so a background reaper can
+# poll() (reap) exactly those children. Scoped on purpose — never waitpid(-1),
+# which would steal the exit status of railjack's other subprocesses (terminal,
+# ffmpeg). poll() on a stored handle reaps that one child: zombie → gone.
+_workers: dict[int, subprocess.Popen] = {}
+_worker_lock = threading.Lock()
+_reaper_started = False
+
+
+def _ensure_reaper() -> None:
+    """Start the worker-reaping daemon thread once (idempotent across threads)."""
+    global _reaper_started
+    if _reaper_started:
+        return
+    with _worker_lock:
+        if _reaper_started:
+            return
+        _reaper_started = True
+
+    def _loop() -> None:
+        while True:
+            time.sleep(3)
+            with _worker_lock:
+                items = list(_workers.items())
+            for tid, proc in items:
+                if proc.poll() is not None:  # reaps this child; None while still alive
+                    with _worker_lock:
+                        _workers.pop(tid, None)
+
+    threading.Thread(target=_loop, daemon=True, name="kanban-worker-reaper").start()
 
 
 # ---- request models ----
@@ -250,11 +324,21 @@ def board(project: int | None = None) -> dict:
             _rowdict(r)
             for r in conn.execute(
                 "SELECT id, column_id, swimlane_id, title, description, position, priority, "
-                "assignee, due_date, started_at, is_active, completed_at FROM tasks "
+                "assignee, due_date, started_at, worker_pid, is_active, completed_at FROM tasks "
                 "WHERE project_id=? AND is_active=1 ORDER BY column_id, swimlane_id, position",
                 (active,),
             ).fetchall()
         ]
+        # Check process liveness for task workers
+        for t in tasks:
+            w_pid = t.get("worker_pid")
+            if w_pid is not None:
+                try:
+                    os.kill(w_pid, 0)
+                except ProcessLookupError:
+                    t["worker_pid"] = None
+                except OSError:
+                    pass
         # Live activity feed per task: prune anything older than a minute (so a card
         # with no fresh line shows nothing), then attach the latest ≤2 lines each.
         conn.execute("DELETE FROM activity WHERE ts < datetime('now','-1 minute')")
@@ -374,14 +458,79 @@ def move_task(task_id: int, req: MoveTask) -> dict:
 
 @router.post("/api/kanban/task/{task_id}/start")
 def start_task(task_id: int) -> dict:
-    """Stamp started_at = now (UTC). Any card can run a timer independently (multi)."""
+    """Stamp started_at = now (UTC) and auto-dispatch an autonomous worker process if none running."""
     with _db() as conn:
-        cur = conn.cursor()
-        cur.execute("UPDATE tasks SET started_at=datetime('now') WHERE id=?", (task_id,))
-        if cur.rowcount == 0:
+        row = conn.execute(
+            "SELECT t.id, t.title, t.description, t.project_id, t.worker_pid, p.name AS project_name "
+            "FROM tasks t JOIN projects p ON p.id = t.project_id WHERE t.id=?",
+            (task_id,),
+        ).fetchone()
+        if not row:
             raise HTTPException(404, "task not found")
+
+        w_pid = row["worker_pid"]
+        if w_pid is not None:
+            try:
+                os.kill(w_pid, 0)
+                return {
+                    "ok": True,
+                    "already_running": True,
+                    "worker_pid": w_pid,
+                    "started_at": conn.execute(
+                        "SELECT started_at FROM tasks WHERE id=?", (task_id,)
+                    ).fetchone()[0],
+                }
+            except ProcessLookupError:
+                pass
+            except OSError:
+                return {
+                    "ok": True,
+                    "already_running": True,
+                    "worker_pid": w_pid,
+                    "started_at": conn.execute(
+                        "SELECT started_at FROM tasks WHERE id=?", (task_id,)
+                    ).fetchone()[0],
+                }
+
+        done_row = conn.execute(
+            "SELECT id FROM columns WHERE project_id=? AND title='Done' ORDER BY position LIMIT 1",
+            (row["project_id"],),
+        ).fetchone()
+        if not done_row:
+            done_row = conn.execute(
+                "SELECT id FROM columns WHERE project_id=? ORDER BY position DESC LIMIT 1",
+                (row["project_id"],),
+            ).fetchone()
+        done_col_id = done_row[0] if done_row else 0
+
+        prompt = _worker_prompt(
+            task_id=row["id"],
+            project_name=row["project_name"],
+            title=row["title"],
+            description=row["description"],
+            done_col_id=done_col_id,
+        )
+
+        proc = subprocess.Popen(
+            [CLAUDE_BIN, "-p", prompt, "--allowedTools", "Bash,Read,Write,Edit,Glob,Grep"],
+            env=_claude_env(),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        _ensure_reaper()
+        with _worker_lock:
+            _workers[task_id] = proc
+
+        cur = conn.cursor()
+        cur.execute(
+            "UPDATE tasks SET started_at=datetime('now'), worker_pid=? WHERE id=?",
+            (proc.pid, task_id),
+        )
+
         return {
             "ok": True,
+            "worker_pid": proc.pid,
             "started_at": conn.execute(
                 "SELECT started_at FROM tasks WHERE id=?", (task_id,)
             ).fetchone()[0],
@@ -391,10 +540,18 @@ def start_task(task_id: int) -> dict:
 @router.post("/api/kanban/task/{task_id}/stop")
 def stop_task(task_id: int) -> dict:
     with _db() as conn:
-        cur = conn.cursor()
-        cur.execute("UPDATE tasks SET started_at=NULL WHERE id=?", (task_id,))
-        if cur.rowcount == 0:
+        row = conn.execute("SELECT worker_pid FROM tasks WHERE id=?", (task_id,)).fetchone()
+        if not row:
             raise HTTPException(404, "task not found")
+        w_pid = row[0]
+        if w_pid is not None:
+            try:
+                pgid = os.getpgid(w_pid)
+                os.killpg(pgid, signal.SIGTERM)
+            except (ProcessLookupError, OSError):
+                pass
+        cur = conn.cursor()
+        cur.execute("UPDATE tasks SET started_at=NULL, worker_pid=NULL WHERE id=?", (task_id,))
         return {"ok": True}
 
 
@@ -443,7 +600,18 @@ if __name__ == "__main__":
     order2 = [r[0] for r in c.execute(
         "SELECT title FROM tasks WHERE column_id=? ORDER BY position", (cid,))]
     assert order2 == ["B", "C", "D", "A"], order2
+
+    # Verify migration helper & worker prompt helper
+    _migrate(c)
+    cols = {r[1] for r in c.execute("PRAGMA table_info(tasks)").fetchall()}
+    assert "worker_pid" in cols, "worker_pid column missing after migration"
+    prompt = _worker_prompt(1, "Test Project", "Fix bug", "Detailed desc", 99)
+    assert 'task #1 (project "Test Project"): Fix bug' in prompt
+    assert "column_id\":99" in prompt
+    env = _claude_env()
+    assert isinstance(env, dict)
+
     c.close()
     p.unlink()
-    print("kanban self-check OK: renumber rule (insert-before + append) contiguous")
+    print("kanban self-check OK: renumber rule, migration, prompt & env checks passed")
 
