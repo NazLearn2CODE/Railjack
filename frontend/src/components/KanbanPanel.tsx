@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { FC } from "react";
 import { fetchJSON, usePolling } from "../api";
 import type { ModuleConfig } from "../store";
@@ -17,7 +17,7 @@ interface Task {
   worker_pid: number | null;
   activity: string[];
 }
-interface Board { projects: Project[]; active_project: number | null; columns: Column[]; tasks: Task[] }
+interface Board { projects: Project[]; archived_projects: Project[]; active_project: number | null; columns: Column[]; tasks: Task[] }
 
 /** "working 14m" / "working 2h5m" / "working 1d" — server started_at is UTC "YYYY-MM-DD HH:MM:SS". */
 function elapsed(startedAt: string, now: number): string {
@@ -35,7 +35,10 @@ const mut = (url: string, method: string, body?: object) =>
   fetchJSON(url, { method, headers: CT, ...(body ? { body: JSON.stringify(body) } : {}) });
 
 const KanbanPanel: FC<{ module: ModuleConfig }> = () => {
-  const [projectId, setProjectId] = useState<number | null>(null);
+  const [projectId, setProjectId] = useState<number | null>(() => {
+    const s = typeof localStorage !== "undefined" && localStorage.getItem("kanban:lastproject");
+    return s ? Number(s) : null;
+  });
   const { data: board, refetch } = usePolling<Board>(
     `/api/kanban/board${projectId != null ? `?project=${projectId}` : ""}`, 4000,
   );
@@ -49,8 +52,20 @@ const KanbanPanel: FC<{ module: ModuleConfig }> = () => {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => { const i = setInterval(() => setNow(Date.now()), 30_000); return () => clearInterval(i); }, []);
 
+  const boardRef = useRef<HTMLDivElement>(null);
+  const curProj = projectId ?? board?.active_project ?? 0;
+  // Position-save: restore a board's horizontal scroll when switching back to it.
+  useEffect(() => {
+    const el = boardRef.current;
+    if (!el) return;
+    const restore = () => { el.scrollLeft = Number(localStorage.getItem("kanban:scroll:" + curProj) || 0); };
+    restore();
+    requestAnimationFrame(restore);  // columns may not be laid out yet on first paint
+  }, [curProj]);
+
   const cols = board?.columns ?? [];
   const tasks = board?.tasks ?? [];
+  const curArchived = !!board && (board.archived_projects ?? []).some((p) => p.id === curProj);
   const inCol = (cid: number) => tasks.filter((t) => t.column_id === cid).sort((a, b) => a.position - b.position);
 
   const move = async (taskId: number, columnId: number, before: number | null) => {
@@ -97,10 +112,17 @@ const KanbanPanel: FC<{ module: ModuleConfig }> = () => {
       <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-edge px-3 py-1.5">
         <select
           className="border border-edge bg-void px-2 py-0.5 text-sm"
-          value={projectId ?? board.active_project ?? 0}
-          onChange={(e) => setProjectId(Number(e.target.value))}
+          value={curProj}
+          onChange={(e) => { const v = Number(e.target.value); setProjectId(v); localStorage.setItem("kanban:lastproject", String(v)); }}
         >
-          {board.projects.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+          <optgroup label="Active">
+            {board.projects.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+          </optgroup>
+          {(board.archived_projects ?? []).length > 0 && (
+            <optgroup label={`Archived (${board.archived_projects.length})`}>
+              {board.archived_projects.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
+            </optgroup>
+          )}
         </select>
         <input
           className="w-36 border border-edge bg-void px-2 py-0.5 text-sm" placeholder="+ project"
@@ -119,10 +141,15 @@ const KanbanPanel: FC<{ module: ModuleConfig }> = () => {
           title={manualMode ? "MANUAL: ▶ starts a timer only (no agent). Click for AUTO." : "AUTO: ▶ dispatches an agent. Click for MANUAL (timer only)."}
           onClick={() => setManualMode((m) => !m)}
         >{manualMode ? "⏱ MANUAL" : "▶ AUTO"}</button>
+        {curArchived ? (
+          <button className="btn btn--compact" onClick={async () => { await mut(`/api/kanban/project/${curProj}/restore`, "POST"); refetch(); }}>⟲ Restore</button>
+        ) : (
+          <button className="btn btn--compact" onClick={async () => { const nm = board.projects.find((p) => p.id === curProj)?.name ?? "this board"; if (confirm(`Archive "${nm}"? Hides it from the active list (still viewable + searchable).`)) { await mut(`/api/kanban/project/${curProj}/archive`, "POST"); refetch(); } }}>📁 Archive</button>
+        )}
       </div>
 
       {/* board */}
-      <div className="flex min-h-0 flex-1 gap-2 overflow-x-auto p-2">
+      <div ref={boardRef} onScroll={(e) => localStorage.setItem("kanban:scroll:" + curProj, String(e.currentTarget.scrollLeft))} className="flex min-h-0 flex-1 gap-2 overflow-x-auto p-2">
         {cols.map((c) => (
           <div
             key={c.id}

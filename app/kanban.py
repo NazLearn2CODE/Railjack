@@ -331,16 +331,25 @@ class ActivityLine(BaseModel):
 @router.get("/api/kanban/board")
 def board(project: int | None = None) -> dict:
     with _db() as conn:
-        projects = [
+        all_projects = [
             _rowdict(r)
             for r in conn.execute(
                 "SELECT id, name, is_active FROM projects ORDER BY id"
             ).fetchall()
         ]
-        empty = {"projects": projects, "active_project": None, "columns": [], "swimlanes": [], "tasks": []}
-        if not projects:
+        projects = [p for p in all_projects if p["is_active"]]
+        archived = [p for p in all_projects if not p["is_active"]]
+        empty = {"projects": [], "archived_projects": [], "active_project": None,
+                 "columns": [], "swimlanes": [], "tasks": []}
+        if not all_projects:
             return empty
-        active = project if any(p["id"] == project for p in projects) else projects[0]["id"]
+        # View any project (active or archived) if explicitly requested; else first active.
+        if project is not None and any(p["id"] == project for p in all_projects):
+            active = project
+        elif projects:
+            active = projects[0]["id"]
+        else:
+            active = archived[0]["id"]
         columns = [
             _rowdict(r)
             for r in conn.execute(
@@ -390,6 +399,7 @@ def board(project: int | None = None) -> dict:
             t["activity"] = list(reversed(by_task.get(t["id"], [])[:2]))
         return {
             "projects": projects,
+            "archived_projects": archived,
             "active_project": active,
             "columns": columns,
             "swimlanes": swimlanes,
@@ -414,6 +424,28 @@ def create_project(req: NewProject) -> dict:
                 (pid, title, i),
             )
         return {"id": pid, "name": name}
+
+
+@router.post("/api/kanban/project/{project_id}/archive")
+def archive_project(project_id: int) -> dict:
+    """Archive a project (is_active=0): hidden from the active selector, still
+    viewable + restorable, and the surface the RAG indexes for search."""
+    with _db() as conn:
+        cur = conn.cursor()
+        cur.execute("UPDATE projects SET is_active=0 WHERE id=?", (project_id,))
+        if cur.rowcount == 0:
+            raise HTTPException(404, "project not found")
+        return {"ok": True}
+
+
+@router.post("/api/kanban/project/{project_id}/restore")
+def restore_project(project_id: int) -> dict:
+    with _db() as conn:
+        cur = conn.cursor()
+        cur.execute("UPDATE projects SET is_active=1 WHERE id=?", (project_id,))
+        if cur.rowcount == 0:
+            raise HTTPException(404, "project not found")
+        return {"ok": True}
 
 
 @router.post("/api/kanban/column")
