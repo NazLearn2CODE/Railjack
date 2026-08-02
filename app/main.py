@@ -19,6 +19,7 @@ from .comfyui import router as comfyui_router
 from .config import CONFIG, Module, reload_config
 from .ffmpeg_jobs import router as ffmpeg_router
 from .health import router as health_router
+from .kanban import router as kanban_router
 from .manage import router as manage_router
 from .newsroom import router as newsroom_router
 from .notebooklm import router as notebooklm_router
@@ -41,6 +42,7 @@ app.include_router(catalog_router)
 app.include_router(session_router)
 app.include_router(terminal_router)
 app.include_router(thailandnow_router)
+app.include_router(kanban_router)
 # Phase E: same-origin reverse proxy for the n8n editor (mounted before the
 # catch-all static mount below so /n8n/* wins over frontend/dist).
 app.include_router(n8n_proxy_router)

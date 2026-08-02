@@ -100,6 +100,16 @@ modules:
     url: /n8n/
     health: { type: http, url: "http://127.0.0.1:5678/healthz" }
     manage: { type: systemd-user, unit: n8n.service }
+  - id: kanban
+    title: KANBAN
+    kind: panel
+    panel: kanban
+    # Native board (app/kanban.py) over SQLite at options.db_path. MVP for
+    # tracking projects; modeled on Kanboard (projects × columns × swimlanes ×
+    # tasks, integer-position renumber per cell).
+    options:
+      db_path: ~/.config/railjack/kanban.db
+      default_columns: [Backlog, "To Do", "In Progress", Done]
 
 # Phase F: always-visible bottom terminal dock. Same ttyd URL as the TERMINAL
 # module → both attach to the one tmux session (tmux new -A -s main); typing in
