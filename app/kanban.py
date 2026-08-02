@@ -11,14 +11,18 @@ Config in ``configs/tawhan.yaml`` → ``options.db_path`` / ``options.default_co
 
 from __future__ import annotations
 
+import json
 import os
 import signal
 import sqlite3
 import subprocess
 import threading
 import time
+import urllib.request
 from contextlib import contextmanager
 from pathlib import Path
+
+import numpy as np
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
@@ -77,6 +81,15 @@ CREATE TABLE IF NOT EXISTS activity (
   ts TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS activity_task_ts ON activity(task_id, ts);
+CREATE TABLE IF NOT EXISTS kanban_search (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  project_id INTEGER NOT NULL,
+  task_id INTEGER NOT NULL,
+  text TEXT NOT NULL,
+  embedding BLOB NOT NULL,
+  indexed_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS ks_task ON kanban_search(task_id);
 """
 
 
@@ -144,6 +157,17 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE tasks ADD COLUMN started_at TEXT")
     if "worker_pid" not in cols:
         conn.execute("ALTER TABLE tasks ADD COLUMN worker_pid INTEGER")
+    conn.execute("""
+    CREATE TABLE IF NOT EXISTS kanban_search (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      project_id INTEGER NOT NULL,
+      task_id INTEGER NOT NULL,
+      text TEXT NOT NULL,
+      embedding BLOB NOT NULL,
+      indexed_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS ks_task ON kanban_search(task_id)")
 
 
 def _default_swimlane(conn: sqlite3.Connection, project_id: int) -> int:
@@ -288,6 +312,68 @@ def _ensure_reaper() -> None:
                     _watchdog_kill(tid, proc)
 
     threading.Thread(target=_loop, daemon=True, name="kanban-worker-reaper").start()
+
+
+def _get_embedding(text: str) -> np.ndarray:
+    url = "http://localhost:11434/api/embeddings"
+    data = json.dumps({"model": "bge-m3", "prompt": text}).encode("utf-8")
+    req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            res = json.loads(resp.read().decode("utf-8"))
+            vec = res.get("embedding")
+            if not vec:
+                raise RuntimeError("Empty embedding returned from Ollama")
+            return np.array(vec, dtype=np.float32)
+    except Exception as e:
+        raise HTTPException(503, f"Ollama embedding error: {e}")
+
+
+def _index_tasks(conn: sqlite3.Connection, project_id: int | None = None) -> int:
+    query = """
+        SELECT t.id, t.project_id, t.title, t.description, p.name AS project_name, c.title AS column_title
+        FROM tasks t
+        JOIN projects p ON p.id = t.project_id
+        JOIN columns c ON c.id = t.column_id
+    """
+    params = []
+    if project_id is not None:
+        query += " WHERE t.project_id = ?"
+        params.append(project_id)
+    query += " ORDER BY t.id"
+
+    tasks = conn.execute(query, params).fetchall()
+    count = 0
+    for t in tasks:
+        tid = t["id"]
+        pid = t["project_id"]
+        pname = t["project_name"] or ""
+        ctitle = t["column_title"] or ""
+        ttitle = t["title"] or ""
+        tdesc = t["description"] or ""
+
+        act_rows = conn.execute(
+            "SELECT text FROM activity WHERE task_id=? ORDER BY ts DESC LIMIT 5", (tid,)
+        ).fetchall()
+        activities = list(reversed([r[0] for r in act_rows]))
+
+        parts = [f"{pname} · {ctitle} · {ttitle}"]
+        if tdesc.strip():
+            parts.append(tdesc.strip())
+        if activities:
+            parts.append(" · ".join(activities))
+        text = "\n".join(parts)
+
+        vec = _get_embedding(text)
+        blob = vec.tobytes()
+
+        conn.execute("DELETE FROM kanban_search WHERE task_id=?", (tid,))
+        conn.execute(
+            "INSERT INTO kanban_search (project_id, task_id, text, embedding) VALUES (?, ?, ?, ?)",
+            (pid, tid, text, blob),
+        )
+        count += 1
+    return count
 
 
 # ---- request models ----
@@ -435,6 +521,7 @@ def archive_project(project_id: int) -> dict:
         cur.execute("UPDATE projects SET is_active=0 WHERE id=?", (project_id,))
         if cur.rowcount == 0:
             raise HTTPException(404, "project not found")
+        _index_tasks(conn, project_id)
         return {"ok": True}
 
 
@@ -642,6 +729,73 @@ def post_activity(task_id: int, req: ActivityLine) -> dict:
         cur = conn.cursor()
         cur.execute("INSERT INTO activity (task_id, text) VALUES (?, ?)", (task_id, text))
         return {"ok": True}
+
+
+@router.post("/api/kanban/search/index")
+def index_search(project: int | None = None) -> dict:
+    """Rebuild search index for all tasks (or one project). Idempotent."""
+    with _db() as conn:
+        count = _index_tasks(conn, project)
+        return {"ok": True, "indexed": count}
+
+
+@router.get("/api/kanban/search")
+def search_kanban(q: str, limit: int = 10) -> dict:
+    q = q.strip()
+    if not q:
+        return {"results": []}
+
+    query_vec = _get_embedding(q)
+    q_norm_val = np.linalg.norm(query_vec)
+    query_norm = query_vec / (q_norm_val if q_norm_val > 0 else 1e-10)
+
+    with _db() as conn:
+        rows = conn.execute("""
+            SELECT ks.project_id, ks.task_id, ks.text, ks.embedding,
+                   p.name AS project_name, t.title AS task_title
+            FROM kanban_search ks
+            JOIN projects p ON p.id = ks.project_id
+            JOIN tasks t ON t.id = ks.task_id
+        """).fetchall()
+
+        if not rows:
+            return {"results": []}
+
+        matrix_list = []
+        meta_list = []
+        for r in rows:
+            arr = np.frombuffer(r["embedding"], dtype=np.float32)
+            if len(arr) != 1024:
+                continue
+            matrix_list.append(arr)
+            meta_list.append(r)
+
+        if not matrix_list:
+            return {"results": []}
+
+        matrix = np.array(matrix_list, dtype=np.float32)
+        norms = np.linalg.norm(matrix, axis=1, keepdims=True)
+        norms[norms == 0] = 1e-10
+        norm_matrix = matrix / norms
+
+        scores = norm_matrix @ query_norm
+        top_indices = np.argsort(scores)[::-1][:limit]
+
+        results = []
+        for idx in top_indices:
+            score = float(scores[idx])
+            meta = meta_list[idx]
+            snippet = meta["text"].replace("\n", " · ")
+            results.append({
+                "project_id": meta["project_id"],
+                "project_name": meta["project_name"],
+                "task_id": meta["task_id"],
+                "title": meta["task_title"],
+                "snippet": snippet,
+                "score": round(score, 4),
+            })
+
+        return {"results": results}
 
 
 if __name__ == "__main__":

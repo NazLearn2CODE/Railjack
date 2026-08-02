@@ -18,6 +18,14 @@ interface Task {
   activity: string[];
 }
 interface Board { projects: Project[]; archived_projects: Project[]; active_project: number | null; columns: Column[]; tasks: Task[] }
+interface SearchResult {
+  project_id: number;
+  project_name: string;
+  task_id: number;
+  title: string;
+  snippet: string;
+  score: number;
+}
 
 /** "working 14m" / "working 2h5m" / "working 1d" — server started_at is UTC "YYYY-MM-DD HH:MM:SS". */
 function elapsed(startedAt: string, now: number): string {
@@ -50,6 +58,10 @@ const KanbanPanel: FC<{ module: ModuleConfig }> = () => {
   const [addText, setAddText] = useState("");
   const [edit, setEdit] = useState<Task | null>(null);
   const [now, setNow] = useState(() => Date.now());
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchResults, setSearchResults] = useState<SearchResult[] | null>(null);
+  const [searching, setSearching] = useState(false);
+  const [reindexing, setReindexing] = useState(false);
   useEffect(() => { const i = setInterval(() => setNow(Date.now()), 30_000); return () => clearInterval(i); }, []);
 
   const boardRef = useRef<HTMLDivElement>(null);
@@ -67,6 +79,29 @@ const KanbanPanel: FC<{ module: ModuleConfig }> = () => {
   const tasks = board?.tasks ?? [];
   const curArchived = !!board && (board.archived_projects ?? []).some((p) => p.id === curProj);
   const inCol = (cid: number) => tasks.filter((t) => t.column_id === cid).sort((a, b) => a.position - b.position);
+
+  const doSearch = async () => {
+    const q = searchQuery.trim();
+    if (!q) return;
+    setSearching(true);
+    try {
+      const res = (await fetchJSON(`/api/kanban/search?q=${encodeURIComponent(q)}`)) as { results: SearchResult[] };
+      setSearchResults(res.results || []);
+    } catch {
+      setSearchResults([]);
+    } finally {
+      setSearching(false);
+    }
+  };
+
+  const doReindex = async () => {
+    setReindexing(true);
+    try {
+      await mut("/api/kanban/search/index", "POST");
+    } finally {
+      setReindexing(false);
+    }
+  };
 
   const move = async (taskId: number, columnId: number, before: number | null) => {
     setDragId(null);
@@ -146,6 +181,24 @@ const KanbanPanel: FC<{ module: ModuleConfig }> = () => {
         ) : (
           <button className="btn btn--compact" onClick={async () => { const nm = board.projects.find((p) => p.id === curProj)?.name ?? "this board"; if (confirm(`Archive "${nm}"? Hides it from the active list (still viewable + searchable).`)) { await mut(`/api/kanban/project/${curProj}/archive`, "POST"); refetch(); } }}>📁 Archive</button>
         )}
+        <span className="text-edge">·</span>
+        <div className="flex items-center gap-1">
+          <input
+            className="w-36 border border-edge bg-void px-2 py-0.5 text-sm"
+            placeholder={searching ? "searching..." : "🔍 search..."}
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && void doSearch()}
+          />
+          <button
+            className="mono text-xs px-1.5 py-0.5 border border-edge hover:text-phosphor"
+            title="Rebuild RAG search index"
+            disabled={reindexing}
+            onClick={doReindex}
+          >
+            {reindexing ? "..." : "⚡ index"}
+          </button>
+        </div>
       </div>
 
       {/* board */}
@@ -255,6 +308,63 @@ const KanbanPanel: FC<{ module: ModuleConfig }> = () => {
               <button className="btn" onClick={saveEdit}>Save</button>
               <button className="btn btn--crit" onClick={() => delTask(edit.id)}>Delete</button>
               <button className="btn" onClick={() => setEdit(null)}>Cancel</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* search results modal */}
+      {searchResults != null && (
+        <div
+          className="fixed inset-0 z-50 flex items-start justify-center pt-16"
+          style={{ background: "rgba(0,0,0,0.6)" }}
+          onClick={() => setSearchResults(null)}
+        >
+          <div
+            className="hud hud--bracket flex max-h-[80vh] w-[600px] flex-col gap-2 bg-void p-3 overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between border-b border-edge pb-2">
+              <div className="panel-title">
+                Search Results ({searchResults.length})
+              </div>
+              <button
+                className="text-xs text-muted hover:text-phosphor"
+                onClick={() => setSearchResults(null)}
+              >
+                ✕ Close
+              </button>
+            </div>
+            <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto pr-1">
+              {searchResults.length === 0 ? (
+                <div className="py-4 text-center text-sm text-muted">
+                  No matching tasks found.
+                </div>
+              ) : (
+                searchResults.map((res) => (
+                  <div
+                    key={res.task_id}
+                    onClick={() => {
+                      setProjectId(res.project_id);
+                      localStorage.setItem("kanban:lastproject", String(res.project_id));
+                      setSearchResults(null);
+                    }}
+                    className="cursor-pointer border border-edge bg-shade p-2 text-sm hover:border-phosphor"
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-semibold text-phosphor">
+                        [{res.project_name}] {res.title}
+                      </span>
+                      <span className="mono text-xs text-muted">
+                        score: {res.score}
+                      </span>
+                    </div>
+                    <div className="mono mt-1 text-xs text-muted truncate">
+                      {res.snippet}
+                    </div>
+                  </div>
+                ))
+              )}
             </div>
           </div>
         </div>
