@@ -40,6 +40,7 @@ const KanbanPanel: FC<{ module: ModuleConfig }> = () => {
     `/api/kanban/board${projectId != null ? `?project=${projectId}` : ""}`, 4000,
   );
   const [dragId, setDragId] = useState<number | null>(null);
+  const [manualMode, setManualMode] = useState(false); // Mode 2: ▶ = timer only, no agent dispatch
   const [newProject, setNewProject] = useState("");
   const [newCol, setNewCol] = useState("");
   const [addCol, setAddCol] = useState<number | null>(null); // column id being typed into
@@ -85,7 +86,7 @@ const KanbanPanel: FC<{ module: ModuleConfig }> = () => {
     setEdit(null); refetch();
   };
   const delTask = async (id: number) => { await mut(`/api/kanban/task/${id}`, "DELETE"); setEdit(null); refetch(); };
-  const startTask = async (id: number) => { await mut(`/api/kanban/task/${id}/start`, "POST"); refetch(); };
+  const startTask = async (id: number, manual = false) => { await mut(`/api/kanban/task/${id}/start${manual ? "?manual=1" : ""}`, "POST"); refetch(); };
   const stopTask = async (id: number) => { await mut(`/api/kanban/task/${id}/stop`, "POST"); refetch(); };
 
   if (!board) return <div className="flex h-full w-full items-center justify-center text-muted">Loading board…</div>;
@@ -112,6 +113,12 @@ const KanbanPanel: FC<{ module: ModuleConfig }> = () => {
           value={newCol} onChange={(e) => setNewCol(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && addColumn()}
         />
+        <button
+          className="mono text-xs px-2 py-0.5 border border-edge"
+          style={{ color: manualMode ? "var(--color-signal)" : "var(--color-muted)" }}
+          title={manualMode ? "MANUAL: ▶ starts a timer only (no agent). Click for AUTO." : "AUTO: ▶ dispatches an agent. Click for MANUAL (timer only)."}
+          onClick={() => setManualMode((m) => !m)}
+        >{manualMode ? "⏱ MANUAL" : "▶ AUTO"}</button>
       </div>
 
       {/* board */}
@@ -143,8 +150,8 @@ const KanbanPanel: FC<{ module: ModuleConfig }> = () => {
                     <button
                       className="mono text-xs shrink-0"
                       style={{ color: t.started_at ? "var(--color-signal)" : "var(--color-muted)" }}
-                      title={t.started_at ? "Stop timer & worker" : "Start timer & dispatch autonomous worker"}
-                      onClick={(e) => { e.stopPropagation(); void (t.started_at ? stopTask(t.id) : startTask(t.id)); }}
+                      title={t.started_at ? "Stop timer & worker" : (manualMode ? "Start timer only (MANUAL)" : "Start — dispatch agent (AUTO)")}
+                      onClick={(e) => { e.stopPropagation(); void (t.started_at ? stopTask(t.id) : startTask(t.id, manualMode)); }}
                     >{t.started_at ? "⏸" : "▶"}</button>
                   </div>
                   {t.started_at && (

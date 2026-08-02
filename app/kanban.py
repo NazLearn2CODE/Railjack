@@ -492,9 +492,17 @@ def move_task(task_id: int, req: MoveTask) -> dict:
 
 
 @router.post("/api/kanban/task/{task_id}/start")
-def start_task(task_id: int) -> dict:
-    """Stamp started_at = now (UTC) and auto-dispatch an autonomous worker process if none running."""
+def start_task(task_id: int, manual: bool = False) -> dict:
+    """Start the task. manual=True (Mode 2): stamp started_at only, no worker.
+    Default (Mode 1): also auto-dispatch an autonomous worker if none running."""
     with _db() as conn:
+        if manual:
+            cur = conn.cursor()
+            cur.execute("UPDATE tasks SET started_at=datetime('now') WHERE id=?", (task_id,))
+            if cur.rowcount == 0:
+                raise HTTPException(404, "task not found")
+            return {"ok": True, "manual": True, "started_at": conn.execute(
+                "SELECT started_at FROM tasks WHERE id=?", (task_id,)).fetchone()[0]}
         row = conn.execute(
             "SELECT t.id, t.title, t.description, t.project_id, t.worker_pid, p.name AS project_name "
             "FROM tasks t JOIN projects p ON p.id = t.project_id WHERE t.id=?",
