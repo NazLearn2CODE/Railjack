@@ -223,17 +223,47 @@ def _worker_prompt(
     )
 
 
-# Worker lifecycle: track dispatched Popen handles so a background reaper can
-# poll() (reap) exactly those children. Scoped on purpose — never waitpid(-1),
-# which would steal the exit status of railjack's other subprocesses (terminal,
-# ffmpeg). poll() on a stored handle reaps that one child: zombie → gone.
-_workers: dict[int, subprocess.Popen] = {}
+# Worker lifecycle: track dispatched Popen handles (+ monotonic start time) so a
+# background thread can (a) poll() — reap exactly those children when they exit
+# (scoped: never waitpid(-1), which would steal railjack's other subprocesses'
+# exit status), and (b) enforce a max-runtime watchdog that kills a worker past
+# the cap (catches glm-5.2 stalls where the agent never reaches move-to-Done).
+# Value: (proc, started_monotonic).
+_workers: dict[int, tuple[subprocess.Popen, float]] = {}
 _worker_lock = threading.Lock()
 _reaper_started = False
 
 
+def _watchdog_max_minutes() -> int:
+    """Max minutes a worker may run before the watchdog kills it (config, default 20)."""
+    try:
+        return max(1, int(_opts().get("watchdog_max_minutes", 20)))
+    except (TypeError, ValueError):
+        return 20
+
+
+def _watchdog_kill(task_id: int, proc: subprocess.Popen) -> None:
+    """Kill a worker that exceeded the cap, clear its state, leave an explainer line."""
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+    except (ProcessLookupError, OSError):
+        pass
+    cap = _watchdog_max_minutes()
+    try:
+        with _db() as conn:
+            conn.execute(
+                "UPDATE tasks SET started_at=NULL, worker_pid=NULL WHERE id=?", (task_id,)
+            )
+            conn.execute(
+                "INSERT INTO activity (task_id, text) VALUES (?, ?)",
+                (task_id, f"watchdog: ran past {cap}m, stopped"),
+            )
+    except Exception:
+        pass  # best-effort; the kill already happened
+
+
 def _ensure_reaper() -> None:
-    """Start the worker-reaping daemon thread once (idempotent across threads)."""
+    """Start the worker-reaper + watchdog daemon thread once (idempotent)."""
     global _reaper_started
     if _reaper_started:
         return
@@ -247,10 +277,15 @@ def _ensure_reaper() -> None:
             time.sleep(3)
             with _worker_lock:
                 items = list(_workers.items())
-            for tid, proc in items:
+            now = time.monotonic()
+            cap_s = _watchdog_max_minutes() * 60
+            for tid, (proc, started) in items:
                 if proc.poll() is not None:  # reaps this child; None while still alive
                     with _worker_lock:
                         _workers.pop(tid, None)
+                    continue
+                if cap_s and now - started > cap_s:  # watchdog: runtime exceeded
+                    _watchdog_kill(tid, proc)
 
     threading.Thread(target=_loop, daemon=True, name="kanban-worker-reaper").start()
 
@@ -520,7 +555,7 @@ def start_task(task_id: int) -> dict:
         )
         _ensure_reaper()
         with _worker_lock:
-            _workers[task_id] = proc
+            _workers[task_id] = (proc, time.monotonic())
 
         cur = conn.cursor()
         cur.execute(
