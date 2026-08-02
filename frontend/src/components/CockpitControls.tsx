@@ -62,6 +62,20 @@ export default function CockpitControls() {
   const [restarting, setRestarting] = useState(false);
   const [handoffTo, setHandoffTo] = useState("Tasai");
 
+  // Theme toggle — flips data-theme on <html> and persists to localStorage.
+  // index.html sets it pre-paint from localStorage so a reload is flash-free;
+  // light tokens live in index.css under [data-theme="light"].
+  const [light, setLight] = useState(
+    () => typeof document !== "undefined" && document.documentElement.dataset.theme === "light",
+  );
+  const toggleTheme = () => {
+    const next = !light;
+    const val = next ? "light" : "dark";
+    document.documentElement.dataset.theme = val;
+    localStorage.setItem("theme", val);
+    setLight(next);
+  };
+
   const { data: catalog, refetch: refetchCatalog } = usePolling<Catalog>("/api/catalog", 60_000);
 
   const insert = async (text: string): Promise<boolean> => {
@@ -248,6 +262,14 @@ If it is ambiguous what feature just finished, ask me before writing. The recipi
         title="Type a prompt into the terminal that tells the agent to write a port/implementation handoff to the selected sister and file it in readme-naz.md + hot.md"
       >
         ✍ HANDOFF
+      </button>
+
+      <button
+        className="btn btn--compact"
+        onClick={toggleTheme}
+        title={light ? "Currently light — switch to dark" : "Currently dark — switch to light"}
+      >
+        {light ? "☾" : "☀"}
       </button>
     </div>
   );

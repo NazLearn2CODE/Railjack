@@ -556,3 +556,33 @@
   color: var(--color-go);
   text-shadow: 0 0 10px color-mix(in srgb, var(--color-go) 60%, transparent);
 }
+
+/* ============================================================
+   THEME TOGGLE — light variant
+   The whole UI colors itself through the --color-* tokens above,
+   so a light theme is just an override set on [data-theme="light"].
+   Dark (the @theme defaults) stays the default; no component changes.
+   ============================================================ */
+:root { color-scheme: dark; }
+:root[data-theme="light"] {
+  color-scheme: light;
+  --color-vacuum: #eef2f6;
+  --color-void: #e3e9ef;
+  --color-panel: #f6f8fb;
+  --color-panel-2: #eaeef4;
+  --color-edge: #c2cdda;
+  --color-edge-soft: #d3dce6;
+  --color-phosphor: #1b2733;
+  --color-phosphor-dim: #3d4d5e;
+  --color-muted: #5f7084;
+  --color-faint: #8ea0b3;
+  --color-signal: #007ea7;
+  --color-signal-deep: #cfe8f1;
+  --color-hazard: #b06f00;
+  --color-hazard-deep: #ffe6bf;
+  --color-critical: #d11a3c;
+  --color-go: #1a9e6a;
+}
+/* Scanlines + grain are tuned for the dark vacuum; suppress in light mode. */
+:root[data-theme="light"] .scanlines,
+:root[data-theme="light"] .grain { display: none; }
