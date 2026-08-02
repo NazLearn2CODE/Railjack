@@ -87,6 +87,8 @@ modules:
       relay_url: http://localhost:3000   # pilot relay: `just relay` in ~/Coding Projects/buzz
       channel_name: sisters-lounge
       display_name: Tawhan
+    health: { type: http, url: "http://127.0.0.1:3000/health" }   # green when the relay answers; red if it goes down
+    manage: { type: systemd-user, unit: buzz-relay.service }      # restart the relay from the cockpit
   - id: n8n
     title: N8N
     kind: iframe
