@@ -61,6 +61,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   priority INTEGER NOT NULL DEFAULT 0,
   assignee TEXT,
   due_date TEXT,
+  started_at TEXT,
   is_active INTEGER NOT NULL DEFAULT 1,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   completed_at TEXT
@@ -92,6 +93,7 @@ def _db():
         with _init_lock:
             if not _initialized:
                 conn.executescript(_SCHEMA)
+                _migrate(conn)
                 _seed_if_empty(conn)
                 conn.commit()
                 _initialized = True
@@ -122,6 +124,13 @@ def _seed_if_empty(conn: sqlite3.Connection) -> None:
             "INSERT INTO columns (project_id, title, position) VALUES (?, ?, ?)",
             (pid, title, i),
         )
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Idempotent column adds for existing DBs (CREATE TABLE only applies to fresh ones)."""
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(tasks)").fetchall()}
+    if "started_at" not in cols:
+        conn.execute("ALTER TABLE tasks ADD COLUMN started_at TEXT")
 
 
 def _default_swimlane(conn: sqlite3.Connection, project_id: int) -> int:
@@ -230,7 +239,7 @@ def board(project: int | None = None) -> dict:
             _rowdict(r)
             for r in conn.execute(
                 "SELECT id, column_id, swimlane_id, title, description, position, priority, "
-                "assignee, due_date, is_active, completed_at FROM tasks "
+                "assignee, due_date, started_at, is_active, completed_at FROM tasks "
                 "WHERE project_id=? AND is_active=1 ORDER BY column_id, swimlane_id, position",
                 (active,),
             ).fetchall()
@@ -335,6 +344,32 @@ def move_task(task_id: int, req: MoveTask) -> dict:
             raise HTTPException(404, "task not found")
         sid = req.swimlane_id or _default_swimlane(conn, row[0])
         _place(conn, task_id, req.column_id, sid, req.before_task_id)
+        return {"ok": True}
+
+
+@router.post("/api/kanban/task/{task_id}/start")
+def start_task(task_id: int) -> dict:
+    """Stamp started_at = now (UTC). Any card can run a timer independently (multi)."""
+    with _db() as conn:
+        cur = conn.cursor()
+        cur.execute("UPDATE tasks SET started_at=datetime('now') WHERE id=?", (task_id,))
+        if cur.rowcount == 0:
+            raise HTTPException(404, "task not found")
+        return {
+            "ok": True,
+            "started_at": conn.execute(
+                "SELECT started_at FROM tasks WHERE id=?", (task_id,)
+            ).fetchone()[0],
+        }
+
+
+@router.post("/api/kanban/task/{task_id}/stop")
+def stop_task(task_id: int) -> dict:
+    with _db() as conn:
+        cur = conn.cursor()
+        cur.execute("UPDATE tasks SET started_at=NULL WHERE id=?", (task_id,))
+        if cur.rowcount == 0:
+            raise HTTPException(404, "task not found")
         return {"ok": True}
 
 

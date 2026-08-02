@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { FC } from "react";
 import { fetchJSON, usePolling } from "../api";
 import type { ModuleConfig } from "../store";
@@ -13,8 +13,20 @@ interface Column { id: number; title: string; position: number; task_limit: numb
 interface Task {
   id: number; column_id: number; title: string; description: string | null;
   position: number; priority: number; assignee: string | null; due_date: string | null;
+  started_at: string | null;
 }
 interface Board { projects: Project[]; active_project: number | null; columns: Column[]; tasks: Task[] }
+
+/** "working 14m" / "working 2h5m" / "working 1d" — server started_at is UTC "YYYY-MM-DD HH:MM:SS". */
+function elapsed(startedAt: string, now: number): string {
+  const s = Math.max(0, Math.floor((now - new Date(startedAt.replace(" ", "T") + "Z").getTime()) / 1000));
+  if (s < 60) return "working · just started";
+  const m = Math.floor(s / 60);
+  if (m < 60) return `working ${m}m`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `working ${h}h${m % 60}m`;
+  return `working ${Math.floor(h / 24)}d`;
+}
 
 const CT = { "Content-Type": "application/json" } as const;
 const mut = (url: string, method: string, body?: object) =>
@@ -31,6 +43,8 @@ const KanbanPanel: FC<{ module: ModuleConfig }> = () => {
   const [addCol, setAddCol] = useState<number | null>(null); // column id being typed into
   const [addText, setAddText] = useState("");
   const [edit, setEdit] = useState<Task | null>(null);
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => { const i = setInterval(() => setNow(Date.now()), 30_000); return () => clearInterval(i); }, []);
 
   const cols = board?.columns ?? [];
   const tasks = board?.tasks ?? [];
@@ -69,6 +83,8 @@ const KanbanPanel: FC<{ module: ModuleConfig }> = () => {
     setEdit(null); refetch();
   };
   const delTask = async (id: number) => { await mut(`/api/kanban/task/${id}`, "DELETE"); setEdit(null); refetch(); };
+  const startTask = async (id: number) => { await mut(`/api/kanban/task/${id}/start`, "POST"); refetch(); };
+  const stopTask = async (id: number) => { await mut(`/api/kanban/task/${id}/stop`, "POST"); refetch(); };
 
   if (!board) return <div className="flex h-full w-full items-center justify-center text-muted">Loading board…</div>;
 
@@ -118,8 +134,20 @@ const KanbanPanel: FC<{ module: ModuleConfig }> = () => {
                   onDrop={(e) => { e.stopPropagation(); if (dragId != null && dragId !== t.id) move(dragId, c.id, t.id); }}
                   onClick={() => setEdit({ ...t })}
                   className="cursor-pointer border border-edge bg-void px-2 py-1 text-sm hover:border-phosphor"
+                  style={t.started_at ? { borderColor: "var(--color-signal)" } : undefined}
                 >
-                  <div>{t.title}</div>
+                  <div className="flex items-start justify-between gap-1">
+                    <span>{t.title}</span>
+                    <button
+                      className="mono text-xs shrink-0"
+                      style={{ color: t.started_at ? "var(--color-signal)" : "var(--color-muted)" }}
+                      title={t.started_at ? "Stop timer" : "Start timer — mark as being worked on"}
+                      onClick={(e) => { e.stopPropagation(); void (t.started_at ? stopTask(t.id) : startTask(t.id)); }}
+                    >{t.started_at ? "⏸" : "▶"}</button>
+                  </div>
+                  {t.started_at && (
+                    <div className="mono text-xs" style={{ color: "var(--color-signal)" }}>▸ {elapsed(t.started_at, now)}</div>
+                  )}
                   {(t.assignee || t.due_date) && (
                     <div className="mono text-xs text-muted">{t.assignee}{t.due_date ? ` · ${t.due_date}` : ""}</div>
                   )}
