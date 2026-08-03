@@ -53,8 +53,13 @@ class Tracer:
         self.conn.executescript(SCHEMA)
 
     def session_start(self, adw_id: str, adw_name: str, request: str = "") -> None:
+        # Upsert: a task can be ▶'d more than once (stop + restart). Reset the row so
+        # re-dispatch doesn't hit the adw_id PRIMARY KEY conflict.
         self.conn.execute(
-            "INSERT INTO sessions(adw_id,adw_name,request,status,started_at) VALUES(?,?,?,?,?)",
+            "INSERT INTO sessions(adw_id,adw_name,request,status,started_at) VALUES(?,?,?,?,?) "
+            "ON CONFLICT(adw_id) DO UPDATE SET "
+            "adw_name=excluded.adw_name, request=excluded.request, "
+            "status='running', started_at=excluded.started_at, ended_at=NULL",
             (adw_id, adw_name, request, "running", _now()),
         )
 

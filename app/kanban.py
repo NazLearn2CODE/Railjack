@@ -742,6 +742,20 @@ def stop_task(task_id: int) -> dict:
         if not row:
             raise HTTPException(404, "task not found")
         w_pid = row[0]
+        # Trace the manual stop — the reaper only catches natural exits + watchdog,
+        # so a stop kill would otherwise leave the trace hanging "running". Emit the
+        # exit events + pop _workers so the reaper can't double-emit.
+        with _worker_lock:
+            worker_item = _workers.pop(task_id, None)
+        if worker_item and len(worker_item) > 3:
+            _, _, adw_id, phase_id = worker_item
+            try:
+                tr = get_tracer()
+                tr.event(adw_id, phase_id, "worker_exit", "stopped")
+                tr.phase_end(phase_id, "fail", error="stopped by user")
+                tr.session_end(adw_id, "interrupted")
+            except Exception:
+                pass
         if w_pid is not None:
             try:
                 pgid = os.getpgid(w_pid)
