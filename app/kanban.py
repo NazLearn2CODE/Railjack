@@ -28,6 +28,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from .config import CONFIG
+from .factory.tracer import get_tracer, trace_for_task
 
 router = APIRouter()
 
@@ -247,13 +248,13 @@ def _worker_prompt(
     )
 
 
-# Worker lifecycle: track dispatched Popen handles (+ monotonic start time) so a
-# background thread can (a) poll() — reap exactly those children when they exit
+# Worker lifecycle: track dispatched Popen handles (+ monotonic start time, adw_id, phase_id)
+# so a background thread can (a) poll() — reap exactly those children when they exit
 # (scoped: never waitpid(-1), which would steal railjack's other subprocesses'
 # exit status), and (b) enforce a max-runtime watchdog that kills a worker past
 # the cap (catches glm-5.2 stalls where the agent never reaches move-to-Done).
-# Value: (proc, started_monotonic).
-_workers: dict[int, tuple[subprocess.Popen, float]] = {}
+# Value: (proc, started_monotonic, adw_id, phase_id).
+_workers: dict[int, tuple[subprocess.Popen, float, str, str]] = {}
 _worker_lock = threading.Lock()
 _reaper_started = False
 
@@ -266,13 +267,23 @@ def _watchdog_max_minutes() -> int:
         return 20
 
 
-def _watchdog_kill(task_id: int, proc: subprocess.Popen) -> None:
-    """Kill a worker that exceeded the cap, clear its state, leave an explainer line."""
+def _watchdog_kill(
+    task_id: int, proc: subprocess.Popen, adw_id: str | None = None, phase_id: str | None = None
+) -> None:
+    """Kill a worker that exceeded the cap, clear its state, leave an explainer line, trace failure."""
     try:
         os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
     except (ProcessLookupError, OSError):
         pass
     cap = _watchdog_max_minutes()
+    if adw_id and phase_id:
+        try:
+            tr = get_tracer()
+            tr.event(adw_id, phase_id, "watchdog_kill", "max-runtime", {"minutes": cap})
+            tr.phase_end(phase_id, "fail", error="watchdog: exceeded max-runtime")
+            tr.session_end(adw_id, "failed")
+        except Exception:
+            pass
     try:
         with _db() as conn:
             conn.execute(
@@ -303,13 +314,32 @@ def _ensure_reaper() -> None:
                 items = list(_workers.items())
             now = time.monotonic()
             cap_s = _watchdog_max_minutes() * 60
-            for tid, (proc, started) in items:
-                if proc.poll() is not None:  # reaps this child; None while still alive
+            for tid, item in items:
+                proc = item[0]
+                started = item[1]
+                adw_id = item[2] if len(item) > 2 else f"task-{tid}"
+                phase_id = item[3] if len(item) > 3 else ""
+                rc = proc.poll()
+                if rc is not None:  # reaps this child; None while still alive
                     with _worker_lock:
                         _workers.pop(tid, None)
+                    if adw_id and phase_id:
+                        try:
+                            tr = get_tracer()
+                            tr.event(adw_id, phase_id, "worker_exit", str(rc))
+                            tr.phase_end(
+                                phase_id,
+                                "pass" if rc == 0 else "fail",
+                                error=None if rc == 0 else f"exit {rc}",
+                            )
+                            tr.session_end(adw_id, "accepted" if rc == 0 else "failed")
+                        except Exception:
+                            pass
                     continue
                 if cap_s and now - started > cap_s:  # watchdog: runtime exceeded
-                    _watchdog_kill(tid, proc)
+                    with _worker_lock:
+                        _workers.pop(tid, None)
+                    _watchdog_kill(tid, proc, adw_id, phase_id)
 
     threading.Thread(target=_loop, daemon=True, name="kanban-worker-reaper").start()
 
@@ -673,6 +703,12 @@ def start_task(task_id: int, manual: bool = False) -> dict:
             done_col_id=done_col_id,
         )
 
+        adw_id = f"task-{task_id}"
+        tr = get_tracer()
+        tr.session_start(adw_id=adw_id, adw_name=row["title"], request=row["description"] or "")
+        phase_id = tr.phase_start(adw_id, seq=1, name="worker", kind="agent", owner="claude")
+        tr.event(adw_id, phase_id, "dispatch", "claude -p", {"prompt_len": len(prompt)})
+
         proc = subprocess.Popen(
             [CLAUDE_BIN, "-p", prompt, "--allowedTools", "Bash,Read,Write,Edit,Glob,Grep"],
             env=_claude_env(),
@@ -682,7 +718,7 @@ def start_task(task_id: int, manual: bool = False) -> dict:
         )
         _ensure_reaper()
         with _worker_lock:
-            _workers[task_id] = (proc, time.monotonic())
+            _workers[task_id] = (proc, time.monotonic(), adw_id, phase_id)
 
         cur = conn.cursor()
         cur.execute(
@@ -725,10 +761,24 @@ def post_activity(task_id: int, req: ActivityLine) -> dict:
     text = req.text.strip()
     if not text:
         raise HTTPException(400, "empty activity line")
+    with _worker_lock:
+        worker_item = _workers.get(task_id)
+    if worker_item and len(worker_item) > 3:
+        _, _, adw_id, phase_id = worker_item
+        try:
+            get_tracer().event(adw_id, phase_id, "activity", text)
+        except Exception:
+            pass
     with _db() as conn:
         cur = conn.cursor()
         cur.execute("INSERT INTO activity (task_id, text) VALUES (?, ?)", (task_id, text))
         return {"ok": True}
+
+
+@router.get("/api/kanban/trace/{task_id}")
+def get_task_trace(task_id: int) -> dict:
+    """Return the SSSF trace data for a task (session, phases, events, gate_results)."""
+    return trace_for_task(task_id)
 
 
 @router.post("/api/kanban/search/index")
@@ -840,7 +890,32 @@ if __name__ == "__main__":
     env = _claude_env()
     assert isinstance(env, dict)
 
+    # Verify SSSF tracer integration
+    from .factory.tracer import set_tracer_db_path
+    tp = Path("/tmp/_kanban_trace_selftest.db")
+    tp.unlink(missing_ok=True)
+    set_tracer_db_path(tp)
+
+    tr = get_tracer()
+    adw_id = "task-1"
+    tr.session_start(adw_id, "Fix bug", "Detailed desc")
+    phase_id = tr.phase_start(adw_id, seq=1, name="worker", kind="agent", owner="claude")
+    tr.event(adw_id, phase_id, "dispatch", "claude -p", {"prompt_len": len(prompt)})
+    tr.event(adw_id, phase_id, "activity", "working on fix")
+    tr.phase_end(phase_id, "pass")
+    tr.session_end(adw_id, "accepted")
+
+    t_data = trace_for_task(1)
+    assert t_data["session"] is not None and t_data["session"]["adw_id"] == adw_id
+    assert len(t_data["phases"]) == 1 and t_data["phases"][0]["status"] == "pass"
+    assert len(t_data["events"]) == 2
+    assert t_data["events"][0]["type"] == "dispatch"
+    assert t_data["events"][1]["type"] == "activity"
+
+    set_tracer_db_path(None)
+    tp.unlink(missing_ok=True)
+
     c.close()
     p.unlink()
-    print("kanban self-check OK: renumber rule, migration, prompt & env checks passed")
+    print("kanban self-check OK: renumber rule, migration, prompt, env & trace checks passed")
 
