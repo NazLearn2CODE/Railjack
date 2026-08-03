@@ -742,18 +742,25 @@ def stop_task(task_id: int) -> dict:
         if not row:
             raise HTTPException(404, "task not found")
         w_pid = row[0]
-        # Trace the manual stop — the reaper only catches natural exits + watchdog,
-        # so a stop kill would otherwise leave the trace hanging "running". Emit the
-        # exit events + pop _workers so the reaper can't double-emit.
+        # Trace the (self-)stop — the reaper only catches natural exits + watchdog.
+        # Distinguish completion from interruption: if the task already reached Done
+        # (the worker self-stops after moving it there on success), it's accepted; else
+        # it was interrupted mid-work. The activity events carry the detail either way.
+        col_row = conn.execute(
+            "SELECT t.column_id, d.id FROM tasks t "
+            "JOIN columns d ON d.project_id = t.project_id AND d.title = 'Done' "
+            "WHERE t.id = ?", (task_id,)).fetchone()
+        completed = bool(col_row and col_row[0] == col_row[1])
         with _worker_lock:
             worker_item = _workers.pop(task_id, None)
         if worker_item and len(worker_item) > 3:
             _, _, adw_id, phase_id = worker_item
             try:
                 tr = get_tracer()
-                tr.event(adw_id, phase_id, "worker_exit", "stopped")
-                tr.phase_end(phase_id, "fail", error="stopped by user")
-                tr.session_end(adw_id, "interrupted")
+                tr.event(adw_id, phase_id, "worker_exit", "completed" if completed else "stopped")
+                tr.phase_end(phase_id, "pass" if completed else "fail",
+                             error=None if completed else "stopped by user")
+                tr.session_end(adw_id, "accepted" if completed else "interrupted")
             except Exception:
                 pass
         if w_pid is not None:
