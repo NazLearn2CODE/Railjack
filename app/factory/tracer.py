@@ -1,9 +1,11 @@
-"""Minimal trace store — slim port of sssf's tracer.py pattern (stdlib only).
+"""tracekit — minimal SQLite trace store (stdlib only). VENDORED into Railjack.
 
-Every event lands in SQLite (WAL) AS IT HAPPENS — a queryable mirror for live
-observability.
+VENDORED from sssf-pilot/tracer.py (TRACEKIT_VERSION 1.0.0). Re-sync on version
+bump; do NOT edit in place — fix in sssf-pilot first, then re-vendor. Every event
+lands in SQLite (WAL) as it happens — a queryable mirror for live Kanban
+auto-dispatch observability.
+Port source: disler/super-simple-software-factory · templates/adws/adw_modules/tracer.py
 """
-
 from __future__ import annotations
 
 import json
@@ -11,6 +13,8 @@ import sqlite3
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+
+TRACEKIT_VERSION = "1.0.0"  # must match sssf-pilot/tracer.py; bump = re-vendor
 
 
 def _now() -> str:
@@ -47,7 +51,7 @@ class Tracer:
         self.db_path = str(db_path)
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(self.db_path, isolation_level=None)
-        self.conn.execute("PRAGMA journal_mode=WAL;")
+        self.conn.execute("PRAGMA journal_mode=WAL;")      # UI reads while we write
         self.conn.execute("PRAGMA synchronous=NORMAL;")
         self.conn.execute("PRAGMA busy_timeout=5000;")
         self.conn.executescript(SCHEMA)
@@ -102,7 +106,16 @@ class Tracer:
         )
         return eid
 
-    def gate(self, adw_id: str, phase_id: str, gate_name: str, passed: bool, checks: list | dict) -> None:
+    def gate(
+        self,
+        adw_id: str,
+        phase_id: str,
+        gate_name: str,
+        passed: bool,
+        checks: list | dict,
+    ) -> None:
+        """Decoupled from gates.py: takes a pass flag + checks payload directly,
+        so a consumer need not import the GateReport type to record a gate result."""
         self.conn.execute(
             "INSERT INTO gate_results(adw_id,phase_id,gate,passed,checks_json,ts) "
             "VALUES(?,?,?,?,?,?)",
@@ -110,6 +123,7 @@ class Tracer:
         )
 
 
+# ── process-wide singleton + db-path config (for long-running orchestrators) ──
 _tracer_instance: Tracer | None = None
 _tracer_db_path: str | Path | None = None
 
@@ -119,6 +133,7 @@ def get_default_db_path() -> Path:
 
 
 def set_tracer_db_path(db_path: str | Path | None) -> None:
+    """Point the singleton at a db path (e.g. an app's data dir). None = reset."""
     global _tracer_instance, _tracer_db_path
     _tracer_db_path = db_path
     _tracer_instance = None
@@ -133,6 +148,8 @@ def get_tracer(db_path: str | Path | None = None) -> Tracer:
 
 
 def trace_for_task(task_id: int, db_path: str | Path | None = None) -> dict:
+    """Read back a task's full trace (session/phases/events/gate_results) as a dict.
+    Read-only; opens its own short-lived connection (safe for the viewer/endpoint)."""
     target_path = str(db_path or _tracer_db_path or get_default_db_path())
     if not Path(target_path).exists():
         return {"session": None, "phases": [], "events": [], "gate_results": []}
@@ -186,14 +203,16 @@ def trace_for_task(task_id: int, db_path: str | Path | None = None) -> dict:
 
 
 if __name__ == "__main__":
+    # ponytail: self-check — opens, records, reads back, and proves the upsert.
     import tempfile
 
-    tmp_dir = tempfile.mkdtemp()
-    t = Tracer(Path(tmp_dir) / "selfcheck.db")
+    t = Tracer(Path(tempfile.mkdtemp()) / "selfcheck.db")
     a = "task-999"
     t.session_start(a, "selfcheck task", "task description")
+    t.session_start(a, "selfcheck task", "re-dispatched")  # upsert must not raise
     p = t.phase_start(a, 1, "worker", "agent", "claude")
     t.event(a, p, "dispatch", "claude -p", {"prompt_len": 42})
+    t.gate(a, p, "artifacts_exist", True, [{"item": "specs/plan.md", "ok": True, "note": "exists"}])
     t.phase_end(p, "pass")
     t.session_end(a, "accepted")
 
@@ -201,4 +220,6 @@ if __name__ == "__main__":
     assert res["session"] is not None and res["session"]["adw_id"] == a, res
     assert len(res["phases"]) == 1, res
     assert len(res["events"]) == 1 and res["events"][0]["name"] == "claude -p", res
-    print("tracer self-check OK (session, phase, event recorded & queried)")
+    assert res["gate_results"] and res["gate_results"][0]["passed"] == 1, res
+    print(f"tracekit v{TRACEKIT_VERSION} self-check OK "
+          f"(upsert + session/phase/event/gate recorded & queried)")
