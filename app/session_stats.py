@@ -208,10 +208,86 @@ def _usage_cco_spend() -> dict | None:
         return None
 
 
+def _usage_agy_tokens() -> dict | None:
+    """agy (Antigravity CLI / Gemini) 7-day rolling window usage adapter."""
+    LOG_PATH = Path.home() / ".claude" / "agy-usage.jsonl"
+    try:
+        now = datetime.now(timezone.utc)
+        window_days = 7
+        if not LOG_PATH.exists() or LOG_PATH.stat().st_size == 0:
+            reset_at = (now + timedelta(days=window_days)).isoformat()
+            return {"session_pct": 0, "weekly_pct": 0, "reset_at": reset_at}
+
+        tot_tokens = 0
+        earliest_ts = None
+        with open(LOG_PATH, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    data = json.loads(line)
+                except Exception:
+                    continue
+                ts_str = data.get("ts")
+                if not ts_str:
+                    continue
+                dt = _parse_ts(ts_str)
+                if not dt:
+                    continue
+                dt_utc = dt.astimezone(timezone.utc) if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+                if (now - dt_utc) <= timedelta(days=window_days):
+                    if earliest_ts is None or dt_utc < earliest_ts:
+                        earliest_ts = dt_utc
+                    tot_tokens += int(data.get("total_tokens") or 0)
+
+        reset_start = earliest_ts or now
+        reset_at = (reset_start + timedelta(days=window_days)).isoformat()
+        
+        EST_WEEKLY_CAP = 10_000_000
+        weekly_pct = min(100, round((tot_tokens / EST_WEEKLY_CAP) * 100))
+
+        return {
+            "session_pct": weekly_pct,
+            "weekly_pct": weekly_pct,
+            "reset_at": reset_at,
+            "source_note": f"{tot_tokens:,} tokens / 7d",
+        }
+    except Exception:
+        return None
+
+
+def _scan_agy_log() -> tuple[datetime | None, str | None, int]:
+    """Scans ~/.claude/agy-usage.jsonl for the latest agy call."""
+    LOG_PATH = Path.home() / ".claude" / "agy-usage.jsonl"
+    if not LOG_PATH.exists() or LOG_PATH.stat().st_size == 0:
+        return None, None, 0
+    try:
+        last_line = None
+        with open(LOG_PATH, "r", encoding="utf-8") as f:
+            for line in f:
+                if line.strip():
+                    last_line = line.strip()
+        if not last_line:
+            return None, None, 0
+        data = json.loads(last_line)
+        ts = _parse_ts(data.get("ts", ""))
+        model = data.get("model")
+        ctx = (
+            int(data.get("input_tokens", 0) or 0)
+            + int(data.get("output_tokens", 0) or 0)
+            + int(data.get("thinking_tokens", 0) or 0)
+        )
+        return ts, model, ctx
+    except Exception:
+        return None, None, 0
+
+
 _USAGE_ADAPTERS = {
     "anthropic-oauth": lambda p: _usage_anthropic(),
     "zai-quota": lambda p: _usage_zai(p.key_env),
     "cco-spend": lambda p: _usage_cco_spend(),
+    "agy-tokens": lambda p: _usage_agy_tokens(),
 }
 
 
@@ -344,8 +420,14 @@ def _session_state() -> dict:
         return _empty()
     newest_mtime = datetime.fromtimestamp(nstat.st_mtime, tz=timezone.utc)
     idle = (now - newest_mtime) > timedelta(minutes=_IDLE_MIN)
-
     n_times, model, ctx = _scan(newest)
+    agy_ts, agy_model, agy_ctx = _scan_agy_log()
+    if agy_model and (not model or model.startswith("<") or (agy_ts and agy_ts > newest_mtime)):
+        model = agy_model
+        ctx = agy_ctx
+        if agy_ts:
+            idle = (now - agy_ts) > timedelta(minutes=_IDLE_MIN)
+
     provider, rx = _match_provider(model, CONFIG.providers)
     name = provider.name if provider else "?"
     window_h = provider.window_hours if provider else _DEFAULT_WINDOW

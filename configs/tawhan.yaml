@@ -145,7 +145,7 @@ providers:
     model_match: "(^|/)gemini-"
     window_hours: 168    # Google AI Pro = WEEKLY quota (7 days), not 5h
     context_limit: 1000000
-    usage_source: none   # no public usage API for AI-Pro subscription; falls back to JSONL block heuristic (source: "estimate")
+    usage_source: agy-tokens   # reads ~/.claude/agy-usage.jsonl 7-day rolling token burn & reset timestamp
 
 buttons:
   - label: BOOTSTRAP
