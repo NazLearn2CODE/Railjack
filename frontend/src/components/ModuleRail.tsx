@@ -29,6 +29,30 @@ function formatCtxLimit(n: number): string {
   return `${n}`;
 }
 
+function formatModelName(model: string, provider: string): string {
+  const m = model.toLowerCase();
+  if (m.includes("gemini")) return "GEMINI 3.6";
+  if (m.includes("sonnet") || m.includes("3-5")) return "CLAUDE 3.5";
+  if (m.includes("haiku")) return "CLAUDE HAIKU";
+  if (m.includes("cco")) return "CCO GLM-5.2";
+  if (m.includes("glm")) return "GLM-5.2";
+  return (model || provider || "MODEL").toUpperCase();
+}
+
+function formatResetTime(seconds: number): string {
+  if (seconds <= 0) return "READY";
+  if (seconds >= 86400) {
+    const days = Math.floor(seconds / 86400);
+    const hours = Math.floor((seconds % 86400) / 3600);
+    const mins = Math.floor((seconds % 3600) / 60);
+    return `${days}d ${hours}h ${mins}m`;
+  }
+  const hours = Math.floor(seconds / 3600);
+  const mins = Math.floor((seconds % 3600) / 60);
+  const secs = seconds % 60;
+  return `${hours}:${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
+}
+
 export default function ModuleRail() {
   const machine = useStore((s) => s.config?.machine);
   const modules = useStore((s) => s.config?.modules) ?? [];
@@ -56,14 +80,26 @@ export default function ModuleRail() {
       : p >= 70
         ? { color: "var(--color-hazard)" }
         : undefined;
-  // RESET only for real API telemetry; the JSONL estimate reset is noise.
+
   const isApi = session?.source === "api";
   const resetMs = isApi && session?.reset_at ? Date.parse(session.reset_at) : 0;
   const remaining = resetMs ? Math.max(0, resetMs - now.getTime()) : 0;
   const totalSec = Math.floor(remaining / 1000);
-  const resetLabel = `${Math.floor(totalSec / 3600)}:${String(
-    Math.floor(totalSec / 60) % 60,
-  ).padStart(2, "0")}:${String(totalSec % 60).padStart(2, "0")}`;
+  const resetLabel = formatResetTime(totalSec);
+
+  const provider = session?.provider ?? "";
+  const modelName = session ? formatModelName(session.model, session.provider) : "";
+
+  // Quota Label based on provider
+  const quotaLabel =
+    provider === "gemini"
+      ? "7D BURN"
+      : provider === "cco"
+        ? "$ SPEND"
+        : provider === "zai"
+          ? "CODING"
+          : "SES";
+  const quotaValue = provider === "gemini" ? (wkPct ?? sesPct) : sesPct;
 
   return (
     <nav className="hud hud--bracket reveal reveal-2 m-2 flex w-44 shrink-0 flex-col gap-1 p-2">
@@ -74,9 +110,6 @@ export default function ModuleRail() {
       <span className="label mb-1 px-1">MODULES</span>
       {modules.map((m) => {
         const active = m.id === activeId;
-        // Modules WITH a health spec are explicit services (green up / red down /
-        // amber starting). Modules WITHOUT one are hub-internal + always on → a
-        // steady white glow ("alive, nothing to do").
         const status = m.health
           ? pipStatus(healthMap[m.id], starting[m.id], Date.now())
           : "auto";
@@ -109,7 +142,7 @@ export default function ModuleRail() {
           <>
             <div className="flex items-center gap-2 px-1">
               <span className={pipClass} aria-hidden />
-              <span className="label">{session.model || session.provider}</span>
+              <span className="label font-bold text-signal">{modelName}</span>
             </div>
 
             <div className="flex items-center justify-between px-1">
@@ -119,22 +152,15 @@ export default function ModuleRail() {
               <span className="pct">{session.context_pct}%</span>
             </div>
 
-            {sesPct !== null && (
+            {quotaValue !== null && (
               <div className="flex items-center justify-between px-1">
-                <span className="label">SES</span>
-                <span className="pct" style={sesStyle(sesPct)}>
-                  {sesPct}%
+                <span className="label">{quotaLabel}</span>
+                <span className="pct" style={sesStyle(quotaValue)}>
+                  {quotaValue}%
                 </span>
               </div>
             )}
-            {wkPct !== null && (
-              <div className="flex items-center justify-between px-1">
-                <span className="label">WK</span>
-                <span className="pct" style={sesStyle(wkPct)}>
-                  {wkPct}%
-                </span>
-              </div>
-            )}
+
             {resetMs > 0 && (
               <div className="flex items-center justify-between px-1">
                 <span className="label">RESET</span>
