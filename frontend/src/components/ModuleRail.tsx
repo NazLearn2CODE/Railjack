@@ -109,7 +109,7 @@ export default function ModuleRail() {
           <>
             <div className="flex items-center gap-2 px-1">
               <span className={pipClass} aria-hidden />
-              <span className="label">{session.provider}</span>
+              <span className="label">{session.model || session.provider}</span>
             </div>
 
             <div className="flex items-center justify-between px-1">
