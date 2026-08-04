@@ -126,26 +126,26 @@ dock:
 
 providers:
   - name: anthropic
-    model_match: "^claude-"
+    model_match: "(^|/)claude-"
     window_hours: 5
     context_limit: 200000           # fallback only — per-model table in session_stats._MODEL_CONTEXT_LIMITS wins
     usage_source: anthropic-oauth   # reads ~/.claude/.credentials.json (Claude Code keeps it fresh)
+  - name: cco
+    model_match: "(^|/)cco-"
+    window_hours: 720    # OpenRouter $5/mo = CALENDAR monthly cap (~30d=720h); heuristic estimate
+    context_limit: 1000000
+    usage_source: none   # no OpenRouter usage API wired here; falls back to JSONL block heuristic (source: "estimate"). The authoritative $ cap tracker is `cco-usage --cap 5`.
   - name: zai
-    model_match: "^glm-"
+    model_match: "(^|/)glm-"
     window_hours: 5
     context_limit: 200000           # fallback only — glm-5.2 resolves to 1M via the per-model table
     usage_source: zai-quota         # rate-ck endpoint; needs the key below in the server env
     key_env: ZAI_API_KEY
   - name: gemini
-    model_match: "^gemini-"
+    model_match: "(^|/)gemini-"
     window_hours: 168    # Google AI Pro = WEEKLY quota (7 days), not 5h
     context_limit: 1000000
     usage_source: none   # no public usage API for AI-Pro subscription; falls back to JSONL block heuristic (source: "estimate")
-  - name: cco
-    model_match: "^cco-"
-    window_hours: 720    # OpenRouter $5/mo = CALENDAR monthly cap (~30d=720h); heuristic estimate
-    context_limit: 1000000
-    usage_source: none   # no OpenRouter usage API wired here; falls back to JSONL block heuristic (source: "estimate"). The authoritative $ cap tracker is `cco-usage --cap 5`.
 
 buttons:
   - label: BOOTSTRAP
