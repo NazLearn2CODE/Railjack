@@ -162,9 +162,56 @@ def _usage_zai(key_env: str | None) -> dict | None:
         return None
 
 
+def _usage_cco_spend() -> dict | None:
+    # OpenRouter $5/mo per-key cap; authoritative tracker is `cco-usage --cap 5`.
+    LOG_PATH = Path.home() / ".claude" / "cco-usage.jsonl"
+    CAP = 5.0
+
+    try:
+        now = datetime.now(timezone.utc)
+        if now.month == 12:
+            reset_dt = datetime(now.year + 1, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
+        else:
+            reset_dt = datetime(now.year, now.month + 1, 1, 0, 0, 0, tzinfo=timezone.utc)
+        reset_at = reset_dt.isoformat()
+
+        if not LOG_PATH.exists() or LOG_PATH.stat().st_size == 0:
+            return {"session_pct": 0, "weekly_pct": None, "reset_at": reset_at}
+
+        spent = 0.0
+        with open(LOG_PATH, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                data = json.loads(line)
+                ts_str = data.get("ts")
+                if not ts_str:
+                    continue
+                dt = _parse_ts(ts_str)
+                if not dt:
+                    continue
+                dt_utc = dt.astimezone(timezone.utc) if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+                if dt_utc.year == now.year and dt_utc.month == now.month:
+                    spent += float(data.get("cost") or 0.0)
+
+        if spent == 0.0:
+            return {"session_pct": 0, "weekly_pct": None, "reset_at": reset_at}
+
+        return {
+            "session_pct": round(spent / CAP * 100),
+            "weekly_pct": None,
+            "reset_at": reset_at,
+            "source_note": f"${spent:.4f} / ${CAP:.2f}",
+        }
+    except Exception:
+        return None
+
+
 _USAGE_ADAPTERS = {
     "anthropic-oauth": lambda p: _usage_anthropic(),
     "zai-quota": lambda p: _usage_zai(p.key_env),
+    "cco-spend": lambda p: _usage_cco_spend(),
 }
 
 

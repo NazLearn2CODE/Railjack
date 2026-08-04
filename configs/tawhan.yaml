@@ -132,9 +132,9 @@ providers:
     usage_source: anthropic-oauth   # reads ~/.claude/.credentials.json (Claude Code keeps it fresh)
   - name: cco
     model_match: "(^|/)cco-"
-    window_hours: 720    # OpenRouter $5/mo = CALENDAR monthly cap (~30d=720h); heuristic estimate
+    window_hours: 720
     context_limit: 1000000
-    usage_source: none   # no OpenRouter usage API wired here; falls back to JSONL block heuristic (source: "estimate"). The authoritative $ cap tracker is `cco-usage --cap 5`.
+    usage_source: cco-spend   # reads ~/.claude/cco-usage.jsonl $ spend against the $5/mo cap
   - name: zai
     model_match: "(^|/)glm-"
     window_hours: 5
