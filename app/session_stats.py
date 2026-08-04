@@ -65,6 +65,7 @@ _last_usage: dict[str, tuple[float, dict]] = {}
 # wins; provider.context_limit is the fallback. Extend as new models ship.
 _MODEL_CONTEXT_LIMITS: list[tuple[re.Pattern, int]] = [
     (re.compile(r"^gemini-"), 1_000_000),  # Gemini 3.x Flash — 1M context window (AI Pro)
+    (re.compile(r"^cco-glm"), 1_000_000),  # cco alias (OpenRouter GLM-5.2) — same 1M context
     (re.compile(r"^glm-5\.2"), 1_000_000),  # z.ai: 200K → 1M extension
     (re.compile(r"^claude-haiku"), 200_000),
     (re.compile(r"^claude-"), 1_000_000),  # current Claude line is 1M except Haiku (matched above)
