@@ -17,6 +17,10 @@ branch `legacy/agentic-os`). Overview + status: `A-project/index.md`.
 - **Document:** Project decisions and architecture
 - **Deep Work:** Focus on this project only
 
+## Web research policy (free-first, code-enforced)
+
+Module web-research code uses **free backends only** — Jina / DuckDuckGo / Brave (free-tier) / GNews / `agent-reach`. **No z.ai MCP, no paid search APIs** (Google CSE / Serper / Tavily / etc.); z.ai GLM for *generation* is allowed. Enforced by `scripts/check-free-first.sh` — run it before commit; it fails on any disallowed paid-search pattern in `app/`.
+
 ## Dashboard & UI Work
 
 **For any dashboard or frontend UI work, invoke the `frontend-design` skill** (plugin installed globally). The React 19 + Vite + Tailwind v4 dashboard is built with it — don't hand-roll UI patterns the skill already provides. The design system is `web/src/index.css` — reuse it **verbatim** (recipe: vault `10-knowledge/mission-control-ui-system.md`); layout references live in `/var/home/NAZ/open-design/design-templates/`.

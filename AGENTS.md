@@ -72,11 +72,15 @@ Every time a vault note answers a question or prevents rework, log it:
   session logs → `B-sessions/` (gitignored, machine-local), decisions →
   `A-project/decisions/`, architecture/plans → `A-project/`. Per-agent local
   memory (if any) holds only behavior notes + pointers into the vault.
+- **Web research is free-first.** Module code uses free backends only
+  (Jina/DuckDuckGo/Brave-free-tier/GNews/agent-reach) — no z.ai MCP, no paid
+  search APIs (Google CSE/Serper/Tavily); z.ai GLM for generation is OK.
+  Enforced by `scripts/check-free-first.sh` (run in verify-before-commit).
 - **Safety protocol.** Before any non-trivial change and after completing it,
   invoke f5-vibe-check. After a 3rd failed attempt at the same bug, or when
   starting a HIGH-tier task, invoke f5-stop-digging.
 - **Verify before commit.** `.venv/bin/pytest -q` · `cd web && npx tsc --noEmit
-  && npm run build` · `.venv/bin/ruff check`.
+  && npm run build` · `.venv/bin/ruff check` · `bash scripts/check-free-first.sh`.
 - **Commit convention.** Commit directly to `main`, one coherent increment per
   commit, conventional-commit message ending with
   `Co-Authored-By: Claude <noreply@anthropic.com>`. Stage only the increment's
