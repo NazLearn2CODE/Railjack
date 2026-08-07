@@ -149,9 +149,9 @@ providers:
 
 buttons:
   - label: BOOTSTRAP
-    insert: "Bootstrap: git pull --ff-only to sync CephalonVoid and Railjack (origin), then read hot.md, index.md, Cephalon.md, CLAUDE.md (+ .claude/agents), run python3 vault-check.py, then give me a one-line status."
+    insert: "Bootstrap: git pull --ff-only to sync CephalonVoid, Railjack (origin), and ~/skill-library (then just sync to deploy skills); read hot.md, index.md, Cephalon.md, CLAUDE.md (+ .claude/agents), run python3 vault-check.py, then give me a one-line status."
   - label: COMMIT & PUSH
-    insert: "Session-end per Cephalon.md: update hot.md + logs/memory-log.md, run python3 vault-check.py, then commit and push the vault to CephalonVoid, and push any Railjack work to origin (Railjack.git, main branch)."
+    insert: "Session-end per Cephalon.md: update hot.md + logs/memory-log.md, run python3 vault-check.py, then commit and push the vault to CephalonVoid, push any Railjack work to origin (Railjack.git, main branch), and if ~/skill-library has skill changes commit + push it to NazLearn2CODE/skill-library (main) then just sync."
 
 catalog:
   mcp_insert_template: "use the {name} MCP to "
