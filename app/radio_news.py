@@ -1,5 +1,5 @@
 """RADIO ▸ News Fill — thin subprocess wrapper around the radio-news skill
-script (``radio_news.py``) in the Cephalon vault.
+script (``radio_news.py``) in the skill-library repo (synced to ~/.claude/skills/).
 
 Mirrors ``app/newsroom.py``: the CLI script is the contract (it owns the
 Drive Docs batchUpdate over the 3 radio tabs), this panel only builds argv,
@@ -19,7 +19,7 @@ from fastapi import APIRouter, Body, HTTPException
 
 router = APIRouter()
 
-SCRIPTS = Path.home() / "Cephalon" / "10-knowledge" / "skills" / "newsroom" / "scripts"
+SCRIPTS = Path.home() / ".claude" / "skills" / "newsroom" / "scripts"
 RNEWS = SCRIPTS / "radio_news.py"
 DFORMAT = SCRIPTS / "doc_format.py"
 # Editor Ben's broadcast-rewrite gem, sliced by the fill script at write time.
@@ -27,7 +27,7 @@ DFORMAT = SCRIPTS / "doc_format.py"
 REWRITE_GEM = Path(__file__).parent / "gems" / "radio-news-rewrite.md"
 # Person-name tagger gem for the reusable publication-formatting pass.
 FORMAT_GEM = Path(__file__).parent / "gems" / "doc-format-entities.md"
-# See newsroom.py: vault scripts carry no exec bit, deps live with system python3.
+# See newsroom.py: run via system python3 (skill deps live there, not in Railjack's venv).
 PY = "python3"
 
 

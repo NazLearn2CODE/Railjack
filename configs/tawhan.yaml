@@ -47,7 +47,7 @@ modules:
   - id: newsroom
     title: NEWSROOM
     kind: panel          # TV writing pipeline Half-1 — thin HUD over the newsroom skill CLI
-    panel: newsroom      # shells out to ~/Cephalon/.../skills/newsroom/scripts/{queue,nl_append}.py
+    panel: newsroom      # shells out to ~/.claude/skills/newsroom/scripts/{queue,nl_append}.py
   - id: thailandnow
     title: THAILAND NOW
     kind: panel          # monthly content pipeline — WRITERS (Docs+Trello bulk) + EVENTS radar

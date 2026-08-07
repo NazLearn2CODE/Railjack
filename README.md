@@ -52,7 +52,7 @@ them, serving 200):
   never a hard dependency; calls ride the OmniRoute free-first cascade.
 - **THAILAND NOW** — Google token via `python3 app/tn_auth.py` once; Trello
   key+token + Brave key in the env file (see `.env.example`).
-- **NEWSROOM SEND TO NL** — optional: `python3 ~/Cephalon/10-knowledge/skills/newsroom/scripts/nl_auth.py`
+- **NEWSROOM SEND TO NL** — optional: `python3 ~/.claude/skills/newsroom/scripts/nl_auth.py`
   for a newsroom-owned Google token (else it reuses the google-workspace MCP
   creds, which already work).
 - **NotebookLM** — `notebooklm login` once.

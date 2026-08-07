@@ -1,5 +1,5 @@
 """Newsroom panel — thin subprocess wrapper around the newsroom skill scripts
-(``queue.py`` + ``nl_append.py``) in the Cephalon vault.
+(``queue.py`` + ``nl_append.py``) in the skill-library repo (synced to ~/.claude/skills/).
 
 Does NOT reimplement fetch/dedup/append logic — the CLI scripts are the
 contract (they import newstank + the google-workspace MCP creds directly).
@@ -25,7 +25,7 @@ from . import zai
 
 router = APIRouter()
 
-SCRIPTS = Path.home() / "Cephalon" / "10-knowledge" / "skills" / "newsroom" / "scripts"
+SCRIPTS = Path.home() / ".claude" / "skills" / "newsroom" / "scripts"
 QUEUE = SCRIPTS / "queue.py"
 APPEND = SCRIPTS / "nl_append.py"
 RADIO = SCRIPTS / "radio.py"
@@ -35,9 +35,9 @@ NEWSLINE = SCRIPTS / "newsline.py"
 # vault-synced gem is the source here — _gem_text falls through to it.
 BEN_GEM = Path(__file__).parent / "gems" / "radio-news-rewrite.md"
 SEO_GEM = Path.home() / "Cephalon" / "10-knowledge" / "ai-workflow" / "gemini-gem-thailandnow-seo.md"
-# Run via the system interpreter, not the scripts' shebang: vault files carry no
-# exec bit (git syncs can drop it — the Somatic original 500s on exactly this),
-# and the skill's deps live with the system python3, not Railjack's venv.
+# Run via the system interpreter, not the scripts' shebang: the skill's deps live
+# with the system python3, not Railjack's venv (the skill-library repo commits exec
+# bits, but the venv-deps reason is the durable one — never invoke via shebang).
 PY = "python3"
 
 
