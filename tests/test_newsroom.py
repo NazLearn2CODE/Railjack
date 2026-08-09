@@ -3018,4 +3018,90 @@ def test_newsline_report_autofill_routes(monkeypatch):
     assert c_app.post("/api/newsroom/newsline-reports/autofill-apply", json={"doc_id": ""}).status_code == 400
 
 
+def test_newsline_list_report_docs_filtering_and_sorting():
+    from app import newsline_reports as nl_rep
+
+    stub_folders = [
+        {"id": "fy_folder_id", "name": "งบประมาณ 2569"},
+        {"id": "other_folder_id", "name": "Archive"},
+    ]
+
+    stub_files = [
+        {
+            "id": "doc_main_older",
+            "name": "4 รายงานผลการปฏิบัติงาน กรกฎาคม 2569",
+            "mimeType": "application/vnd.google-apps.document",
+            "modifiedTime": "2026-07-31T10:00:00.000Z",
+            "webViewLink": "https://docs.google.com/document/d/doc_main_older/edit",
+        },
+        {
+            "id": "doc_main_newer",
+            "name": "5 รายงานผลการปฏิบัติงาน สิงหาคม 2569",
+            "mimeType": "application/vnd.google-apps.document",
+            "modifiedTime": "2026-08-05T15:30:00.000Z",
+            "webViewLink": "https://docs.google.com/document/d/doc_main_newer/edit",
+        },
+        {
+            "id": "doc_qr",
+            "name": "5 ใบรายงานผลการปฏิบัติงาน แบบ QR Code สิงหาคม 2569 ณอรรฆย์ โรจนสุวรรณ",
+            "mimeType": "application/vnd.google-apps.document",
+            "modifiedTime": "2026-08-06T10:00:00.000Z",
+        },
+        {
+            "id": "doc_template",
+            "name": "### 0 รายงานผลการปฏิบัติงาน TEMPLATE",
+            "mimeType": "application/vnd.google-apps.document",
+            "modifiedTime": "2026-08-07T10:00:00.000Z",
+        },
+        {
+            "id": "doc_old",
+            "name": "4 รายงานผลการปฏิบัติงาน กรกฎาคม 2569-OLD",
+            "mimeType": "application/vnd.google-apps.document",
+            "modifiedTime": "2026-08-08T10:00:00.000Z",
+        },
+        {
+            "id": "file_docx",
+            "name": "5 รายงานผลการปฏิบัติงาน สิงหาคม 2569.docx",
+            "mimeType": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "modifiedTime": "2026-08-09T10:00:00.000Z",
+        },
+    ]
+
+    def mock_folders(root_id):
+        return stub_folders
+
+    def mock_files(folder_id):
+        if folder_id == "fy_folder_id":
+            return stub_files
+        return []
+
+    res = nl_rep.list_report_docs(
+        list_folders_fn=mock_folders,
+        list_files_fn=mock_files,
+    )
+
+    assert len(res) == 2
+    assert res[0]["id"] == "doc_main_newer"
+    assert res[0]["name"] == "5 รายงานผลการปฏิบัติงาน สิงหาคม 2569"
+    assert res[0]["url"] == "https://docs.google.com/document/d/doc_main_newer/edit"
+
+    assert res[1]["id"] == "doc_main_older"
+    assert res[1]["name"] == "4 รายงานผลการปฏิบัติงาน กรกฎาคม 2569"
+    assert res[1]["url"] == "https://docs.google.com/document/d/doc_main_older/edit"
+
+
+def test_newsline_reports_list_report_docs_route(monkeypatch):
+    payload = [{"id": "doc1", "name": "5 รายงานผลการปฏิบัติงาน สิงหาคม 2569", "url": "https://docs.google.com/document/d/doc1/edit"}]
+    c, calls = _client(monkeypatch, out=json.dumps(payload, ensure_ascii=False).encode("utf-8"))
+    r = c.get("/api/newsroom/newsline-reports/list-report-docs")
+    assert r.status_code == 200
+    docs = r.json()
+    assert len(docs) == 1
+    assert docs[0]["id"] == "doc1"
+    assert docs[0]["name"] == "5 รายงานผลการปฏิบัติงาน สิงหาคม 2569"
+    assert calls[0][0] == "python3"
+    assert calls[0][2:] == ["report-list"]
+
+
+
 

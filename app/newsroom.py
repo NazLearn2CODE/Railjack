@@ -365,6 +365,12 @@ async def api_newsline_reports_autofill_apply(body: dict = Body(...)):
     return await _script(_newsline_report_autofill_argv(body) + ["--apply"], timeout=180)
 
 
+@router.get("/api/newsroom/newsline-reports/list-report-docs")
+async def api_newsline_reports_list_report_docs():
+    """List fillable monthly report Google Docs from Google Drive for the doc-picker."""
+    return await _script([PY, str(NEWSLINE_REPORTS), "report-list"])
+
+
 
 # ---------------------------------------------------------------- newsline rundown (Sub-tab 1: Daily NL Rundown)
 # Extracts daily NEWSLINE headlines from 'NL & NWB DDMMYY' Google Doc (NL RUNDOWN tab)

@@ -230,6 +230,12 @@ interface DailyDocItem {
   modified?: string;
 }
 
+interface ReportDocItem {
+  id: string;
+  name: string;
+  url?: string;
+}
+
 interface ReportAutofillDay {
   date_display: string;
   date_ce?: string;
@@ -727,6 +733,9 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
 
   // Sub-tab ②: Auto-fill show links state
   const [autofillDocId, setAutofillDocId] = useState<string>("");
+  const [autofillDocInput, setAutofillDocInput] = useState<string>("");
+  const [reportDocs, setReportDocs] = useState<ReportDocItem[]>([]);
+  const [loadingReportDocs, setLoadingReportDocs] = useState<boolean>(false);
   const [autofillPreview, setAutofillPreview] = useState<ReportAutofillPreviewResponse | null>(null);
   const [autofillApplyResult, setAutofillApplyResult] = useState<ReportAutofillApplyResponse | null>(null);
   const [autofillLoading, setAutofillLoading] = useState<boolean>(false);
@@ -1043,6 +1052,56 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
     } finally {
       setAutofillApplying(false);
     }
+  };
+
+  const fetchReportDocs = useCallback(async () => {
+    setLoadingReportDocs(true);
+    try {
+      const res = await fetch("/api/newsroom/newsline-reports/list-report-docs");
+      if (res.ok) {
+        const data: ReportDocItem[] = await res.json();
+        setReportDocs(data);
+      }
+    } catch {
+      // ignore
+    } finally {
+      setLoadingReportDocs(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (tab === "reports" && reportSubTab === "monthly" && reportDocs.length === 0) {
+      void fetchReportDocs();
+    }
+  }, [tab, reportSubTab, reportDocs.length, fetchReportDocs]);
+
+  const extractDocId = (s: string): string => {
+    const str = (s || "").trim();
+    if (!str) return "";
+    const m1 = str.match(/\/d\/([a-zA-Z0-9_-]{25,})/);
+    if (m1) return m1[1];
+    const m2 = str.match(/[?&]id=([a-zA-Z0-9_-]{25,})/);
+    if (m2) return m2[1];
+    const m3 = str.match(/^[a-zA-Z0-9_-]{25,}$/);
+    if (m3) return m3[0];
+    const m4 = str.match(/[a-zA-Z0-9_-]{25,}/);
+    if (m4) return m4[0];
+    return str;
+  };
+
+  const handleDocInputChange = (val: string) => {
+    setAutofillDocInput(val);
+    setAutofillPreview(null);
+    setAutofillApplyResult(null);
+
+    const matched = reportDocs.find((d) => d.name === val || d.id === val);
+    if (matched) {
+      setAutofillDocId(matched.id);
+      return;
+    }
+
+    const decoded = extractDocId(val);
+    setAutofillDocId(decoded);
   };
 
   // Sub-tab ①: Rundown handlers
@@ -3715,22 +3774,91 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
 
                 {/* Input row */}
                 <div className="flex flex-wrap items-center gap-3">
-                  <label className="flex flex-1 min-w-[300px] items-center gap-1.5 mono text-xs">
-                    <span className="label whitespace-nowrap">Report Doc ID / URL</span>
-                    <input
-                      type="text"
-                      className="input mono px-2 py-1 text-xs w-full"
-                      placeholder="Paste report Doc ID or Google Docs URL (e.g. 1FFRqs...)"
-                      value={autofillDocId}
-                      onChange={(e) => {
-                        setAutofillDocId(e.target.value);
-                        setAutofillPreview(null);
-                        setAutofillApplyResult(null);
-                      }}
-                    />
-                  </label>
+                  <div className="flex flex-1 min-w-[300px] flex-col gap-1.5 mono text-xs">
+                    <div className="flex items-center justify-between">
+                      <span className="label whitespace-nowrap">Report Doc</span>
+                      {loadingReportDocs && (
+                        <span className="text-[11px] mono flex items-center gap-1.5" style={{ color: "var(--color-signal)" }}>
+                          <span className="pip pip--signal animate-pulse" />
+                          Loading report list…
+                        </span>
+                      )}
+                    </div>
+                    {reportDocs.length > 0 ? (
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="text"
+                          list="report-docs-datalist"
+                          className="input mono px-2 py-1 text-xs flex-1"
+                          placeholder="Search or pick Monthly Report Doc (e.g. รายงานผลการปฏิบัติงาน...)"
+                          value={autofillDocInput}
+                          onChange={(e) => handleDocInputChange(e.target.value)}
+                        />
+                        <datalist id="report-docs-datalist">
+                          {reportDocs.map((d) => (
+                            <option key={d.id} value={d.name} />
+                          ))}
+                        </datalist>
+                        <button
+                          type="button"
+                          className="btn btn--compact"
+                          onClick={() => void fetchReportDocs()}
+                          disabled={loadingReportDocs}
+                          title="Refresh report docs list from Drive"
+                        >
+                          {loadingReportDocs ? "LOADING…" : "↻ REFRESH"}
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="flex flex-col gap-1">
+                        {!loadingReportDocs && (
+                          <span className="text-[11px] mono" style={{ color: "var(--color-hazard)" }}>
+                            No report Docs found — paste an ID instead
+                          </span>
+                        )}
+                        <div className="flex items-center gap-2">
+                          <input
+                            type="text"
+                            className="input mono px-2 py-1 text-xs flex-1"
+                            placeholder="Paste report Doc ID or Google Docs URL (e.g. 1FFRqs...)"
+                            value={autofillDocInput}
+                            onChange={(e) => handleDocInputChange(e.target.value)}
+                          />
+                          <button
+                            type="button"
+                            className="btn btn--compact"
+                            onClick={() => void fetchReportDocs()}
+                            disabled={loadingReportDocs}
+                            title="Retry fetching report docs list"
+                          >
+                            ↻ RETRY
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                    {autofillDocId && (
+                      <div className="flex items-center gap-2 text-[11px] mono pt-0.5" style={{ color: "var(--color-signal)" }}>
+                        <span className="pip pip--signal" />
+                        <span className="label shrink-0">SELECTED:</span>
+                        <span className="truncate max-w-[420px]" style={{ color: "var(--color-phosphor)" }} title={reportDocs.find((d) => d.id === autofillDocId)?.name || autofillDocId}>
+                          {reportDocs.find((d) => d.id === autofillDocId)?.name || autofillDocId}
+                        </span>
+                        {(reportDocs.find((d) => d.id === autofillDocId)?.url || (autofillDocId.length >= 25 && !reportDocs.find((d) => d.id === autofillDocId))) && (
+                          <a
+                            href={reportDocs.find((d) => d.id === autofillDocId)?.url || `https://docs.google.com/document/d/${autofillDocId}/edit`}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="underline ml-1"
+                            style={{ color: "var(--color-signal)" }}
+                          >
+                            Open Doc ↗
+                          </a>
+                        )}
+                      </div>
+                    )}
+                  </div>
 
-                  <div className="flex gap-2">
+                  <div className="flex gap-2 self-start pt-5">
                     <button
                       className="btn btn--compact"
                       onClick={() => void handleAutofillPreview()}

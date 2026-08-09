@@ -499,7 +499,7 @@ def find_existing_files(folder_id: str) -> list[dict]:
     while True:
         params = {
             "q": f"'{folder_id}' in parents and trashed=false",
-            "fields": "nextPageToken,files(id,name,mimeType,webViewLink)",
+            "fields": "nextPageToken,files(id,name,mimeType,webViewLink,modifiedTime)",
             "supportsAllDrives": "true", "includeItemsFromAllDrives": "true",
         }
         if page:
@@ -2287,6 +2287,67 @@ def apply_report_autofill(
     }
 
 
+def list_report_docs(
+    root_folder: str = DEST_ROOT_FOLDER,
+    list_folders_fn=None,
+    list_files_fn=None,
+    limit: int = 60,
+) -> list[dict]:
+    """List fillable monthly report Google Docs from FY subfolders in DEST_ROOT_FOLDER.
+
+    Enumerate FY subfolders under root_folder (named 'งบประมาณ <be-year>').
+    In each, list files and keep only:
+      - Google Docs (mimeType == 'application/vnd.google-apps.document')
+      - Name contains 'รายงานผลการปฏิบัติงาน'
+      - Name does NOT contain 'ใบรายงาน' (QR-code variant)
+      - Name does NOT start with '###' (templates)
+      - Name does NOT contain '-OLD'
+
+    Returns [{'id', 'name', 'url'}] sorted by modifiedTime descending.
+    """
+    _list_folders = list_folders_fn or list_subfolders
+    _list_files = list_files_fn or find_existing_files
+
+    folders = _list_folders(root_folder)
+    fy_folders = [f for f in folders if "งบประมาณ" in f.get("name", "")]
+    target_folders = fy_folders if fy_folders else folders
+
+    all_matched = []
+    for f in target_folders:
+        fid = f.get("id")
+        if not fid:
+            continue
+        files = _list_files(fid)
+        for item in files:
+            fname = item.get("name", "")
+            mime = item.get("mimeType", "")
+            if mime != "application/vnd.google-apps.document":
+                continue
+            if "รายงานผลการปฏิบัติงาน" not in fname:
+                continue
+            if "ใบรายงาน" in fname:
+                continue
+            if fname.strip().startswith("###"):
+                continue
+            if "-OLD" in fname:
+                continue
+            all_matched.append(item)
+
+    all_matched.sort(
+        key=lambda x: str(x.get("modifiedTime") or x.get("modified") or ""),
+        reverse=True,
+    )
+
+    res = []
+    for item in all_matched[:limit]:
+        res.append({
+            "id": item["id"],
+            "name": item["name"],
+            "url": item.get("webViewLink") or item.get("url") or f"https://docs.google.com/document/d/{item['id']}/edit",
+        })
+    return res
+
+
 # --- CLI entrypoint ------------------------------------------------------
 
 
@@ -2295,6 +2356,14 @@ def main(argv=None):
         argv = sys.argv[1:]
 
     # Subcommand routing
+    if argv and argv[0] == "report-list":
+        p = argparse.ArgumentParser(description="List fillable monthly report Google Docs")
+        p.add_argument("--limit", type=int, default=60)
+        args = p.parse_args(argv[1:])
+        res = list_report_docs(limit=args.limit)
+        print(json.dumps(res, ensure_ascii=False))
+        return
+
     if argv and argv[0] == "daily-docs":
         p = argparse.ArgumentParser(description="List recent daily docs")
         p.add_argument("--limit", type=int, default=15)
