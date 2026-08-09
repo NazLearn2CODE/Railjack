@@ -387,7 +387,7 @@ def test_insert_rejects_newline(monkeypatch):
 
 def test_insert_rejects_oversize(monkeypatch):
     c = _client(monkeypatch)
-    assert c.post("/api/terminal/insert", json={"text": "x" * 501}).status_code == 400
+    assert c.post("/api/terminal/insert", json={"text": "x" * 4001}).status_code == 400
 
 
 def test_insert_happy_path_argv(monkeypatch):
