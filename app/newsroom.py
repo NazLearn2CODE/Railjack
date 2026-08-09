@@ -342,6 +342,30 @@ async def api_newsline_reports_generate(body: dict = Body(...)):
     return await _script(_newsline_reports_argv(body) + ["generate"], timeout=180)
 
 
+def _newsline_report_autofill_argv(body: dict) -> list[str]:
+    doc_id = body.get("doc_id")
+    if doc_id is None or not str(doc_id).strip():
+        raise HTTPException(400, "doc_id required")
+    return [
+        PY, str(NEWSLINE_REPORTS),
+        "report-autofill",
+        "--doc-id", str(doc_id).strip(),
+    ]
+
+
+@router.post("/api/newsroom/newsline-reports/autofill-preview")
+async def api_newsline_reports_autofill_preview(body: dict = Body(...)):
+    """Auto-fill preview: scan report Doc for weekday show slots and search links."""
+    return await _script(_newsline_report_autofill_argv(body), timeout=120)
+
+
+@router.post("/api/newsroom/newsline-reports/autofill-apply")
+async def api_newsline_reports_autofill_apply(body: dict = Body(...)):
+    """Auto-fill apply: search missing links and batchUpdate Google Doc text styles."""
+    return await _script(_newsline_report_autofill_argv(body) + ["--apply"], timeout=180)
+
+
+
 # ---------------------------------------------------------------- newsline rundown (Sub-tab 1: Daily NL Rundown)
 # Extracts daily NEWSLINE headlines from 'NL & NWB DDMMYY' Google Doc (NL RUNDOWN tab)
 # and writes/replaces that day's block into monthly compilation doc 'รันดาวน์ MM/YYYY'.

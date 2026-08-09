@@ -2215,11 +2215,10 @@ def test_parse_monthly_doc_blocks_and_requests():
     # Insertion
     assert reqs[1]["insertText"]["location"] == {"index": 81, "tabId": "t.0"}
     assert "NEWSLINE 04.AUGUST.2026" in reqs[1]["insertText"]["text"]
-    # Title paragraph style (centered)
-    assert any(
-        r.get("updateParagraphStyle", {}).get("paragraphStyle", {}).get("alignment") == "CENTER"
-        for r in reqs
-    )
+    # Paragraph styles (all left-aligned START)
+    p_reqs = [r["updateParagraphStyle"] for r in reqs if "updateParagraphStyle" in r]
+    assert all(pr["paragraphStyle"].get("alignment") == "START" for pr in p_reqs)
+    assert all("alignment" in pr["fields"] for pr in p_reqs)
     # Header yellow highlight (#FFFF00) and bold
     assert any(
         r.get("updateTextStyle", {}).get("textStyle", {}).get("bold") is True and
@@ -2238,7 +2237,6 @@ def test_parse_monthly_doc_blocks_and_requests():
         for r in reqs
     )
     # Keep together: all paragraphs have keepLinesTogether
-    p_reqs = [r["updateParagraphStyle"] for r in reqs if "updateParagraphStyle" in r]
     assert all(pr["paragraphStyle"].get("keepLinesTogether") is True for pr in p_reqs)
 
 
@@ -2703,5 +2701,321 @@ def test_newsline_docgen_routes(monkeypatch):
     # Missing fy_be -> 400
     assert c_gen.post("/api/newsroom/newsline-docgen/preview", json={}).status_code == 400
     assert c_gen.post("/api/newsroom/newsline-docgen/generate", json={"fy_be": ""}).status_code == 400
+
+
+# ---------------------------------------------------------------- newsline report autofill tests (Sub-tab 2)
+
+
+def test_thai_date_header_to_ce():
+    import datetime
+    from app import newsline_reports as nl_rep
+
+    # Western digits
+    assert nl_rep._thai_date_header_to_ce("วันที่ 7 สิงหาคม 2569") == datetime.date(2026, 8, 7)
+    assert nl_rep._thai_date_header_to_ce("วันที่ 07 สิงหาคม 2569") == datetime.date(2026, 8, 7)
+    assert nl_rep._thai_date_header_to_ce("  วันที่ 1 ตุลาคม 2568 \n") == datetime.date(2025, 10, 1)
+
+    # Thai numerals
+    assert nl_rep._thai_date_header_to_ce("วันที่ ๒๑ กุมภาพันธ์ ๒๕๖๙") == datetime.date(2026, 2, 21)
+
+    # Non-headers
+    assert nl_rep._thai_date_header_to_ce("HEADER BLOCK") is None
+    assert nl_rep._thai_date_header_to_ce("รายการ NEWSLINE") is None
+    assert nl_rep._thai_date_header_to_ce("") is None
+    assert nl_rep._thai_date_header_to_ce(None) is None
+
+
+def test_parse_report_slots():
+    import datetime
+    from app import newsline_reports as nl_rep
+
+    sample_doc = {
+        "title": "01 รายงานผลการปฏิบัติงาน ตุลาคม 2568",
+        "body": {
+            "content": [
+                {
+                    "startIndex": 1,
+                    "endIndex": 50,
+                    "paragraph": {
+                        "elements": [
+                            {"startIndex": 1, "endIndex": 50, "textRun": {"content": "รายงานผลการปฏิบัติงาน ประจำเดือน ตุลาคม 2568\n"}}
+                        ]
+                    }
+                },
+                {
+                    "startIndex": 50,
+                    "endIndex": 80,
+                    "paragraph": {
+                        "elements": [
+                            {"startIndex": 50, "endIndex": 80, "textRun": {"content": "วันที่ 1 ตุลาคม 2568\n"}}
+                        ]
+                    }
+                },
+                {
+                    "startIndex": 80,
+                    "endIndex": 105,
+                    "paragraph": {
+                        "elements": [
+                            {"startIndex": 80, "endIndex": 87, "textRun": {"content": "รายการ "}},
+                            {"startIndex": 87, "endIndex": 95, "textRun": {"content": "NEWSLINE", "textStyle": {"link": {"url": "https://facebook.com/nbtworld/videos/111/"}}}},
+                            {"startIndex": 95, "endIndex": 105, "textRun": {"content": "\n"}}
+                        ]
+                    }
+                },
+                {
+                    "startIndex": 105,
+                    "endIndex": 160,
+                    "paragraph": {
+                        "elements": [
+                            {"startIndex": 105, "endIndex": 160, "textRun": {"content": "รายการ NBT WORLD BRIEF (ภาคค่ำ)\n"}}
+                        ]
+                    }
+                },
+                {
+                    "startIndex": 160,
+                    "endIndex": 190,
+                    "paragraph": {
+                        "elements": [
+                            {"startIndex": 160, "endIndex": 190, "textRun": {"content": "วันที่ 2 ตุลาคม 2568\n"}}
+                        ]
+                    }
+                },
+                {
+                    "startIndex": 190,
+                    "endIndex": 220,
+                    "paragraph": {
+                        "elements": [
+                            {"startIndex": 190, "endIndex": 220, "textRun": {"content": "รายการ NEWSLINE\n"}}
+                        ]
+                    }
+                },
+                {
+                    "startIndex": 220,
+                    "endIndex": 275,
+                    "paragraph": {
+                        "elements": [
+                            {"startIndex": 220, "endIndex": 275, "textRun": {"content": "รายการ NBT WORLD BRIEF (ภาคค่ำ)\n"}}
+                        ]
+                    }
+                }
+            ]
+        }
+    }
+
+    slots = nl_rep.parse_report_slots(sample_doc)
+    assert len(slots) == 2
+
+    # Day 1: Linked NEWSLINE + Unlinked NBT WB
+    d1 = slots[0]
+    assert d1["date_ce"] == datetime.date(2025, 10, 1)
+    assert d1["date_display"] == "วันที่ 1 ตุลาคม 2568"
+    assert d1["newsline"]["start"] == 87
+    assert d1["newsline"]["end"] == 95
+    assert d1["newsline"]["linked"] is True
+    assert d1["newsline"]["url"] == "https://facebook.com/nbtworld/videos/111/"
+
+    assert d1["nbtwb"]["start"] == 112  # 105 + 7
+    assert d1["nbtwb"]["end"] == 136    # 105 + 7 + len("NBT WORLD BRIEF (ภาคค่ำ)")
+    assert d1["nbtwb"]["linked"] is False
+    assert d1["nbtwb"]["url"] is None
+
+    # Day 2: Unlinked NEWSLINE + Unlinked NBT WB
+    d2 = slots[1]
+    assert d2["date_ce"] == datetime.date(2025, 10, 2)
+    assert d2["date_display"] == "วันที่ 2 ตุลาคม 2568"
+    assert d2["newsline"]["start"] == 197  # 190 + 7
+    assert d2["newsline"]["end"] == 205    # 190 + 7 + 8
+    assert d2["newsline"]["linked"] is False
+    assert d2["newsline"]["url"] is None
+
+    assert d2["nbtwb"]["start"] == 227     # 220 + 7
+    assert d2["nbtwb"]["end"] == 251       # 220 + 7 + 24
+    assert d2["nbtwb"]["linked"] is False
+    assert d2["nbtwb"]["url"] is None
+
+
+def test_brave_search_newsline():
+    from app import newsline_reports as nl_rep
+
+    # Fake Brave response with facebook video url
+    fake_brave_json = {
+        "web": {
+            "results": [
+                {"url": "https://www.facebook.com/nbtworld/videos/nbt-newsline-7-august-2026/10158493829102938/"},
+                {"url": "https://www.youtube.com/watch?v=other"},
+            ]
+        }
+    }
+
+    url = nl_rep._brave_search_newsline("2026-08-07", fetch_fn=lambda u, h: fake_brave_json)
+    assert url == "https://www.facebook.com/nbtworld/videos/10158493829102938/"
+
+    # Empty results
+    empty_url = nl_rep._brave_search_newsline("2026-08-07", fetch_fn=lambda u, h: {"web": {"results": []}})
+    assert empty_url is None
+
+    # Exception / network failure
+    def mock_err(u, h):
+        raise RuntimeError("network down")
+    assert nl_rep._brave_search_newsline("2026-08-07", fetch_fn=mock_err) is None
+
+
+def test_yt_nbtwb_evening():
+    from app import newsline_reports as nl_rep
+
+    listing = [
+        ("NBT World Brief 7 August 2026 (Morning)", "morn_123"),
+        ("NBT World Brief 7 August 2026 (Midday)", "mid_456"),
+        ("NBT World Brief 7 August 2026 (Evening)", "eve_789"),
+        ("NBT World Brief 8 August 2026 (Morning)", "morn_888"),
+    ]
+
+    # Matched evening edition
+    url = nl_rep._yt_nbtwb_evening("2026-08-07", cached_listing=listing)
+    assert url == "https://www.youtube.com/watch?v=eve_789"
+
+    # Missing date
+    assert nl_rep._yt_nbtwb_evening("2026-08-09", cached_listing=listing) is None
+
+    # Runner stub
+    def mock_runner(cmd):
+        return "NBT World Brief 7 August 2026 (Evening)|abc123vid\n"
+
+    assert nl_rep._yt_nbtwb_evening("2026-08-07", runner=mock_runner) == "https://www.youtube.com/watch?v=abc123vid"
+
+
+def test_preview_and_apply_report_autofill_dry_run():
+    from app import newsline_reports as nl_rep
+
+    sample_doc = {
+        "title": "01 รายงานผลการปฏิบัติงาน ตุลาคม 2568",
+        "body": {
+            "content": [
+                {
+                    "startIndex": 50,
+                    "endIndex": 80,
+                    "paragraph": {
+                        "elements": [{"startIndex": 50, "endIndex": 80, "textRun": {"content": "วันที่ 1 ตุลาคม 2568\n"}}]
+                    }
+                },
+                {
+                    "startIndex": 80,
+                    "endIndex": 105,
+                    "paragraph": {
+                        "elements": [
+                            {"startIndex": 80, "endIndex": 87, "textRun": {"content": "รายการ "}},
+                            {"startIndex": 87, "endIndex": 95, "textRun": {"content": "NEWSLINE", "textStyle": {"link": {"url": "https://facebook.com/nbtworld/videos/111/"}}}},
+                            {"startIndex": 95, "endIndex": 105, "textRun": {"content": "\n"}}
+                        ]
+                    }
+                },
+                {
+                    "startIndex": 105,
+                    "endIndex": 160,
+                    "paragraph": {
+                        "elements": [{"startIndex": 105, "endIndex": 160, "textRun": {"content": "รายการ NBT WORLD BRIEF (ภาคค่ำ)\n"}}]
+                    }
+                },
+                {
+                    "startIndex": 160,
+                    "endIndex": 190,
+                    "paragraph": {
+                        "elements": [{"startIndex": 160, "endIndex": 190, "textRun": {"content": "วันที่ 2 ตุลาคม 2568\n"}}]
+                    }
+                },
+                {
+                    "startIndex": 190,
+                    "endIndex": 220,
+                    "paragraph": {
+                        "elements": [{"startIndex": 190, "endIndex": 220, "textRun": {"content": "รายการ NEWSLINE\n"}}]
+                    }
+                },
+                {
+                    "startIndex": 220,
+                    "endIndex": 275,
+                    "paragraph": {
+                        "elements": [{"startIndex": 220, "endIndex": 275, "textRun": {"content": "รายการ NBT WORLD BRIEF (ภาคค่ำ)\n"}}]
+                    }
+                }
+            ]
+        }
+    }
+
+    # Stubs: Day 1 already has NEWSLINE. Day 1 NBT WB found. Day 2 NEWSLINE found. Day 2 NBT WB missing (None).
+    def mock_brave(d):
+        return "https://www.facebook.com/nbtworld/videos/222/" if d.day == 2 else None
+
+    def mock_yt(d):
+        return "https://www.youtube.com/watch?v=yt_day1" if d.day == 1 else None
+
+    # 1. Preview
+    prev = nl_rep.preview_report_autofill(
+        doc_id="test_doc_123",
+        doc_data=sample_doc,
+        brave_fn=mock_brave,
+        yt_fn=mock_yt,
+    )
+    assert prev["doc"]["id"] == "test_doc_123"
+    assert len(prev["days"]) == 2
+    assert prev["days"][0]["newsline_url"] == "https://facebook.com/nbtworld/videos/111/"
+    assert prev["days"][0]["newsline_linked"] is True
+    assert prev["days"][0]["nbtwb_url"] == "https://www.youtube.com/watch?v=yt_day1"
+    assert prev["days"][0]["nbtwb_linked"] is False
+
+    assert prev["days"][1]["newsline_url"] == "https://www.facebook.com/nbtworld/videos/222/"
+    assert prev["days"][1]["newsline_linked"] is False
+    assert prev["days"][1]["nbtwb_url"] is None
+    assert prev["days"][1]["nbtwb_linked"] is False
+
+    assert len(prev["missing"]) == 1
+    assert prev["missing"][0]["date_display"] == "วันที่ 2 ตุลาคม 2568"
+    assert prev["missing"][0]["which"] == ["nbtwb"]
+
+    # 2. Apply (dry_run)
+    res = nl_rep.apply_report_autofill("test_doc_123", dry_run=True, preview_data=prev)
+    assert res["dry_run"] is True
+    assert res["requests"] == 2
+    reqs = res["requests_list"]
+
+    # Request 1: Day 1 NBT WB
+    assert reqs[0]["updateTextStyle"]["range"]["startIndex"] == 112
+    assert reqs[0]["updateTextStyle"]["range"]["endIndex"] == 136
+    assert reqs[0]["updateTextStyle"]["textStyle"]["link"]["url"] == "https://www.youtube.com/watch?v=yt_day1"
+
+    # Request 2: Day 2 NEWSLINE
+    assert reqs[1]["updateTextStyle"]["range"]["startIndex"] == 197
+    assert reqs[1]["updateTextStyle"]["range"]["endIndex"] == 205
+    assert reqs[1]["updateTextStyle"]["textStyle"]["link"]["url"] == "https://www.facebook.com/nbtworld/videos/222/"
+
+    assert len(res["filled"]) == 2
+    assert len(res["missing"]) == 1
+
+
+def test_newsline_report_autofill_routes(monkeypatch):
+    c_prev, calls_prev = _client(monkeypatch, out=b'{"doc": {}, "days": [], "missing": []}')
+    r_prev = c_prev.post(
+        "/api/newsroom/newsline-reports/autofill-preview",
+        json={"doc_id": "1FFRqsOV8XdgDPAlM0u0Vyzak8LyN71bc"},
+    )
+    assert r_prev.status_code == 200
+    argv = calls_prev[0]
+    assert argv[0] == "python3"
+    assert argv[2:5] == ["report-autofill", "--doc-id", "1FFRqsOV8XdgDPAlM0u0Vyzak8LyN71bc"]
+    assert "--apply" not in argv
+
+    c_app, calls_app = _client(monkeypatch, out=b'{"filled": [], "missing": [], "requests": 0}')
+    r_app = c_app.post(
+        "/api/newsroom/newsline-reports/autofill-apply",
+        json={"doc_id": "1FFRqsOV8XdgDPAlM0u0Vyzak8LyN71bc"},
+    )
+    assert r_app.status_code == 200
+    argv_app = calls_app[0]
+    assert argv_app[2:5] == ["report-autofill", "--doc-id", "1FFRqsOV8XdgDPAlM0u0Vyzak8LyN71bc"]
+    assert argv_app[-1] == "--apply"
+
+    # Missing doc_id -> 400
+    assert c_prev.post("/api/newsroom/newsline-reports/autofill-preview", json={}).status_code == 400
+    assert c_app.post("/api/newsroom/newsline-reports/autofill-apply", json={"doc_id": ""}).status_code == 400
+
 
 

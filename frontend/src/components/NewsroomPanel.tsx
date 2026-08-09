@@ -230,6 +230,62 @@ interface DailyDocItem {
   modified?: string;
 }
 
+interface ReportAutofillDay {
+  date_display: string;
+  date_ce?: string;
+  newsline_url?: string | null;
+  nbtwb_url?: string | null;
+  newsline_linked?: boolean;
+  nbtwb_linked?: boolean;
+  newsline_slot?: {
+    start: number;
+    end: number;
+    linked: boolean;
+    url: string | null;
+  };
+  nbtwb_slot?: {
+    start: number;
+    end: number;
+    linked: boolean;
+    url: string | null;
+  };
+}
+
+interface ReportAutofillMissing {
+  date_display: string;
+  which: string[];
+}
+
+interface ReportAutofillPreviewResponse {
+  doc?: {
+    id: string;
+    name: string;
+    url: string;
+  };
+  days: ReportAutofillDay[];
+  missing: ReportAutofillMissing[];
+  total_days?: number;
+  filled_count?: number;
+  _fatal?: string;
+}
+
+interface ReportAutofillApplyResponse {
+  doc?: {
+    id: string;
+    name: string;
+    url: string;
+  };
+  filled: Array<{
+    date: string;
+    newsline: boolean;
+    nbtwb: boolean;
+  }>;
+  missing: ReportAutofillMissing[];
+  requests: number;
+  dry_run?: boolean;
+  _fatal?: string;
+}
+
 interface NewslineRundownResponse {
   dry_run?: boolean;
   success?: boolean;
@@ -669,6 +725,13 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
   const [repLoading, setRepLoading] = useState<boolean>(false);
   const [repGenerating, setRepGenerating] = useState<boolean>(false);
 
+  // Sub-tab ②: Auto-fill show links state
+  const [autofillDocId, setAutofillDocId] = useState<string>("");
+  const [autofillPreview, setAutofillPreview] = useState<ReportAutofillPreviewResponse | null>(null);
+  const [autofillApplyResult, setAutofillApplyResult] = useState<ReportAutofillApplyResponse | null>(null);
+  const [autofillLoading, setAutofillLoading] = useState<boolean>(false);
+  const [autofillApplying, setAutofillApplying] = useState<boolean>(false);
+
   // Sub-tab ③: NL Document Generator state (12 months x 3 templates bulk scaffold)
   const currentYear = now.getFullYear();
   const currentMonth = now.getMonth() + 1;
@@ -925,6 +988,60 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setRepGenerating(false);
+    }
+  };
+
+  const handleAutofillPreview = async () => {
+    if (!autofillDocId.trim()) return;
+    setAutofillLoading(true);
+    setError(null);
+    setAutofillPreview(null);
+    setAutofillApplyResult(null);
+    try {
+      const res = await fetch("/api/newsroom/newsline-reports/autofill-preview", {
+        method: "POST",
+        headers: CT,
+        body: JSON.stringify({
+          doc_id: autofillDocId.trim(),
+        }),
+      });
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({ detail: res.statusText }));
+        setError(typeof d.detail === "string" ? d.detail : JSON.stringify(d.detail));
+      } else {
+        const data: ReportAutofillPreviewResponse = await res.json();
+        setAutofillPreview(data);
+      }
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setAutofillLoading(false);
+    }
+  };
+
+  const handleAutofillApply = async () => {
+    if (!autofillDocId.trim()) return;
+    setAutofillApplying(true);
+    setError(null);
+    try {
+      const res = await fetch("/api/newsroom/newsline-reports/autofill-apply", {
+        method: "POST",
+        headers: CT,
+        body: JSON.stringify({
+          doc_id: autofillDocId.trim(),
+        }),
+      });
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({ detail: res.statusText }));
+        setError(typeof d.detail === "string" ? d.detail : JSON.stringify(d.detail));
+      } else {
+        const data: ReportAutofillApplyResponse = await res.json();
+        setAutofillApplyResult(data);
+      }
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setAutofillApplying(false);
     }
   };
 
@@ -3366,217 +3483,422 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
             </div>
           )}
 
-          {/* Sub-tab ②: MONTHLY REPORT (Existing) */}
+          {/* Sub-tab ②: MONTHLY REPORT (Existing generator + Auto-fill show links) */}
           {reportSubTab === "monthly" && (
-            <div className="flex min-h-0 flex-1 flex-col gap-3">
-              {/* Form controls */}
-              <div className="flex flex-wrap items-center gap-3">
-                <label className="flex items-center gap-1.5 mono text-xs">
-                  <span className="label">Period (งวดที่)</span>
-                  <input
-                    type="text"
-                    className="input mono px-2 py-1 text-xs"
-                    style={{ width: 80 }}
-                    placeholder="e.g. 5"
-                    value={repPeriod}
-                    onChange={(e) => {
-                      setRepPeriod(e.target.value);
-                      setRepPreview(null);
-                      setRepResult(null);
-                    }}
-                  />
-                </label>
-
-                <label className="flex items-center gap-1.5 mono text-xs">
-                  <span className="label">Start</span>
-                  <input
-                    type="date"
-                    className="input mono px-2 py-1 text-xs"
-                    value={repStart}
-                    onChange={(e) => {
-                      setRepStart(e.target.value);
-                      setRepPreview(null);
-                      setRepResult(null);
-                    }}
-                  />
-                </label>
-
-                <label className="flex items-center gap-1.5 mono text-xs">
-                  <span className="label">End</span>
-                  <input
-                    type="date"
-                    className="input mono px-2 py-1 text-xs"
-                    value={repEnd}
-                    onChange={(e) => {
-                      setRepEnd(e.target.value);
-                      setRepPreview(null);
-                      setRepResult(null);
-                    }}
-                  />
-                </label>
-
-                <div className="ml-auto flex gap-2">
-                  <button
-                    className="btn btn--compact"
-                    onClick={() => void handleReportsPreview()}
-                    disabled={repLoading || repGenerating || !repPeriod.trim() || !repStart || !repEnd}
-                  >
-                    {repLoading ? "PREVIEWING…" : "PREVIEW"}
-                  </button>
-                  <button
-                    className="btn btn--compact btn--signal"
-                    onClick={() => void handleReportsGenerate()}
-                    disabled={!repPreview || repLoading || repGenerating}
-                    title={!repPreview ? "Run PREVIEW first" : "Generate report docs in Google Drive"}
-                  >
-                    {repGenerating ? "GENERATING…" : "GENERATE"}
-                  </button>
+            <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto pr-1">
+              {/* Section 1: Period Cover & Log Generator */}
+              <div className="flex flex-col gap-3 border border-edge p-3" style={{ background: "var(--color-void)" }}>
+                <div className="flex items-center gap-2 border-b border-edge-soft pb-1">
+                  <span className="label" style={{ color: "var(--color-signal)" }}>PERIOD REPORT DOCUMENTS</span>
+                  <span className="text-[11px] mono" style={{ color: "var(--color-muted)" }}>Cover (QR) & Log doc generator per period</span>
                 </div>
+
+                {/* Form controls */}
+                <div className="flex flex-wrap items-center gap-3">
+                  <label className="flex items-center gap-1.5 mono text-xs">
+                    <span className="label">Period (งวดที่)</span>
+                    <input
+                      type="text"
+                      className="input mono px-2 py-1 text-xs"
+                      style={{ width: 80 }}
+                      placeholder="e.g. 5"
+                      value={repPeriod}
+                      onChange={(e) => {
+                        setRepPeriod(e.target.value);
+                        setRepPreview(null);
+                        setRepResult(null);
+                      }}
+                    />
+                  </label>
+
+                  <label className="flex items-center gap-1.5 mono text-xs">
+                    <span className="label">Start</span>
+                    <input
+                      type="date"
+                      className="input mono px-2 py-1 text-xs"
+                      value={repStart}
+                      onChange={(e) => {
+                        setRepStart(e.target.value);
+                        setRepPreview(null);
+                        setRepResult(null);
+                      }}
+                    />
+                  </label>
+
+                  <label className="flex items-center gap-1.5 mono text-xs">
+                    <span className="label">End</span>
+                    <input
+                      type="date"
+                      className="input mono px-2 py-1 text-xs"
+                      value={repEnd}
+                      onChange={(e) => {
+                        setRepEnd(e.target.value);
+                        setRepPreview(null);
+                        setRepResult(null);
+                      }}
+                    />
+                  </label>
+
+                  <div className="ml-auto flex gap-2">
+                    <button
+                      className="btn btn--compact"
+                      onClick={() => void handleReportsPreview()}
+                      disabled={repLoading || repGenerating || !repPeriod.trim() || !repStart || !repEnd}
+                    >
+                      {repLoading ? "PREVIEWING…" : "PREVIEW"}
+                    </button>
+                    <button
+                      className="btn btn--compact btn--signal"
+                      onClick={() => void handleReportsGenerate()}
+                      disabled={!repPreview || repLoading || repGenerating}
+                      title={!repPreview ? "Run PREVIEW first" : "Generate report docs in Google Drive"}
+                    >
+                      {repGenerating ? "GENERATING…" : "GENERATE"}
+                    </button>
+                  </div>
+                </div>
+
+                {/* Target Folder & Summary banner */}
+                {(repPreview || repResult) && (
+                  <div className="flex flex-col gap-1.5 border border-edge px-3 py-2 text-xs mono" style={{ background: "var(--color-void)" }}>
+                    {(repResult?.folder || repPreview?.folder) && (() => {
+                      const f = repResult?.folder || repPreview?.folder!;
+                      return (
+                        <div className="flex items-center gap-2">
+                          <span className="label" style={{ color: "var(--color-signal)" }}>TARGET FOLDER:</span>
+                          <span style={{ color: "var(--color-phosphor)" }}>{f.name}</span>
+                          {f.id && <span style={{ color: "var(--color-muted)" }}>({f.id})</span>}
+                          {f.created && <span className="label" style={{ color: "var(--color-go)" }}>NEW</span>}
+                        </div>
+                      );
+                    })()}
+                    {(() => {
+                      const p = repResult || repPreview!;
+                      return (
+                        <div className="flex flex-wrap items-center gap-3 text-xs">
+                          <span className="label">SUMMARY:</span>
+                          <span style={{ color: "var(--color-phosphor-dim)" }}>
+                            FY {p.fy_be} · งวดที่ {p.period} · {p.start_display} – {p.end_display} · {p.weekday_count} weekdays
+                          </span>
+                          {p.idempotent && (
+                            <span className="label" style={{ color: "var(--color-hazard)" }}>
+                              (EXISTING DOCS MATCHED)
+                            </span>
+                          )}
+                        </div>
+                      );
+                    })()}
+                  </div>
+                )}
+
+                {/* Output / Files & Weekday rows list */}
+                {(repResult || repPreview) && (
+                  <div className="flex flex-col gap-2 border border-edge p-2" style={{ background: "var(--color-void)", maxHeight: 220, overflowY: "auto" }}>
+                    {repResult ? (
+                      <div className="flex flex-col gap-3">
+                        <div>
+                          <span className="label mb-1 block" style={{ color: "var(--color-go)" }}>
+                            {repResult.idempotent ? "EXISTING DOCUMENTS REUSED" : "CREATED DOCUMENTS (2)"}
+                          </span>
+                          <div className="flex flex-col gap-1">
+                            {repResult.cover && (
+                              <div className="mono flex items-center gap-2 border-b border-edge-soft py-1 text-xs">
+                                <span className="pip pip--go" />
+                                <span className="label" style={{ color: "var(--color-signal)" }}>[COVER]</span>
+                                <span className="flex-1 truncate" style={{ color: "var(--color-phosphor)" }}>
+                                  {repResult.cover.name}
+                                </span>
+                                {repResult.cover.url && (
+                                  <a
+                                    href={repResult.cover.url}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    style={{ color: "var(--color-signal)" }}
+                                  >
+                                    open ↗
+                                  </a>
+                                )}
+                              </div>
+                            )}
+                            {repResult.log && (
+                              <div className="mono flex items-center gap-2 border-b border-edge-soft py-1 text-xs">
+                                <span className="pip pip--go" />
+                                <span className="label" style={{ color: "var(--color-signal)" }}>[LOG]</span>
+                                <span className="flex-1 truncate" style={{ color: "var(--color-phosphor)" }}>
+                                  {repResult.log.name}
+                                </span>
+                                {repResult.log.url && (
+                                  <a
+                                    href={repResult.log.url}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    style={{ color: "var(--color-signal)" }}
+                                  >
+                                    open ↗
+                                  </a>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        </div>
+
+                        {repResult.rows && repResult.rows.length > 0 && (
+                          <div className="border-t border-edge-soft pt-2">
+                            <span className="label mb-1 block" style={{ color: "var(--color-phosphor-dim)" }}>
+                              ENUMERATED WEEKDAYS ({repResult.rows.length})
+                            </span>
+                            <div className="flex flex-col gap-0.5">
+                              {repResult.rows.map((row, idx) => (
+                                <div key={idx} className="mono text-xs py-0.5" style={{ color: "var(--color-phosphor-dim)" }}>
+                                  <span style={{ color: "var(--color-muted)", marginRight: 6 }}>{idx + 1}.</span>
+                                  {row}
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    ) : repPreview ? (
+                      <div className="flex flex-col gap-3">
+                        <div>
+                          <span className="label mb-1 block" style={{ color: "var(--color-signal)" }}>
+                            PLANNED DOCUMENTS (2)
+                          </span>
+                          <div className="flex flex-col gap-1">
+                            <div className="mono flex items-center gap-2 border-b border-edge-soft py-1 text-xs">
+                              <span className="pip pip--signal" />
+                              <span className="label" style={{ color: "var(--color-signal)" }}>[COVER]</span>
+                              <span className="flex-1 truncate" style={{ color: "var(--color-phosphor-dim)" }}>
+                                {repPreview.cover_filename}
+                              </span>
+                            </div>
+                            <div className="mono flex items-center gap-2 border-b border-edge-soft py-1 text-xs">
+                              <span className="pip pip--signal" />
+                              <span className="label" style={{ color: "var(--color-signal)" }}>[LOG]</span>
+                              <span className="flex-1 truncate" style={{ color: "var(--color-phosphor-dim)" }}>
+                                {repPreview.log_filename}
+                              </span>
+                            </div>
+                          </div>
+                        </div>
+
+                        {repPreview.rows && repPreview.rows.length > 0 && (
+                          <div className="border-t border-edge-soft pt-2">
+                            <span className="label mb-1 block" style={{ color: "var(--color-signal)" }}>
+                              PLAN TO ENUMERATE ({repPreview.weekday_count} WEEKDAYS — THAI NUMERALS)
+                            </span>
+                            <div className="flex flex-col gap-0.5">
+                              {repPreview.rows.map((row, idx) => (
+                                <div key={idx} className="mono text-xs py-0.5 flex items-center gap-2" style={{ color: "var(--color-phosphor-dim)" }}>
+                                  <span className="pip pip--signal" />
+                                  <span style={{ color: "var(--color-muted)", minWidth: 20 }}>{idx + 1}.</span>
+                                  <span>{row}</span>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    ) : null}
+                  </div>
+                )}
               </div>
 
-              {/* Target Folder & Summary banner */}
-              {(repPreview || repResult) && (
-                <div className="flex flex-col gap-1.5 border border-edge px-3 py-2 text-xs mono" style={{ background: "var(--color-void)" }}>
-                  {(repResult?.folder || repPreview?.folder) && (() => {
-                    const f = repResult?.folder || repPreview?.folder!;
-                    return (
-                      <div className="flex items-center gap-2">
-                        <span className="label" style={{ color: "var(--color-signal)" }}>TARGET FOLDER:</span>
-                        <span style={{ color: "var(--color-phosphor)" }}>{f.name}</span>
-                        {f.id && <span style={{ color: "var(--color-muted)" }}>({f.id})</span>}
-                        {f.created && <span className="label" style={{ color: "var(--color-go)" }}>NEW</span>}
-                      </div>
-                    );
-                  })()}
-                  {(() => {
-                    const p = repResult || repPreview!;
-                    return (
-                      <div className="flex flex-wrap items-center gap-3 text-xs">
-                        <span className="label">SUMMARY:</span>
-                        <span style={{ color: "var(--color-phosphor-dim)" }}>
-                          FY {p.fy_be} · งวดที่ {p.period} · {p.start_display} – {p.end_display} · {p.weekday_count} weekdays
-                        </span>
-                        {p.idempotent && (
-                          <span className="label" style={{ color: "var(--color-hazard)" }}>
-                            (EXISTING DOCS MATCHED)
-                          </span>
-                        )}
-                      </div>
-                    );
-                  })()}
+              {/* Section 2: Auto-fill show links */}
+              <div className="flex flex-col gap-3 border border-edge p-3" style={{ background: "var(--color-void)" }}>
+                <div className="flex items-center gap-2 border-b border-edge-soft pb-1">
+                  <span className="label" style={{ color: "var(--color-signal)" }}>AUTO-FILL SHOW LINKS</span>
+                  <span className="text-[11px] mono" style={{ color: "var(--color-phosphor-dim)" }}>
+                    Scan report Doc → Auto-discover NEWSLINE (Brave/FB) & NBT WB (YouTube) → Hyperlink show names
+                  </span>
                 </div>
-              )}
 
-              {/* Output / Files & Weekday rows list */}
-              <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-auto border border-edge p-2" style={{ background: "var(--color-void)" }}>
-                {repResult ? (
-                  <div className="flex flex-col gap-3">
-                    <div>
-                      <span className="label mb-1 block" style={{ color: "var(--color-go)" }}>
-                        {repResult.idempotent ? "EXISTING DOCUMENTS REUSED" : "CREATED DOCUMENTS (2)"}
-                      </span>
-                      <div className="flex flex-col gap-1">
-                        {repResult.cover && (
-                          <div className="mono flex items-center gap-2 border-b border-edge-soft py-1 text-xs">
-                            <span className="pip pip--go" />
-                            <span className="label" style={{ color: "var(--color-signal)" }}>[COVER]</span>
-                            <span className="flex-1 truncate" style={{ color: "var(--color-phosphor)" }}>
-                              {repResult.cover.name}
-                            </span>
-                            {repResult.cover.url && (
-                              <a
-                                href={repResult.cover.url}
-                                target="_blank"
-                                rel="noreferrer"
-                                style={{ color: "var(--color-signal)" }}
-                              >
-                                open ↗
-                              </a>
-                            )}
-                          </div>
-                        )}
-                        {repResult.log && (
-                          <div className="mono flex items-center gap-2 border-b border-edge-soft py-1 text-xs">
-                            <span className="pip pip--go" />
-                            <span className="label" style={{ color: "var(--color-signal)" }}>[LOG]</span>
-                            <span className="flex-1 truncate" style={{ color: "var(--color-phosphor)" }}>
-                              {repResult.log.name}
-                            </span>
-                            {repResult.log.url && (
-                              <a
-                                href={repResult.log.url}
-                                target="_blank"
-                                rel="noreferrer"
-                                style={{ color: "var(--color-signal)" }}
-                              >
-                                open ↗
-                              </a>
-                            )}
-                          </div>
-                        )}
-                      </div>
-                    </div>
+                {/* Input row */}
+                <div className="flex flex-wrap items-center gap-3">
+                  <label className="flex flex-1 min-w-[300px] items-center gap-1.5 mono text-xs">
+                    <span className="label whitespace-nowrap">Report Doc ID / URL</span>
+                    <input
+                      type="text"
+                      className="input mono px-2 py-1 text-xs w-full"
+                      placeholder="Paste report Doc ID or Google Docs URL (e.g. 1FFRqs...)"
+                      value={autofillDocId}
+                      onChange={(e) => {
+                        setAutofillDocId(e.target.value);
+                        setAutofillPreview(null);
+                        setAutofillApplyResult(null);
+                      }}
+                    />
+                  </label>
 
-                    {repResult.rows && repResult.rows.length > 0 && (
-                      <div className="border-t border-edge-soft pt-2">
-                        <span className="label mb-1 block" style={{ color: "var(--color-phosphor-dim)" }}>
-                          ENUMERATED WEEKDAYS ({repResult.rows.length})
+                  <div className="flex gap-2">
+                    <button
+                      className="btn btn--compact"
+                      onClick={() => void handleAutofillPreview()}
+                      disabled={autofillLoading || autofillApplying || !autofillDocId.trim()}
+                    >
+                      {autofillLoading ? "FINDING LINKS…" : "FIND LINKS"}
+                    </button>
+                    <button
+                      className="btn btn--compact btn--signal"
+                      onClick={() => void handleAutofillApply()}
+                      disabled={!autofillPreview || autofillLoading || autofillApplying}
+                      title={!autofillPreview ? "Click FIND LINKS first to scan Doc" : "Apply found hyperlinks to Google Doc"}
+                    >
+                      {autofillApplying ? "APPLYING LINKS…" : "APPLY FOUND LINKS"}
+                    </button>
+                  </div>
+                </div>
+
+                {/* Applied success banner */}
+                {autofillApplyResult && (
+                  <div className="flex flex-col gap-2 border border-edge px-3 py-2 text-xs mono" style={{ background: "var(--color-void)" }}>
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <span className="pip pip--go" />
+                        <span className="label" style={{ color: "var(--color-go)" }}>
+                          FILLED {autofillApplyResult.filled.length} DAYS ({autofillApplyResult.requests} link updates applied)
                         </span>
-                        <div className="flex flex-col gap-0.5" style={{ maxHeight: 200, overflowY: "auto" }}>
-                          {repResult.rows.map((row, idx) => (
-                            <div key={idx} className="mono text-xs py-0.5" style={{ color: "var(--color-phosphor-dim)" }}>
-                              <span style={{ color: "var(--color-muted)", marginRight: 6 }}>{idx + 1}.</span>
-                              {row}
+                      </div>
+                      {autofillApplyResult.doc?.url && (
+                        <a
+                          href={autofillApplyResult.doc.url}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="underline"
+                          style={{ color: "var(--color-signal)" }}
+                        >
+                          Open Updated Doc ↗
+                        </a>
+                      )}
+                    </div>
+                    {autofillApplyResult.missing && autofillApplyResult.missing.length > 0 && (
+                      <div className="border-t border-edge-soft pt-1.5 flex flex-col gap-1">
+                        <span className="label" style={{ color: "var(--color-hazard)" }}>
+                          SKIPPED & MISSING ({autofillApplyResult.missing.length} days need manual fill):
+                        </span>
+                        <div className="flex flex-col gap-0.5" style={{ maxHeight: 100, overflowY: "auto" }}>
+                          {autofillApplyResult.missing.map((m, idx) => (
+                            <div key={idx} className="flex items-center gap-2 text-[11px]" style={{ color: "var(--color-phosphor-dim)" }}>
+                              <span className="pip pip--hazard" />
+                              <span>{m.date_display}</span>
+                              <span style={{ color: "var(--color-hazard)" }}>({m.which.join(", ")})</span>
                             </div>
                           ))}
                         </div>
                       </div>
                     )}
                   </div>
-                ) : repPreview ? (
-                  <div className="flex flex-col gap-3">
-                    <div>
-                      <span className="label mb-1 block" style={{ color: "var(--color-signal)" }}>
-                        PLANNED DOCUMENTS (2)
-                      </span>
-                      <div className="flex flex-col gap-1">
-                        <div className="mono flex items-center gap-2 border-b border-edge-soft py-1 text-xs">
-                          <span className="pip pip--signal" />
-                          <span className="label" style={{ color: "var(--color-signal)" }}>[COVER]</span>
-                          <span className="flex-1 truncate" style={{ color: "var(--color-phosphor-dim)" }}>
-                            {repPreview.cover_filename}
-                          </span>
-                        </div>
-                        <div className="mono flex items-center gap-2 border-b border-edge-soft py-1 text-xs">
-                          <span className="pip pip--signal" />
-                          <span className="label" style={{ color: "var(--color-signal)" }}>[LOG]</span>
-                          <span className="flex-1 truncate" style={{ color: "var(--color-phosphor-dim)" }}>
-                            {repPreview.log_filename}
-                          </span>
-                        </div>
+                )}
+
+                {/* Preview Table */}
+                {autofillPreview ? (
+                  <div className="flex flex-col gap-2 border border-edge p-2" style={{ background: "var(--color-void)" }}>
+                    <div className="flex flex-wrap items-center justify-between border-b border-edge-soft pb-1 text-xs mono">
+                      <div className="flex items-center gap-2">
+                        <span className="label">DOC:</span>
+                        <span style={{ color: "var(--color-phosphor)" }}>
+                          {autofillPreview.doc?.name || autofillPreview.doc?.id}
+                        </span>
+                        {autofillPreview.doc?.url && (
+                          <a
+                            href={autofillPreview.doc.url}
+                            target="_blank"
+                            rel="noreferrer"
+                            style={{ color: "var(--color-signal)" }}
+                          >
+                            open ↗
+                          </a>
+                        )}
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <span>{autofillPreview.days.length} weekdays</span>
+                        <span>·</span>
+                        <span style={{ color: "var(--color-go)" }}>{autofillPreview.filled_count} found</span>
+                        <span>·</span>
+                        <span style={{ color: "var(--color-hazard)" }}>{autofillPreview.missing.length} missing</span>
                       </div>
                     </div>
 
-                    {repPreview.rows && repPreview.rows.length > 0 && (
-                      <div className="border-t border-edge-soft pt-2">
-                        <span className="label mb-1 block" style={{ color: "var(--color-signal)" }}>
-                          PLAN TO ENUMERATE ({repPreview.weekday_count} WEEKDAYS — THAI NUMERALS)
-                        </span>
-                        <div className="flex flex-col gap-0.5" style={{ maxHeight: 250, overflowY: "auto" }}>
-                          {repPreview.rows.map((row, idx) => (
-                            <div key={idx} className="mono text-xs py-0.5 flex items-center gap-2" style={{ color: "var(--color-phosphor-dim)" }}>
-                              <span className="pip pip--signal" />
-                              <span style={{ color: "var(--color-muted)", minWidth: 20 }}>{idx + 1}.</span>
-                              <span>{row}</span>
-                            </div>
+                    <div className="overflow-x-auto" style={{ maxHeight: 300, overflowY: "auto" }}>
+                      <table className="w-full text-left text-xs mono border-collapse">
+                        <thead>
+                          <tr className="border-b border-edge text-[11px]" style={{ color: "var(--color-muted)" }}>
+                            <th className="py-1 px-2 whitespace-nowrap">DAY</th>
+                            <th className="py-1 px-2">NEWSLINE (Brave / FB)</th>
+                            <th className="py-1 px-2">NBT WORLD BRIEF (ภาคค่ำ) (YouTube)</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {autofillPreview.days.map((day, idx) => (
+                            <tr key={idx} className="border-b border-edge-soft hover:bg-white/5">
+                              <td className="py-1.5 px-2 whitespace-nowrap" style={{ color: "var(--color-phosphor-dim)" }}>
+                                {day.date_display}
+                              </td>
+                              <td className="py-1.5 px-2">
+                                {day.newsline_url ? (
+                                  <div className="flex items-center gap-1.5">
+                                    <span className="pip pip--go" />
+                                    <span style={{ color: "var(--color-go)" }}>✓</span>
+                                    <a
+                                      href={day.newsline_url}
+                                      target="_blank"
+                                      rel="noreferrer"
+                                      className="truncate max-w-[240px] underline"
+                                      style={{ color: "var(--color-signal)" }}
+                                      title={day.newsline_url}
+                                    >
+                                      {day.newsline_url}
+                                    </a>
+                                    {day.newsline_linked && (
+                                      <span className="label text-[10px]" style={{ color: "var(--color-muted)" }}>
+                                        (already linked)
+                                      </span>
+                                    )}
+                                  </div>
+                                ) : (
+                                  <div className="flex items-center gap-1.5">
+                                    <span className="pip pip--hazard" />
+                                    <span style={{ color: "var(--color-hazard)" }}>— missing —</span>
+                                  </div>
+                                )}
+                              </td>
+                              <td className="py-1.5 px-2">
+                                {day.nbtwb_url ? (
+                                  <div className="flex items-center gap-1.5">
+                                    <span className="pip pip--go" />
+                                    <span style={{ color: "var(--color-go)" }}>✓</span>
+                                    <a
+                                      href={day.nbtwb_url}
+                                      target="_blank"
+                                      rel="noreferrer"
+                                      className="truncate max-w-[240px] underline"
+                                      style={{ color: "var(--color-signal)" }}
+                                      title={day.nbtwb_url}
+                                    >
+                                      {day.nbtwb_url}
+                                    </a>
+                                    {day.nbtwb_linked && (
+                                      <span className="label text-[10px]" style={{ color: "var(--color-muted)" }}>
+                                        (already linked)
+                                      </span>
+                                    )}
+                                  </div>
+                                ) : (
+                                  <div className="flex items-center gap-1.5">
+                                    <span className="pip pip--hazard" />
+                                    <span style={{ color: "var(--color-hazard)" }}>— missing —</span>
+                                  </div>
+                                )}
+                              </td>
+                            </tr>
                           ))}
-                        </div>
-                      </div>
-                    )}
+                        </tbody>
+                      </table>
+                    </div>
                   </div>
                 ) : (
-                  <div className="flex flex-1 items-center justify-center">
-                    <span className="label">— Enter period & date range, then click PREVIEW —</span>
+                  <div className="flex items-center justify-center p-3 text-xs mono">
+                    <span className="label">— Paste a report Doc ID or URL and click FIND LINKS —</span>
                   </div>
                 )}
               </div>

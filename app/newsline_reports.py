@@ -1053,7 +1053,7 @@ def build_day_block_requests(
     """Construct Docs API batchUpdate requests to write a day-block with full formatting.
 
     Formatting matches existing monthly blocks:
-    - Header: TITLE, CENTER, bold, yellow background (#FFFF00), 11pt Tahoma
+    - Header: TITLE, START (left-aligned), bold, yellow background (#FFFF00), 11pt Tahoma
     - Spacer: NORMAL_TEXT
     - Headlines: NORMAL_TEXT, 11pt Tahoma, plus preserved source rich runs
     - End Spacer: NORMAL_TEXT
@@ -1072,7 +1072,7 @@ def build_day_block_requests(
 
     h_style: dict = {
         "namedStyleType": "TITLE",
-        "alignment": "CENTER",
+        "alignment": "START",
         "lineSpacing": 100,
         "direction": "LEFT_TO_RIGHT",
         "keepLinesTogether": True,
@@ -1106,11 +1106,12 @@ def build_day_block_requests(
     sp1_end = len(full_text)
     sp1_style: dict = {
         "namedStyleType": "NORMAL_TEXT",
+        "alignment": "START",
         "lineSpacing": 100,
         "direction": "LEFT_TO_RIGHT",
         "keepLinesTogether": True,
     }
-    sp1_fields = "namedStyleType,lineSpacing,direction,keepLinesTogether"
+    sp1_fields = "namedStyleType,alignment,lineSpacing,direction,keepLinesTogether"
     if has_headlines:
         sp1_style["keepWithNext"] = True
         sp1_fields += ",keepWithNext"
@@ -1132,11 +1133,12 @@ def build_day_block_requests(
         is_last = (i == len(headlines) - 1)
         hl_style: dict = {
             "namedStyleType": "NORMAL_TEXT",
+            "alignment": "START",
             "lineSpacing": 100,
             "direction": "LEFT_TO_RIGHT",
             "keepLinesTogether": True,
         }
-        hl_fields = "namedStyleType,lineSpacing,direction,keepLinesTogether"
+        hl_fields = "namedStyleType,alignment,lineSpacing,direction,keepLinesTogether"
         if not is_last:
             hl_style["keepWithNext"] = True
             hl_fields += ",keepWithNext"
@@ -1177,11 +1179,12 @@ def build_day_block_requests(
         "end": sp2_end,
         "style": {
             "namedStyleType": "NORMAL_TEXT",
+            "alignment": "START",
             "lineSpacing": 100,
             "direction": "LEFT_TO_RIGHT",
             "keepLinesTogether": True,
         },
-        "fields": "namedStyleType,lineSpacing,direction,keepLinesTogether",
+        "fields": "namedStyleType,alignment,lineSpacing,direction,keepLinesTogether",
     })
 
     reqs: list[dict] = []
@@ -1813,6 +1816,477 @@ def generate_bulk_docs(fy_be: int | str, dry_run: bool = False) -> dict:
     }
 
 
+# --- Sub-tab 2: Monthly Report Show Link Auto-fill (NEWSLINE & NBT WB) ---
+
+
+def _thai_date_header_to_ce(header_text: str) -> datetime.date | None:
+    """Parse 'วันที่ DD <thai-month> <be-year>' -> CE date.
+
+    DD may be western or Thai numerals, zero-padded or single digit.
+    Month via THAI_MONTHS (or MONTH_MAP_TH / MONTH_MAP_EN). Year BE -> CE (year - 543).
+    """
+    if not header_text or not isinstance(header_text, str):
+        return None
+    # Normalize thai numerals to western 0-9
+    s = header_text.strip().translate(str.maketrans("๐๑๒๓๔๕๖๗๘๙", "0123456789"))
+    m = re.search(r'วันที่\s*(\d{1,2})\s+([^\s0-9]+)\s+(\d{2,4})', s)
+    if not m:
+        return None
+    day = int(m.group(1))
+    mon_str = m.group(2).strip()
+    year = int(m.group(3))
+
+    mon = None
+    if mon_str in THAI_MONTHS:
+        mon = THAI_MONTHS.index(mon_str) + 1
+    elif mon_str in MONTH_MAP_TH:
+        mon = MONTH_MAP_TH[mon_str]
+    elif mon_str.upper() in MONTH_MAP_EN:
+        mon = MONTH_MAP_EN[mon_str.upper()]
+    else:
+        for i, tm in enumerate(THAI_MONTHS):
+            if tm in mon_str or mon_str in tm:
+                mon = i + 1
+                break
+    if not mon:
+        return None
+
+    if year > 2400:
+        ce_year = year - 543
+    elif year < 100:
+        ce_year = 2000 + year
+    else:
+        ce_year = year
+
+    try:
+        return datetime.date(ce_year, mon, day)
+    except ValueError:
+        return None
+
+
+def _extract_show_run_info(p: dict, target: str) -> dict:
+    """Find start/end index and link status for show title within a paragraph."""
+    elements = p.get("elements", [])
+    p_text = "".join(e.get("textRun", {}).get("content", "") for e in elements)
+
+    start_char = p_text.find(target)
+    if start_char == -1:
+        target_clean = target.split("(")[0].strip()
+        start_char = p_text.find(target_clean)
+        if start_char == -1:
+            start_char = 0
+            end_char = len(p_text)
+        else:
+            end_char = start_char + len(target_clean)
+    else:
+        end_char = start_char + len(target)
+
+    offset = 0
+    doc_start = None
+    doc_end = None
+    linked = False
+    url = None
+
+    for e in elements:
+        tr = e.get("textRun", {})
+        c = tr.get("content", "")
+        e_len = len(c)
+        e_doc_start = e.get("startIndex", 0)
+        e_char_start = offset
+        e_char_end = offset + e_len
+
+        overlap_start = max(start_char, e_char_start)
+        overlap_end = min(end_char, e_char_end)
+        if overlap_start < overlap_end:
+            if doc_start is None:
+                doc_start = e_doc_start + (start_char - e_char_start)
+            doc_end = e_doc_start + (end_char - e_char_start)
+            style = tr.get("textStyle", {})
+            link = style.get("link", {})
+            if link and link.get("url"):
+                linked = True
+                url = link.get("url")
+        offset += e_len
+
+    if doc_start is None:
+        p_start = p.get("startIndex", 0)
+        doc_start = p_start + start_char
+        doc_end = p_start + end_char
+
+    return {
+        "start": doc_start,
+        "end": doc_end,
+        "linked": linked,
+        "url": url,
+    }
+
+
+def parse_report_slots(doc_data: dict) -> list[dict]:
+    """Parse Google Doc body into weekday report slots with show link ranges.
+
+    Returns per weekday:
+    [{date_ce, date_display, newsline:{start,end,linked,url}, nbtwb:{start,end,linked,url}}, ...]
+    """
+    tabs = doc_data.get("tabs", [])
+    if tabs:
+        content = tabs[0].get("documentTab", {}).get("body", {}).get("content", [])
+        if not content:
+            content = tabs[0].get("body", {}).get("content", [])
+    else:
+        content = doc_data.get("body", {}).get("content", [])
+
+    slots: list[dict] = []
+    current_slot: dict | None = None
+
+    for el in content:
+        if "paragraph" not in el:
+            continue
+        p = el["paragraph"]
+        elements = p.get("elements", [])
+        p_text = "".join(e.get("textRun", {}).get("content", "") for e in elements)
+        p_strip = p_text.strip()
+
+        d_ce = _thai_date_header_to_ce(p_strip)
+        if d_ce is not None:
+            if current_slot is not None:
+                slots.append(current_slot)
+            current_slot = {
+                "date_ce": d_ce,
+                "date_display": p_strip,
+                "newsline": None,
+                "nbtwb": None,
+            }
+            continue
+
+        if current_slot is not None:
+            if "NEWSLINE" in p_text and not current_slot["newsline"]:
+                current_slot["newsline"] = _extract_show_run_info(p, "NEWSLINE")
+            elif ("NBT WORLD BRIEF" in p_text or "WORLD BRIEF" in p_text or "ภาคค่ำ" in p_text) and not current_slot["nbtwb"]:
+                target = "NBT WORLD BRIEF (ภาคค่ำ)" if "NBT WORLD BRIEF (ภาคค่ำ)" in p_text else (
+                    "NBT WORLD BRIEF" if "NBT WORLD BRIEF" in p_text else "WORLD BRIEF"
+                )
+                current_slot["nbtwb"] = _extract_show_run_info(p, target)
+
+    if current_slot is not None:
+        slots.append(current_slot)
+
+    # Normalize None show slots
+    res = []
+    for s in slots:
+        res.append({
+            "date_ce": s["date_ce"],
+            "date_display": s["date_display"],
+            "newsline": s["newsline"] or {"start": 0, "end": 0, "linked": False, "url": None},
+            "nbtwb": s["nbtwb"] or {"start": 0, "end": 0, "linked": False, "url": None},
+        })
+    return res
+
+
+def _brave_search_newsline(date_ce: datetime.date | str, fetch_fn=None) -> str | None:
+    """Query Brave Search for full NEWSLINE show on Facebook.
+
+    Query: NBT NEWSLINE <D> <Month-en> <YYYY>
+    Scans results for facebook.com/nbtworld/videos/.../<digits>
+    Returns canonical URL https://www.facebook.com/nbtworld/videos/<videoid>/ or None.
+    """
+    if isinstance(date_ce, str):
+        try:
+            date_ce = datetime.date.fromisoformat(date_ce)
+        except Exception:
+            return None
+
+    api_key = os.environ.get("BRAVE_API_KEY", "").strip()
+    d_day = date_ce.day
+    d_mon_en = ENGLISH_MONTHS[date_ce.month - 1].capitalize()
+    d_year = date_ce.year
+    query = f"NBT NEWSLINE {d_day} {d_mon_en} {d_year}"
+    url = f"https://api.search.brave.com/res/v1/web/search?q={urllib.parse.quote(query)}&count=10"
+    headers = {
+        "X-Subscription-Token": api_key,
+        "Accept": "application/json",
+    }
+
+    try:
+        if fetch_fn is not None:
+            data = fetch_fn(url, headers)
+        else:
+            if not api_key:
+                return None
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+
+        if not isinstance(data, dict):
+            return None
+
+        results = data.get("web", {}).get("results", [])
+        if not results:
+            results = data.get("results", [])
+
+        for item in results:
+            item_url = item.get("url", "")
+            if not item_url:
+                continue
+            m = re.search(r'facebook\.com/(?:nbtworld/videos/(?:.+/)?|watch/\?v=)(\d+)', item_url)
+            if m:
+                video_id = m.group(1)
+                return f"https://www.facebook.com/nbtworld/videos/{video_id}/"
+    except Exception:
+        return None
+
+    return None
+
+
+def fetch_yt_listing(runner=None) -> list[tuple[str, str]]:
+    """Fetch recent video listing from @NBTWorldOfficial via yt-dlp."""
+    yt_bin = os.path.expanduser("~/.local/bin/yt-dlp")
+    if not os.path.exists(yt_bin):
+        import shutil
+        yt_bin = shutil.which("yt-dlp") or "yt-dlp"
+
+    cmd = [
+        yt_bin,
+        "--flat-playlist",
+        "--no-warnings",
+        "--print", "%(title)s|%(id)s",
+        "--playlist-end", "120",
+        "https://www.youtube.com/@NBTWorldOfficial/videos",
+    ]
+
+    try:
+        if runner is not None:
+            out_str = runner(cmd)
+        else:
+            import subprocess
+            p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=60)
+            out_str = p.stdout if p.returncode == 0 else ""
+    except Exception:
+        out_str = ""
+
+    results = []
+    if out_str:
+        for line in out_str.splitlines():
+            line = line.strip()
+            if "|" in line:
+                parts = line.split("|", 1)
+                results.append((parts[0].strip(), parts[1].strip()))
+    return results
+
+
+def _yt_nbtwb_evening(
+    date_ce: datetime.date | str,
+    cached_listing: list[tuple[str, str]] | None = None,
+    runner=None,
+) -> str | None:
+    """Find YouTube video URL for NBT World Brief Evening edition for target date.
+
+    Matches 'NBT World Brief <D> <Month-en> <YYYY> (Evening)'
+    Returns 'https://www.youtube.com/watch?v=<id>' or None.
+    """
+    if isinstance(date_ce, str):
+        try:
+            date_ce = datetime.date.fromisoformat(date_ce)
+        except Exception:
+            return None
+
+    if cached_listing is None:
+        cached_listing = fetch_yt_listing(runner=runner)
+
+    d_day = date_ce.day
+    d_mon_en = ENGLISH_MONTHS[date_ce.month - 1].capitalize()
+    d_mon_abbr = d_mon_en[:3]
+    d_year = date_ce.year
+
+    pattern = re.compile(
+        rf'NBT\s+World\s+Brief\s+0?{d_day}\s+(?:{d_mon_en}|{d_mon_abbr})\s+{d_year}\s*\(Evening\)',
+        re.IGNORECASE,
+    )
+
+    for title, vid_id in cached_listing:
+        if pattern.search(title):
+            if "Evening" in title or "evening" in title:
+                return f"https://www.youtube.com/watch?v={vid_id}"
+
+    return None
+
+
+def preview_report_autofill(
+    doc_id: str,
+    doc_data: dict | None = None,
+    brave_fn=None,
+    yt_fn=None,
+    yt_listing: list[tuple[str, str]] | None = None,
+) -> dict:
+    """Scan report Doc, find unlinked show slots, search links for NEWSLINE & NBT WB."""
+    clean_id = extract_doc_id(doc_id)
+    if not clean_id:
+        _fatal("doc_id is required")
+
+    if doc_data is None:
+        doc_data = _api("GET", f"https://docs.googleapis.com/v1/documents/{clean_id}", params={"includeTabsContent": "true"})
+
+    title = doc_data.get("title", "")
+    slots = parse_report_slots(doc_data)
+
+    cached_yt = yt_listing
+    days = []
+    missing = []
+
+    for slot in slots:
+        date_ce = slot["date_ce"]
+        date_display = slot["date_display"]
+        nl_info = slot["newsline"]
+        nbtwb_info = slot["nbtwb"]
+
+        # 1. NEWSLINE
+        if nl_info.get("linked") and nl_info.get("url"):
+            newsline_url = nl_info["url"]
+        else:
+            if brave_fn is not None:
+                newsline_url = brave_fn(date_ce)
+            else:
+                newsline_url = _brave_search_newsline(date_ce)
+
+        # 2. NBT WB Evening
+        if nbtwb_info.get("linked") and nbtwb_info.get("url"):
+            nbtwb_url = nbtwb_info["url"]
+        else:
+            if yt_fn is not None:
+                nbtwb_url = yt_fn(date_ce)
+            else:
+                if cached_yt is None:
+                    cached_yt = fetch_yt_listing()
+                nbtwb_url = _yt_nbtwb_evening(date_ce, cached_listing=cached_yt)
+
+        day_entry = {
+            "date_display": date_display,
+            "date_ce": date_ce.isoformat() if isinstance(date_ce, datetime.date) else str(date_ce),
+            "newsline_url": newsline_url,
+            "nbtwb_url": nbtwb_url,
+            "newsline_linked": bool(nl_info.get("linked")),
+            "nbtwb_linked": bool(nbtwb_info.get("linked")),
+            "newsline_slot": nl_info,
+            "nbtwb_slot": nbtwb_info,
+        }
+        days.append(day_entry)
+
+        which_miss = []
+        if not newsline_url:
+            which_miss.append("newsline")
+        if not nbtwb_url:
+            which_miss.append("nbtwb")
+        if which_miss:
+            missing.append({
+                "date_display": date_display,
+                "which": which_miss,
+            })
+
+    return {
+        "doc": {
+            "id": clean_id,
+            "name": title,
+            "url": f"https://docs.google.com/document/d/{clean_id}/edit",
+        },
+        "days": days,
+        "missing": missing,
+        "total_days": len(days),
+        "filled_count": sum(1 for d in days if d["newsline_url"] and d["nbtwb_url"]),
+    }
+
+
+def apply_report_autofill(
+    doc_id: str,
+    dry_run: bool = False,
+    preview_data: dict | None = None,
+    doc_data: dict | None = None,
+    brave_fn=None,
+    yt_fn=None,
+    yt_listing: list[tuple[str, str]] | None = None,
+) -> dict:
+    """Auto-fill found show video links into Google Doc via batchUpdate."""
+    clean_id = extract_doc_id(doc_id)
+    if not clean_id:
+        _fatal("doc_id is required")
+
+    prev = preview_data or preview_report_autofill(
+        doc_id=doc_id,
+        doc_data=doc_data,
+        brave_fn=brave_fn,
+        yt_fn=yt_fn,
+        yt_listing=yt_listing,
+    )
+
+    requests = []
+    filled = []
+
+    for day in prev.get("days", []):
+        nl_filled = False
+        nbtwb_filled = False
+
+        # Newsline
+        if not day.get("newsline_linked") and day.get("newsline_url"):
+            slot = day.get("newsline_slot", {})
+            s_idx = slot.get("start")
+            e_idx = slot.get("end")
+            if s_idx is not None and e_idx is not None and s_idx < e_idx:
+                requests.append({
+                    "updateTextStyle": {
+                        "range": {
+                            "startIndex": s_idx,
+                            "endIndex": e_idx,
+                        },
+                        "textStyle": {
+                            "link": {
+                                "url": day["newsline_url"],
+                            },
+                        },
+                        "fields": "link",
+                    }
+                })
+                nl_filled = True
+
+        # NBT WB
+        if not day.get("nbtwb_linked") and day.get("nbtwb_url"):
+            slot = day.get("nbtwb_slot", {})
+            s_idx = slot.get("start")
+            e_idx = slot.get("end")
+            if s_idx is not None and e_idx is not None and s_idx < e_idx:
+                requests.append({
+                    "updateTextStyle": {
+                        "range": {
+                            "startIndex": s_idx,
+                            "endIndex": e_idx,
+                        },
+                        "textStyle": {
+                            "link": {
+                                "url": day["nbtwb_url"],
+                            },
+                        },
+                        "fields": "link",
+                    }
+                })
+                nbtwb_filled = True
+
+        if nl_filled or nbtwb_filled or day.get("newsline_linked") or day.get("nbtwb_linked"):
+            filled.append({
+                "date": day["date_display"],
+                "newsline": nl_filled or bool(day.get("newsline_linked")),
+                "nbtwb": nbtwb_filled or bool(day.get("nbtwb_linked")),
+            })
+
+    if not dry_run and requests:
+        _api("POST", f"https://docs.googleapis.com/v1/documents/{clean_id}:batchUpdate", body={"requests": requests})
+
+    return {
+        "doc": prev["doc"],
+        "filled": filled,
+        "missing": prev.get("missing", []),
+        "requests": len(requests),
+        "requests_list": requests,
+        "dry_run": dry_run,
+    }
+
+
 # --- CLI entrypoint ------------------------------------------------------
 
 
@@ -1826,6 +2300,20 @@ def main(argv=None):
         p.add_argument("--limit", type=int, default=15)
         args = p.parse_args(argv[1:])
         res = list_recent_daily_docs(limit=args.limit)
+        print(json.dumps(res, ensure_ascii=False))
+        return
+
+    if argv and argv[0] == "report-autofill":
+        p = argparse.ArgumentParser(description="NEWSLINE Report doc link auto-fill")
+        p.add_argument("--doc-id", required=True, help="Report Doc ID or URL")
+        p.add_argument("--apply", action="store_true", help="Apply updates to Google Doc (default is preview)")
+        p.add_argument("--dry-run", action="store_true", help="Dry run preview mode")
+        args = p.parse_args(argv[1:])
+        dry = not args.apply or args.dry_run
+        if args.apply and not args.dry_run:
+            res = apply_report_autofill(args.doc_id, dry_run=False)
+        else:
+            res = preview_report_autofill(args.doc_id)
         print(json.dumps(res, ensure_ascii=False))
         return
 
@@ -1887,4 +2375,5 @@ def main(argv=None):
 
 if __name__ == "__main__":
     main()
+
 
