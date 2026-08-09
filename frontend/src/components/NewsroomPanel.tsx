@@ -240,6 +240,7 @@ interface NewslineRundownResponse {
     date_display?: string;
     header?: string;
     header_date?: string;
+    anchor?: string;
     headlines?: string[];
     headline_count?: number;
   };
@@ -252,6 +253,61 @@ interface NewslineRundownResponse {
     action?: string;
     existing_dates?: string[];
     total_days?: number;
+  };
+  _fatal?: string;
+}
+
+interface MonthMatchingDocItem {
+  id: string;
+  name: string;
+  url?: string;
+  date: string;
+  date_iso: string;
+  date_display: string;
+  day: number;
+  action?: string;
+}
+
+interface MonthFilledDayItem {
+  date: string;
+  date_display?: string;
+  doc_id: string;
+  doc_name: string;
+  headlines: number;
+  action: string;
+}
+
+interface MonthSkippedDayItem {
+  date: string;
+  doc_id: string;
+  doc_name: string;
+  reason: string;
+}
+
+interface NewslineMonthRundownResponse {
+  dry_run?: boolean;
+  success?: boolean;
+  month?: string;
+  month_display?: string;
+  year?: number;
+  month_num?: number;
+  fy_be?: number;
+  target_monthly_doc?: {
+    id: string;
+    name: string;
+    url?: string;
+    existing_dates?: string[];
+    total_existing_days?: number;
+  };
+  matching_docs?: MonthMatchingDocItem[];
+  days_filled?: MonthFilledDayItem[];
+  days_skipped?: MonthSkippedDayItem[];
+  counts?: {
+    total_matched: number;
+    to_insert?: number;
+    to_replace?: number;
+    filled?: number;
+    skipped?: number;
   };
   _fatal?: string;
 }
@@ -583,6 +639,7 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
   const [reportSubTab, setReportSubTab] = useState<"rundown" | "monthly" | "docgen">("rundown");
 
   // Sub-tab ①: NEWSLINE Rundown state
+  const [rundownMode, setRundownMode] = useState<"single" | "month">("single");
   const [dailyDocId, setDailyDocId] = useState<string>("");
   const [monthlyDocId, setMonthlyDocId] = useState<string>("");
   const [recentDailyDocs, setRecentDailyDocs] = useState<DailyDocItem[]>([]);
@@ -591,6 +648,15 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
   const [nlRundownResult, setNlRundownResult] = useState<NewslineRundownResponse | null>(null);
   const [nlRundownLoading, setNlRundownLoading] = useState<boolean>(false);
   const [nlRundownFilling, setNlRundownFilling] = useState<boolean>(false);
+
+  // Sub-tab ①: Bulk Month-Fill state
+  const defaultMonthStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+  const [bulkMonth, setBulkMonth] = useState<string>(defaultMonthStr);
+  const [bulkMonthDocId, setBulkMonthDocId] = useState<string>("");
+  const [monthPreview, setMonthPreview] = useState<NewslineMonthRundownResponse | null>(null);
+  const [monthResult, setMonthResult] = useState<NewslineMonthRundownResponse | null>(null);
+  const [monthLoading, setMonthLoading] = useState<boolean>(false);
+  const [monthFilling, setMonthFilling] = useState<boolean>(false);
 
   // Sub-tab ②: Monthly Report state (existing cover + log generator)
   const defaultStartStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-01`;
@@ -937,6 +1003,64 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setNlRundownFilling(false);
+    }
+  };
+
+  const handleMonthRundownPreview = async () => {
+    if (!bulkMonth.trim()) return;
+    setMonthLoading(true);
+    setError(null);
+    setMonthPreview(null);
+    setMonthResult(null);
+    try {
+      const yyyymm = bulkMonth.replace("-", "").trim();
+      const res = await fetch("/api/newsroom/newsline-rundown/preview-month", {
+        method: "POST",
+        headers: CT,
+        body: JSON.stringify({
+          yyyymm,
+          monthly_doc_id: bulkMonthDocId.trim() || undefined,
+        }),
+      });
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({ detail: res.statusText }));
+        setError(typeof d.detail === "string" ? d.detail : JSON.stringify(d.detail));
+      } else {
+        const data: NewslineMonthRundownResponse = await res.json();
+        setMonthPreview(data);
+      }
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setMonthLoading(false);
+    }
+  };
+
+  const handleMonthRundownFill = async () => {
+    if (!bulkMonth.trim()) return;
+    setMonthFilling(true);
+    setError(null);
+    try {
+      const yyyymm = bulkMonth.replace("-", "").trim();
+      const res = await fetch("/api/newsroom/newsline-rundown/fill-month", {
+        method: "POST",
+        headers: CT,
+        body: JSON.stringify({
+          yyyymm,
+          monthly_doc_id: bulkMonthDocId.trim() || undefined,
+        }),
+      });
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({ detail: res.statusText }));
+        setError(typeof d.detail === "string" ? d.detail : JSON.stringify(d.detail));
+      } else {
+        const data: NewslineMonthRundownResponse = await res.json();
+        setMonthResult(data);
+      }
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setMonthFilling(false);
     }
   };
 
@@ -2828,197 +2952,417 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
           {/* Sub-tab ①: NEWSLINE RUNDOWN */}
           {reportSubTab === "rundown" && (
             <div className="flex min-h-0 flex-1 flex-col gap-3">
-              {/* Form controls */}
-              <div className="flex flex-wrap items-center gap-3">
-                <label className="flex flex-1 min-w-[280px] items-center gap-1.5 mono text-xs">
-                  <span className="label shrink-0">Daily Doc</span>
-                  <input
-                    type="text"
-                    className="input mono px-2 py-1 text-xs flex-1"
-                    placeholder="Daily Doc ID or Google Doc URL (e.g. NL & NWB 050826)"
-                    value={dailyDocId}
-                    onChange={(e) => {
-                      setDailyDocId(e.target.value);
-                      setNlRundownPreview(null);
-                      setNlRundownResult(null);
-                    }}
-                  />
-                </label>
-
-                {recentDailyDocs.length > 0 && (
-                  <select
-                    className="input mono px-2 py-1 text-xs"
-                    style={{ maxWidth: 220 }}
-                    value=""
-                    onChange={(e) => {
-                      if (e.target.value) {
-                        setDailyDocId(e.target.value);
-                        setNlRundownPreview(null);
-                        setNlRundownResult(null);
-                      }
-                    }}
-                  >
-                    <option value="">— Pick Recent Daily Doc —</option>
-                    {recentDailyDocs.map((d) => (
-                      <option key={d.id} value={d.id}>
-                        {d.name}
-                      </option>
-                    ))}
-                  </select>
-                )}
-
+              {/* Mode Toggle */}
+              <div className="flex items-center gap-2 border-b border-edge-soft pb-2">
+                <span className="label text-xs" style={{ color: "var(--color-muted)" }}>MODE:</span>
                 <button
-                  className="btn btn--compact"
-                  onClick={() => void fetchRecentDailyDocs()}
-                  disabled={loadingDailyDocs}
-                  title="Refresh recent daily docs from Drive"
+                  type="button"
+                  className={`btn btn--compact ${rundownMode === "single" ? "btn--signal" : ""}`}
+                  onClick={() => setRundownMode("single")}
                 >
-                  {loadingDailyDocs ? "LOADING…" : "↻ REFRESH"}
+                  📄 Single Day Fill
                 </button>
-
-                <label className="flex flex-1 min-w-[280px] items-center gap-1.5 mono text-xs">
-                  <span className="label shrink-0">Monthly Target (Optional)</span>
-                  <input
-                    type="text"
-                    className="input mono px-2 py-1 text-xs flex-1"
-                    placeholder="Default: Current month รันดาวน์ in FY folder"
-                    value={monthlyDocId}
-                    onChange={(e) => {
-                      setMonthlyDocId(e.target.value);
-                      setNlRundownPreview(null);
-                      setNlRundownResult(null);
-                    }}
-                  />
-                </label>
-
-                <div className="ml-auto flex gap-2">
-                  <button
-                    className="btn btn--compact"
-                    onClick={() => void handleRundownPreview()}
-                    disabled={nlRundownLoading || nlRundownFilling || !dailyDocId.trim()}
-                  >
-                    {nlRundownLoading ? "PREVIEWING…" : "PREVIEW"}
-                  </button>
-                  <button
-                    className="btn btn--compact btn--signal"
-                    onClick={() => void handleRundownFill()}
-                    disabled={!nlRundownPreview || nlRundownLoading || nlRundownFilling}
-                    title={!nlRundownPreview ? "Run PREVIEW first" : "Write/replace day's block into monthly doc"}
-                  >
-                    {nlRundownFilling ? "FILLING…" : "FILL (WRITE)"}
-                  </button>
-                </div>
+                <button
+                  type="button"
+                  className={`btn btn--compact ${rundownMode === "month" ? "btn--signal" : ""}`}
+                  onClick={() => setRundownMode("month")}
+                >
+                  📅 Fill Whole Month (Bulk)
+                </button>
               </div>
 
-              {/* Rundown banners */}
-              {(nlRundownPreview || nlRundownResult) && (() => {
-                const data = nlRundownResult || nlRundownPreview!;
-                const isResult = Boolean(nlRundownResult);
-                return (
-                  <div className="flex flex-col gap-1.5 border border-edge px-3 py-2 text-xs mono" style={{ background: "var(--color-void)" }}>
-                    <div className="flex flex-wrap items-center justify-between gap-2">
-                      <div className="flex items-center gap-2">
-                        <span className="label" style={{ color: "var(--color-signal)" }}>DAILY SOURCE:</span>
-                        <span style={{ color: "var(--color-phosphor)" }}>{data.daily_doc?.title}</span>
-                        {data.daily_doc?.date_display && (
-                          <span style={{ color: "var(--color-phosphor-dim)" }}>({data.daily_doc.date_display})</span>
-                        )}
-                        <span className="label" style={{ color: "var(--color-go)" }}>
-                          {data.headline_count} HEADLINES
-                        </span>
-                      </div>
-                      {data.daily_doc?.header && (
-                        <span className="label" style={{ color: "var(--color-muted)" }}>
-                          {data.daily_doc.header.trim()}
-                        </span>
-                      )}
-                    </div>
+              {/* Mode A: Single Day Fill */}
+              {rundownMode === "single" && (
+                <>
+                  {/* Form controls */}
+                  <div className="flex flex-wrap items-center gap-3">
+                    <label className="flex flex-1 min-w-[280px] items-center gap-1.5 mono text-xs">
+                      <span className="label shrink-0">Daily Doc</span>
+                      <input
+                        type="text"
+                        className="input mono px-2 py-1 text-xs flex-1"
+                        placeholder="Daily Doc ID or Google Doc URL (e.g. NL & NWB 050826)"
+                        value={dailyDocId}
+                        onChange={(e) => {
+                          setDailyDocId(e.target.value);
+                          setNlRundownPreview(null);
+                          setNlRundownResult(null);
+                        }}
+                      />
+                    </label>
 
-                    {data.target_monthly_doc && (
-                      <div className="flex flex-wrap items-center justify-between gap-2 border-t border-edge-soft pt-1.5">
-                        <div className="flex items-center gap-2">
-                          <span className="label" style={{ color: "var(--color-signal)" }}>TARGET MONTHLY DOC:</span>
-                          <span style={{ color: "var(--color-phosphor)" }}>{data.target_monthly_doc.name}</span>
-                          {data.target_monthly_doc.url && (
-                            <a
-                              href={data.target_monthly_doc.url}
-                              target="_blank"
-                              rel="noreferrer"
-                              style={{ color: "var(--color-signal)" }}
-                            >
-                              open ↗
-                            </a>
+                    {recentDailyDocs.length > 0 && (
+                      <select
+                        className="input mono px-2 py-1 text-xs"
+                        style={{ maxWidth: 220 }}
+                        value=""
+                        onChange={(e) => {
+                          if (e.target.value) {
+                            setDailyDocId(e.target.value);
+                            setNlRundownPreview(null);
+                            setNlRundownResult(null);
+                          }
+                        }}
+                      >
+                        <option value="">— Pick Recent Daily Doc —</option>
+                        {recentDailyDocs.map((d) => (
+                          <option key={d.id} value={d.id}>
+                            {d.name}
+                          </option>
+                        ))}
+                      </select>
+                    )}
+
+                    <button
+                      className="btn btn--compact"
+                      onClick={() => void fetchRecentDailyDocs()}
+                      disabled={loadingDailyDocs}
+                      title="Refresh recent daily docs from Drive"
+                    >
+                      {loadingDailyDocs ? "LOADING…" : "↻ REFRESH"}
+                    </button>
+
+                    <label className="flex flex-1 min-w-[280px] items-center gap-1.5 mono text-xs">
+                      <span className="label shrink-0">Monthly Target (Optional)</span>
+                      <input
+                        type="text"
+                        className="input mono px-2 py-1 text-xs flex-1"
+                        placeholder="Default: Current month รันดาวน์ in FY folder"
+                        value={monthlyDocId}
+                        onChange={(e) => {
+                          setMonthlyDocId(e.target.value);
+                          setNlRundownPreview(null);
+                          setNlRundownResult(null);
+                        }}
+                      />
+                    </label>
+
+                    <div className="ml-auto flex gap-2">
+                      <button
+                        className="btn btn--compact"
+                        onClick={() => void handleRundownPreview()}
+                        disabled={nlRundownLoading || nlRundownFilling || !dailyDocId.trim()}
+                      >
+                        {nlRundownLoading ? "PREVIEWING…" : "PREVIEW"}
+                      </button>
+                      <button
+                        className="btn btn--compact btn--signal"
+                        onClick={() => void handleRundownFill()}
+                        disabled={!nlRundownPreview || nlRundownLoading || nlRundownFilling}
+                        title={!nlRundownPreview ? "Run PREVIEW first" : "Write/replace day's block into monthly doc"}
+                      >
+                        {nlRundownFilling ? "FILLING…" : "FILL (WRITE)"}
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Rundown banners */}
+                  {(nlRundownPreview || nlRundownResult) && (() => {
+                    const data = nlRundownResult || nlRundownPreview!;
+                    const isResult = Boolean(nlRundownResult);
+                    return (
+                      <div className="flex flex-col gap-1.5 border border-edge px-3 py-2 text-xs mono" style={{ background: "var(--color-void)" }}>
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <div className="flex items-center gap-2">
+                            <span className="label" style={{ color: "var(--color-signal)" }}>DAILY SOURCE:</span>
+                            <span style={{ color: "var(--color-phosphor)" }}>{data.daily_doc?.title}</span>
+                            {data.daily_doc?.date_display && (
+                              <span style={{ color: "var(--color-phosphor-dim)" }}>({data.daily_doc.date_display})</span>
+                            )}
+                            <span className="label" style={{ color: "var(--color-go)" }}>
+                              {data.headline_count} HEADLINES
+                            </span>
+                          </div>
+                          {data.daily_doc?.header && (
+                            <span className="label" style={{ color: "var(--color-muted)" }}>
+                              {data.daily_doc.header.trim()}
+                            </span>
                           )}
-                          <span
-                            className="label"
-                            style={{
-                              color:
-                                data.target_monthly_doc.action === "replace" || data.target_monthly_doc.action === "replaced"
-                                  ? "var(--color-hazard)"
-                                  : "var(--color-go)",
-                            }}
-                          >
-                            {isResult
-                              ? data.target_monthly_doc.action === "replaced"
-                                ? "✓ REPLACED EXISTING DAY"
-                                : "✓ INSERTED NEW DAY"
-                              : data.target_monthly_doc.action === "replace"
-                              ? "REPLACE (Day exists in doc)"
-                              : "INSERT (New day in doc)"}
-                          </span>
                         </div>
-                        {data.target_monthly_doc.total_days !== undefined && (
-                          <span className="label" style={{ color: "var(--color-muted)" }}>
-                            TOTAL DAYS IN DOC: {data.target_monthly_doc.total_days}
-                          </span>
+
+                        {data.target_monthly_doc && (
+                          <div className="flex flex-wrap items-center justify-between gap-2 border-t border-edge-soft pt-1.5">
+                            <div className="flex items-center gap-2">
+                              <span className="label" style={{ color: "var(--color-signal)" }}>TARGET MONTHLY DOC:</span>
+                              <span style={{ color: "var(--color-phosphor)" }}>{data.target_monthly_doc.name}</span>
+                              {data.target_monthly_doc.url && (
+                                <a
+                                  href={data.target_monthly_doc.url}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  style={{ color: "var(--color-signal)" }}
+                                >
+                                  open ↗
+                                </a>
+                              )}
+                              <span
+                                className="label"
+                                style={{
+                                  color:
+                                    data.target_monthly_doc.action === "replace" || data.target_monthly_doc.action === "replaced"
+                                      ? "var(--color-hazard)"
+                                      : "var(--color-go)",
+                                }}
+                              >
+                                {isResult
+                                  ? data.target_monthly_doc.action === "replaced"
+                                    ? "✓ REPLACED EXISTING DAY"
+                                    : "✓ INSERTED NEW DAY"
+                                  : data.target_monthly_doc.action === "replace"
+                                  ? "REPLACE (Day exists in doc)"
+                                  : "INSERT (New day in doc)"}
+                              </span>
+                            </div>
+                            {data.target_monthly_doc.total_days !== undefined && (
+                              <span className="label" style={{ color: "var(--color-muted)" }}>
+                                TOTAL DAYS IN DOC: {data.target_monthly_doc.total_days}
+                              </span>
+                            )}
+                            {data.target_monthly_doc.existing_dates && (
+                              <span className="label" style={{ color: "var(--color-muted)" }}>
+                                EXISTING DAYS: {data.target_monthly_doc.existing_dates.join(", ")}
+                              </span>
+                            )}
+                          </div>
                         )}
-                        {data.target_monthly_doc.existing_dates && (
-                          <span className="label" style={{ color: "var(--color-muted)" }}>
-                            EXISTING DAYS: {data.target_monthly_doc.existing_dates.join(", ")}
-                          </span>
-                        )}
+                      </div>
+                    );
+                  })()}
+
+                  {/* Rundown content list */}
+                  <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-auto border border-edge p-2" style={{ background: "var(--color-void)" }}>
+                    {nlRundownResult ? (
+                      <div className="flex flex-col gap-2">
+                        <span className="label mb-1 block" style={{ color: "var(--color-go)" }}>
+                          ✓ RUNDOWN WRITTEN TO MONTHLY COMPILATION DOC ({nlRundownResult.headline_count} HEADLINES)
+                        </span>
+                        <div className="flex flex-col gap-1">
+                          {nlRundownResult.headlines?.map((h, idx) => (
+                            <div key={idx} className="mono flex items-start gap-2 border-b border-edge-soft py-1 text-xs" style={{ color: "var(--color-phosphor)" }}>
+                              <span className="pip pip--go mt-1" />
+                              <span className="flex-1">{h}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ) : nlRundownPreview ? (
+                      <div className="flex flex-col gap-2">
+                        <span className="label mb-1 block" style={{ color: "var(--color-signal)" }}>
+                          EXTRACTED NL HEADLINES ({nlRundownPreview.headline_count} HEADLINES)
+                        </span>
+                        <div className="flex flex-col gap-1">
+                          {nlRundownPreview.headlines?.map((h, idx) => (
+                            <div key={idx} className="mono flex items-start gap-2 border-b border-edge-soft py-1 text-xs" style={{ color: "var(--color-phosphor-dim)" }}>
+                              <span className="pip pip--signal mt-1" />
+                              <span className="flex-1">{h}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="flex flex-1 flex-col items-center justify-center gap-2">
+                        <span className="label">— Select or paste daily doc ID, then click PREVIEW —</span>
                       </div>
                     )}
                   </div>
-                );
-              })()}
+                </>
+              )}
 
-              {/* Rundown content list */}
-              <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-auto border border-edge p-2" style={{ background: "var(--color-void)" }}>
-                {nlRundownResult ? (
-                  <div className="flex flex-col gap-2">
-                    <span className="label mb-1 block" style={{ color: "var(--color-go)" }}>
-                      ✓ RUNDOWN WRITTEN TO MONTHLY COMPILATION DOC ({nlRundownResult.headline_count} HEADLINES)
-                    </span>
-                    <div className="flex flex-col gap-1">
-                      {nlRundownResult.headlines?.map((h, idx) => (
-                        <div key={idx} className="mono flex items-start gap-2 border-b border-edge-soft py-1 text-xs" style={{ color: "var(--color-phosphor)" }}>
-                          <span className="pip pip--go mt-1" />
-                          <span className="flex-1">{h}</span>
-                        </div>
-                      ))}
+              {/* Mode B: Fill Whole Month (Bulk) */}
+              {rundownMode === "month" && (
+                <>
+                  {/* Form controls */}
+                  <div className="flex flex-wrap items-center gap-3">
+                    <label className="flex items-center gap-1.5 mono text-xs">
+                      <span className="label shrink-0">Target Month</span>
+                      <input
+                        type="month"
+                        className="input mono px-2 py-1 text-xs"
+                        value={bulkMonth}
+                        onChange={(e) => {
+                          setBulkMonth(e.target.value);
+                          setMonthPreview(null);
+                          setMonthResult(null);
+                        }}
+                      />
+                    </label>
+
+                    <label className="flex flex-1 min-w-[280px] items-center gap-1.5 mono text-xs">
+                      <span className="label shrink-0">Monthly Target (Optional)</span>
+                      <input
+                        type="text"
+                        className="input mono px-2 py-1 text-xs flex-1"
+                        placeholder="Default: Current month รันดาวน์ in FY folder"
+                        value={bulkMonthDocId}
+                        onChange={(e) => {
+                          setBulkMonthDocId(e.target.value);
+                          setMonthPreview(null);
+                          setMonthResult(null);
+                        }}
+                      />
+                    </label>
+
+                    <div className="ml-auto flex gap-2">
+                      <button
+                        className="btn btn--compact"
+                        onClick={() => void handleMonthRundownPreview()}
+                        disabled={monthLoading || monthFilling || !bulkMonth.trim()}
+                      >
+                        {monthLoading ? "PREVIEWING…" : "PREVIEW WHOLE MONTH"}
+                      </button>
+                      <button
+                        className="btn btn--compact btn--signal"
+                        onClick={() => void handleMonthRundownFill()}
+                        disabled={!monthPreview || monthLoading || monthFilling}
+                        title={!monthPreview ? "Run PREVIEW first" : "Write all matching daily docs into monthly doc"}
+                      >
+                        {monthFilling ? "FILLING MONTH…" : "FILL WHOLE MONTH (WRITE)"}
+                      </button>
                     </div>
                   </div>
-                ) : nlRundownPreview ? (
-                  <div className="flex flex-col gap-2">
-                    <span className="label mb-1 block" style={{ color: "var(--color-signal)" }}>
-                      EXTRACTED NL HEADLINES ({nlRundownPreview.headline_count} HEADLINES)
-                    </span>
-                    <div className="flex flex-col gap-1">
-                      {nlRundownPreview.headlines?.map((h, idx) => (
-                        <div key={idx} className="mono flex items-start gap-2 border-b border-edge-soft py-1 text-xs" style={{ color: "var(--color-phosphor-dim)" }}>
-                          <span className="pip pip--signal mt-1" />
-                          <span className="flex-1">{h}</span>
+
+                  {/* Bulk Month banners */}
+                  {(monthPreview || monthResult) && (() => {
+                    const data = monthResult || monthPreview!;
+                    const isResult = Boolean(monthResult);
+                    return (
+                      <div className="flex flex-col gap-1.5 border border-edge px-3 py-2 text-xs mono" style={{ background: "var(--color-void)" }}>
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <div className="flex items-center gap-2">
+                            <span className="label" style={{ color: "var(--color-signal)" }}>TARGET MONTH:</span>
+                            <span style={{ color: "var(--color-phosphor)" }}>
+                              {data.month_display || data.month} ({data.month})
+                            </span>
+                            {data.fy_be && (
+                              <span style={{ color: "var(--color-phosphor-dim)" }}>[FY {data.fy_be}]</span>
+                            )}
+                            <span className="label" style={{ color: isResult ? "var(--color-go)" : "var(--color-signal)" }}>
+                              {isResult
+                                ? `${data.counts?.filled ?? 0} DAYS FILLED`
+                                : `${data.counts?.total_matched ?? 0} WEEKDAY DOCS FOUND`}
+                            </span>
+                            {!isResult && data.counts && (
+                              <span className="label" style={{ color: "var(--color-muted)" }}>
+                                ({data.counts.to_insert ?? 0} to insert, {data.counts.to_replace ?? 0} to replace)
+                              </span>
+                            )}
+                          </div>
                         </div>
-                      ))}
-                    </div>
+
+                        {data.target_monthly_doc && (
+                          <div className="flex flex-wrap items-center justify-between gap-2 border-t border-edge-soft pt-1.5">
+                            <div className="flex items-center gap-2">
+                              <span className="label" style={{ color: "var(--color-signal)" }}>TARGET MONTHLY DOC:</span>
+                              <span style={{ color: "var(--color-phosphor)" }}>{data.target_monthly_doc.name}</span>
+                              {data.target_monthly_doc.url && (
+                                <a
+                                  href={data.target_monthly_doc.url}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  style={{ color: "var(--color-signal)" }}
+                                >
+                                  open ↗
+                                </a>
+                              )}
+                            </div>
+                            {data.target_monthly_doc.total_existing_days !== undefined && (
+                              <span className="label" style={{ color: "var(--color-muted)" }}>
+                                CURRENT DAYS IN DOC: {data.target_monthly_doc.total_existing_days}
+                              </span>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })()}
+
+                  {/* Bulk Month content list */}
+                  <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-auto border border-edge p-2" style={{ background: "var(--color-void)" }}>
+                    {monthResult ? (
+                      <div className="flex flex-col gap-2">
+                        <span className="label mb-1 block" style={{ color: "var(--color-go)" }}>
+                          ✓ WHOLE MONTH FILLED ({monthResult.counts?.filled} DAYS WRITTEN)
+                        </span>
+                        <div className="flex flex-col gap-1">
+                          {monthResult.days_filled?.map((d, idx) => (
+                            <div key={idx} className="mono flex items-center justify-between gap-2 border-b border-edge-soft py-1 text-xs">
+                              <div className="flex items-center gap-2">
+                                <span className="pip pip--go" />
+                                <span style={{ color: "var(--color-phosphor)" }}>{d.date}</span>
+                                {d.date_display && (
+                                  <span style={{ color: "var(--color-phosphor-dim)" }}>({d.date_display})</span>
+                                )}
+                                <span style={{ color: "var(--color-muted)" }}>{d.doc_name}</span>
+                              </div>
+                              <div className="flex items-center gap-2">
+                                <span className="label" style={{ color: "var(--color-signal)" }}>
+                                  {d.headlines} headlines
+                                </span>
+                                <span
+                                  className="label"
+                                  style={{
+                                    color: d.action === "replaced" ? "var(--color-hazard)" : "var(--color-go)",
+                                  }}
+                                >
+                                  {d.action.toUpperCase()}
+                                </span>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+
+                        {monthResult.days_skipped && monthResult.days_skipped.length > 0 && (
+                          <div className="mt-3 flex flex-col gap-1 border-t border-edge-soft pt-2">
+                            <span className="label block" style={{ color: "var(--color-hazard)" }}>
+                              SKIPPED DAYS ({monthResult.days_skipped.length})
+                            </span>
+                            {monthResult.days_skipped.map((s, idx) => (
+                              <div key={idx} className="mono flex items-center justify-between gap-2 text-xs" style={{ color: "var(--color-hazard)" }}>
+                                <span>{s.date} ({s.doc_name})</span>
+                                <span>{s.reason}</span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    ) : monthPreview ? (
+                      <div className="flex flex-col gap-2">
+                        <span className="label mb-1 block" style={{ color: "var(--color-signal)" }}>
+                          MATCHED WEEKDAY DOCS ({monthPreview.matching_docs?.length ?? 0} DAYS FOUND)
+                        </span>
+                        <div className="flex flex-col gap-1">
+                          {monthPreview.matching_docs?.map((d, idx) => (
+                            <div key={idx} className="mono flex items-center justify-between gap-2 border-b border-edge-soft py-1 text-xs">
+                              <div className="flex items-center gap-2">
+                                <span className={`pip ${d.action === "replace" ? "pip--hazard" : "pip--signal"}`} />
+                                <span style={{ color: "var(--color-phosphor)" }}>{d.date_iso}</span>
+                                {d.date_display && (
+                                  <span style={{ color: "var(--color-phosphor-dim)" }}>({d.date_display})</span>
+                                )}
+                                <span style={{ color: "var(--color-muted)" }}>{d.name}</span>
+                              </div>
+                              <div className="flex items-center gap-2">
+                                <span
+                                  className="label"
+                                  style={{
+                                    color: d.action === "replace" ? "var(--color-hazard)" : "var(--color-go)",
+                                  }}
+                                >
+                                  {d.action === "replace" ? "REPLACE" : "INSERT"}
+                                </span>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="flex flex-1 flex-col items-center justify-center gap-2">
+                        <span className="label">— Select target month, then click PREVIEW WHOLE MONTH —</span>
+                      </div>
+                    )}
                   </div>
-                ) : (
-                  <div className="flex flex-1 flex-col items-center justify-center gap-2">
-                    <span className="label">— Select or paste daily doc ID, then click PREVIEW —</span>
-                  </div>
-                )}
-              </div>
+                </>
+              )}
             </div>
           )}
 

@@ -2029,13 +2029,101 @@ def test_extract_nl_rundown_from_doc_mocked():
     res = nl_rep.extract_nl_rundown_from_doc("12vNoZ9DJxZysBkSC86uOu1V6J8mq6nwt-HtnrWV1Ru4", doc_data=mock_doc)
     assert res["date"] == "2026-08-05"
     assert res["header_date"] == "05.AUGUST.2026"
-    assert res["header"] == "NEWSLINE 05.AUGUST.2026 -- ANCHOR: "
+    assert res["header"] == "NEWSLINE 05.AUGUST.2026"
+    assert res["anchor"] is None
     assert res["headline_count"] == 4
     assert res["headlines"][0] == "1. ครม. เห็นชอบร่างแถลงการณ์ร่วมไทย - เมียนมา"
     assert res["headlines"][1] == "2. \"ดีอี\" ยกระดับปราบปรามบัญชีม้า"
     assert res["headlines"][2] == "3. อินฟอร์มา มาร์เก็ตส์ จัดมหกรรม 2026"
     # International story (no Thai headline) -> English headline stripped of tags
     assert res["headlines"][3] == "4. Qatar Says US Iran Diplomacy Advances"
+
+
+def test_anchor_detection_and_strip():
+    from app import newsline_reports as nl_rep
+
+    # 1. Header has anchor name
+    doc_with_header_anchor = {
+        "title": "NL & NWB 050826",
+        "tabs": [
+            {
+                "tabProperties": {"title": "NL RUNDOWN", "tabId": "t.0"},
+                "documentTab": {
+                    "body": {
+                        "content": [
+                            {"paragraph": {"elements": [{"textRun": {"content": "NEWSLINE 05.AUGUST.2026 -- ANCHOR: NAZ ROJANASUWAN \n"}}]}},
+                            {"paragraph": {"elements": [{"textRun": {"content": "1. Test Headline\n"}}]}},
+                        ]
+                    }
+                }
+            }
+        ]
+    }
+    r1 = nl_rep.extract_nl_rundown_from_doc("doc1", doc_data=doc_with_header_anchor)
+    assert r1["anchor"] == "NAZ ROJANASUWAN"
+    assert r1["header"] == "NEWSLINE 05.AUGUST.2026 -- ANCHOR: NAZ ROJANASUWAN"
+
+    # 2. Anchor in NBTWB tab ผู้ประกาศ
+    doc_with_nbtwb_anchor = {
+        "title": "NL & NWB 050826",
+        "tabs": [
+            {
+                "tabProperties": {"title": "NBTWB AM RUNDOWN", "tabId": "t.1"},
+                "documentTab": {
+                    "body": {
+                        "content": [
+                            {"paragraph": {"elements": [{"textRun": {"content": "ผู้ประกาศ: สมชาย เข็มกลัด\n"}}]}},
+                        ]
+                    }
+                }
+            },
+            {
+                "tabProperties": {"title": "NL RUNDOWN", "tabId": "t.0"},
+                "documentTab": {
+                    "body": {
+                        "content": [
+                            {"paragraph": {"elements": [{"textRun": {"content": "NEWSLINE 05.AUGUST.2026 -- ANCHOR: \n"}}]}},
+                            {"paragraph": {"elements": [{"textRun": {"content": "1. Test Headline\n"}}]}},
+                        ]
+                    }
+                }
+            }
+        ]
+    }
+    r2 = nl_rep.extract_nl_rundown_from_doc("doc2", doc_data=doc_with_nbtwb_anchor)
+    assert r2["anchor"] == "สมชาย เข็มกลัด"
+    assert r2["header"] == "NEWSLINE 05.AUGUST.2026 -- ANCHOR: สมชาย เข็มกลัด"
+
+    # 3. Anchor is blank in all tabs -> Strip -- ANCHOR: trailer
+    doc_blank_anchor = {
+        "title": "NL & NWB 050826",
+        "tabs": [
+            {
+                "tabProperties": {"title": "NBTWB AM RUNDOWN", "tabId": "t.1"},
+                "documentTab": {
+                    "body": {
+                        "content": [
+                            {"paragraph": {"elements": [{"textRun": {"content": "ผู้ประกาศ: \n"}}]}},
+                        ]
+                    }
+                }
+            },
+            {
+                "tabProperties": {"title": "NL RUNDOWN", "tabId": "t.0"},
+                "documentTab": {
+                    "body": {
+                        "content": [
+                            {"paragraph": {"elements": [{"textRun": {"content": "NEWSLINE 05.AUGUST.2026 -- ANCHOR: \n"}}]}},
+                            {"paragraph": {"elements": [{"textRun": {"content": "1. Test Headline\n"}}]}},
+                        ]
+                    }
+                }
+            }
+        ]
+    }
+    r3 = nl_rep.extract_nl_rundown_from_doc("doc3", doc_data=doc_blank_anchor)
+    assert r3["anchor"] is None
+    assert r3["header"] == "NEWSLINE 05.AUGUST.2026"
 
 
 def test_monthly_doc_parsing_and_formatting():
@@ -2048,7 +2136,7 @@ NEWSLINE 03.AUGUST.2026 -- ANCHOR:
 1. นายกฯ กำชับคุมเข้มชายแดนใต้
 2. รมว.กต.โต้ ทอม แอนดรูว์ส
 
-NEWSLINE 05.AUGUST.2026 -- ANCHOR: 
+NEWSLINE 05.AUGUST.2026
 
 1. ครม. เห็นชอบร่างแถลงการณ์
 2. มท.3 ลงพื้นที่ชายแดน
@@ -2063,7 +2151,7 @@ NEWSLINE 05.AUGUST.2026 -- ANCHOR:
     # Insert date 2026-08-04 (should be placed between 03 and 05)
     new_block_04 = {
         "date": date(2026, 8, 4),
-        "header": "NEWSLINE 04.AUGUST.2026 -- ANCHOR: ",
+        "header": "NEWSLINE 04.AUGUST.2026",
         "headlines": ["1. พสกนิกรเข้าสักการะพระศพฯ"],
     }
     blocks.append(new_block_04)
@@ -2084,6 +2172,372 @@ NEWSLINE 05.AUGUST.2026 -- ANCHOR:
     re_formatted = nl_rep.format_monthly_doc_text(re_parsed)
     assert "UPDATED HEADLINE 1" in re_formatted
     assert "ครม. เห็นชอบร่างแถลงการณ์" not in re_formatted
+
+
+def test_parse_monthly_doc_blocks_and_requests():
+    from datetime import date
+    from app import newsline_reports as nl_rep
+
+    mock_monthly_content = [
+        {"startIndex": 1, "endIndex": 35, "paragraph": {"elements": [{"textRun": {"content": "NEWSLINE 03.AUGUST.2026 -- ANCHOR: \n"}}], "paragraphStyle": {"namedStyleType": "TITLE", "alignment": "CENTER"}}},
+        {"startIndex": 35, "endIndex": 36, "paragraph": {"elements": [{"textRun": {"content": "\n"}}]}},
+        {"startIndex": 36, "endIndex": 80, "paragraph": {"elements": [{"textRun": {"content": "1. นายกฯ กำชับคุมเข้มชายแดนใต้\n"}}]}},
+        {"startIndex": 80, "endIndex": 81, "paragraph": {"elements": [{"textRun": {"content": "\n"}}]}},
+        {"startIndex": 81, "endIndex": 115, "paragraph": {"elements": [{"textRun": {"content": "NEWSLINE 05.AUGUST.2026\n"}}], "paragraphStyle": {"namedStyleType": "TITLE", "alignment": "CENTER"}}},
+        {"startIndex": 115, "endIndex": 116, "paragraph": {"elements": [{"textRun": {"content": "\n"}}]}},
+        {"startIndex": 116, "endIndex": 155, "paragraph": {"elements": [{"textRun": {"content": "1. ครม. เห็นชอบร่างแถลงการณ์\n"}}]}},
+        {"startIndex": 155, "endIndex": 156, "paragraph": {"elements": [{"textRun": {"content": "\n"}}]}},
+    ]
+
+    blocks = nl_rep.parse_monthly_doc_blocks(mock_monthly_content)
+    assert len(blocks) == 2
+    assert blocks[0]["date"] == date(2026, 8, 3)
+    assert blocks[0]["startIndex"] == 1
+    assert blocks[0]["endIndex"] == 81
+    assert blocks[1]["date"] == date(2026, 8, 5)
+    assert blocks[1]["startIndex"] == 81
+    assert blocks[1]["endIndex"] == 156
+
+    # Test building batchUpdate requests with rich styling
+    rich_runs = [[{"start": 3, "end": 10, "style": {"bold": True}}]]
+    reqs, full_text = nl_rep.build_day_block_requests(
+        header_str="NEWSLINE 04.AUGUST.2026",
+        headlines=["1. พสกนิกรเข้าสักการะพระศพฯ"],
+        rich_runs_list=rich_runs,
+        insert_index=81,
+        tab_id="t.0",
+        delete_range=(81, 156),
+    )
+
+    assert len(reqs) >= 4
+    # Deletion
+    assert reqs[0]["deleteContentRange"]["range"] == {"startIndex": 81, "endIndex": 156, "tabId": "t.0"}
+    # Insertion
+    assert reqs[1]["insertText"]["location"] == {"index": 81, "tabId": "t.0"}
+    assert "NEWSLINE 04.AUGUST.2026" in reqs[1]["insertText"]["text"]
+    # Title paragraph style (centered)
+    assert any(
+        r.get("updateParagraphStyle", {}).get("paragraphStyle", {}).get("alignment") == "CENTER"
+        for r in reqs
+    )
+    # Header yellow highlight (#FFFF00) and bold
+    assert any(
+        r.get("updateTextStyle", {}).get("textStyle", {}).get("bold") is True and
+        r.get("updateTextStyle", {}).get("textStyle", {}).get("backgroundColor", {}).get("color", {}).get("rgbColor", {}).get("red") == 1.0
+        for r in reqs
+    )
+    # Headline Tahoma 11pt base style
+    assert any(
+        r.get("updateTextStyle", {}).get("textStyle", {}).get("weightedFontFamily", {}).get("fontFamily") == "Tahoma"
+        for r in reqs
+    )
+    # Rich run bold preserved
+    assert any(
+        r.get("updateTextStyle", {}).get("range", {}).get("startIndex") == 81 + (len("NEWSLINE 04.AUGUST.2026 \n\n") + 3) and
+        r.get("updateTextStyle", {}).get("textStyle", {}).get("bold") is True
+        for r in reqs
+    )
+    # Keep together: all paragraphs have keepLinesTogether
+    p_reqs = [r["updateParagraphStyle"] for r in reqs if "updateParagraphStyle" in r]
+    assert all(pr["paragraphStyle"].get("keepLinesTogether") is True for pr in p_reqs)
+
+
+def test_day_block_keep_together_and_keep_with_next_mocked():
+    """Assert keepLinesTogether on all cluster paragraphs and keepWithNext on header + headlines except last."""
+    from app import newsline_reports as nl_rep
+
+    # 1. Multi-headline cluster (3 headlines)
+    reqs_multi, _ = nl_rep.build_day_block_requests(
+        header_str="NEWSLINE 04.AUGUST.2026",
+        headlines=[
+            "1. First headline story",
+            "2. Second headline story",
+            "3. Third headline story (last)",
+        ],
+        insert_index=10,
+        tab_id="t.0",
+    )
+    p_style_reqs = [r["updateParagraphStyle"] for r in reqs_multi if "updateParagraphStyle" in r]
+    assert len(p_style_reqs) == 6  # header, header spacer, hl1, hl2, hl3, end spacer
+
+    # All paragraphs in the day's block must have keepLinesTogether
+    assert all(p["paragraphStyle"].get("keepLinesTogether") is True for p in p_style_reqs)
+    assert all("keepLinesTogether" in p["fields"] for p in p_style_reqs)
+
+    # Header: keepWithNext=True
+    assert p_style_reqs[0]["paragraphStyle"]["keepWithNext"] is True
+    assert "keepWithNext" in p_style_reqs[0]["fields"]
+
+    # Header spacer: keepWithNext=True
+    assert p_style_reqs[1]["paragraphStyle"]["keepWithNext"] is True
+    assert "keepWithNext" in p_style_reqs[1]["fields"]
+
+    # Headline 1 (not last): keepWithNext=True
+    assert p_style_reqs[2]["paragraphStyle"]["keepWithNext"] is True
+    assert "keepWithNext" in p_style_reqs[2]["fields"]
+
+    # Headline 2 (not last): keepWithNext=True
+    assert p_style_reqs[3]["paragraphStyle"]["keepWithNext"] is True
+    assert "keepWithNext" in p_style_reqs[3]["fields"]
+
+    # Headline 3 (LAST headline): keepWithNext is NOT True / not in fields
+    assert "keepWithNext" not in p_style_reqs[4]["fields"]
+    assert p_style_reqs[4]["paragraphStyle"].get("keepWithNext") is not True
+
+    # End spacer: keepWithNext is NOT True / not in fields
+    assert "keepWithNext" not in p_style_reqs[5]["fields"]
+    assert p_style_reqs[5]["paragraphStyle"].get("keepWithNext") is not True
+
+    # 2. Single headline cluster (1 headline)
+    reqs_single, _ = nl_rep.build_day_block_requests(
+        header_str="NEWSLINE 05.AUGUST.2026",
+        headlines=["1. Only headline"],
+        insert_index=1,
+    )
+    p_style_single = [r["updateParagraphStyle"] for r in reqs_single if "updateParagraphStyle" in r]
+    assert len(p_style_single) == 4  # header, header spacer, headline 1 (last), end spacer
+    assert all(p["paragraphStyle"].get("keepLinesTogether") is True for p in p_style_single)
+    assert p_style_single[0]["paragraphStyle"]["keepWithNext"] is True
+    assert p_style_single[1]["paragraphStyle"]["keepWithNext"] is True
+    assert "keepWithNext" not in p_style_single[2]["fields"]
+    assert "keepWithNext" not in p_style_single[3]["fields"]
+
+    # 3. Empty headlines (0 headlines)
+    reqs_empty, _ = nl_rep.build_day_block_requests(
+        header_str="NEWSLINE 06.AUGUST.2026",
+        headlines=[],
+        insert_index=1,
+    )
+    p_style_empty = [r["updateParagraphStyle"] for r in reqs_empty if "updateParagraphStyle" in r]
+    assert len(p_style_empty) == 3  # header, header spacer, end spacer
+    assert all(p["paragraphStyle"].get("keepLinesTogether") is True for p in p_style_empty)
+    for p in p_style_empty:
+        assert "keepWithNext" not in p["fields"]
+        assert p["paragraphStyle"].get("keepWithNext") is not True
+
+
+def test_execute_rundown_fill_insert_and_replace_mocked(monkeypatch):
+    from app import newsline_reports as nl_rep
+
+    # Mock daily doc 2026-08-04
+    mock_daily_doc = {
+        "title": "NL & NWB 040826",
+        "tabs": [
+            {
+                "tabProperties": {"title": "NL RUNDOWN", "tabId": "t.0"},
+                "documentTab": {
+                    "body": {
+                        "content": [
+                            {"paragraph": {"elements": [{"textRun": {"content": "NEWSLINE 04.AUGUST.2026 -- ANCHOR: \n"}}]}},
+                            {"paragraph": {"elements": [{"textRun": {"content": "1. Royal Ceremony\n"}}]}},
+                            {"paragraph": {"elements": [{"textRun": {"content": "พสกนิกรเข้าสักการะพระศพฯ\n", "textStyle": {"bold": True}}}]}},
+                            {"paragraph": {"elements": [{"pageBreak": {}}]}},
+                        ]
+                    }
+                }
+            }
+        ]
+    }
+
+    # Mock monthly doc with Aug 3 and Aug 5
+    mock_monthly_doc = {
+        "title": "11 รันดาวน์ สิงหาคม 2569",
+        "tabs": [
+            {
+                "tabProperties": {"title": "Tab 1", "tabId": "t.0"},
+                "documentTab": {
+                    "body": {
+                        "content": [
+                            {"endIndex": 1, "sectionBreak": {}},
+                            {"startIndex": 1, "endIndex": 35, "paragraph": {"elements": [{"textRun": {"content": "NEWSLINE 03.AUGUST.2026 -- ANCHOR: \n"}}], "paragraphStyle": {"namedStyleType": "TITLE", "alignment": "CENTER"}}},
+                            {"startIndex": 35, "endIndex": 36, "paragraph": {"elements": [{"textRun": {"content": "\n"}}]}},
+                            {"startIndex": 36, "endIndex": 80, "paragraph": {"elements": [{"textRun": {"content": "1. นายกฯ กำชับคุมเข้มชายแดนใต้\n"}}]}},
+                            {"startIndex": 80, "endIndex": 81, "paragraph": {"elements": [{"textRun": {"content": "\n"}}]}},
+                            {"startIndex": 81, "endIndex": 115, "paragraph": {"elements": [{"textRun": {"content": "NEWSLINE 05.AUGUST.2026 -- ANCHOR: \n"}}], "paragraphStyle": {"namedStyleType": "TITLE", "alignment": "CENTER"}}},
+                            {"startIndex": 115, "endIndex": 116, "paragraph": {"elements": [{"textRun": {"content": "\n"}}]}},
+                            {"startIndex": 116, "endIndex": 155, "paragraph": {"elements": [{"textRun": {"content": "1. ครม. เห็นชอบร่างแถลงการณ์\n"}}]}},
+                            {"startIndex": 155, "endIndex": 156, "paragraph": {"elements": [{"textRun": {"content": "\n"}}]}},
+                        ]
+                    }
+                }
+            }
+        ]
+    }
+
+    batch_calls = []
+    def mock_api(method, url, body=None, params=None, headers=None, raw_response=False):
+        if "documents/daily_04" in url:
+            return mock_daily_doc
+        if "documents/monthly_aug" in url and "batchUpdate" in url:
+            batch_calls.append(body)
+            return {"replies": []}
+        if "documents/monthly_aug" in url:
+            return mock_monthly_doc
+        if "drive/v3/files/monthly_aug" in url:
+            return {"id": "monthly_aug", "name": "11 รันดาวน์ สิงหาคม 2569", "webViewLink": "https://doc/aug"}
+        return {}
+
+    monkeypatch.setattr(nl_rep, "_api", mock_api)
+
+    # 1. Preview
+    prev = nl_rep.preview_rundown_fill("daily_04", monthly_doc_id="monthly_aug")
+    assert prev["dry_run"] is True
+    assert prev["target_monthly_doc"]["action"] == "insert"
+    assert prev["target_monthly_doc"]["existing_dates"] == ["2026-08-03", "2026-08-05"]
+
+    # 2. Execute Insert (Aug 04 inserted between Aug 03 and Aug 05 at index 81)
+    res_insert = nl_rep.execute_rundown_fill("daily_04", monthly_doc_id="monthly_aug")
+    assert res_insert["success"] is True
+    assert res_insert["target_monthly_doc"]["action"] == "inserted"
+    assert res_insert["target_monthly_doc"]["total_days"] == 3
+    assert len(batch_calls) == 1
+    insert_reqs = batch_calls[0]["requests"]
+    # No deleteContentRange on insert
+    assert not any("deleteContentRange" in r for r in insert_reqs)
+    # Inserted at index 81 (before Aug 5 block)
+    assert insert_reqs[0]["insertText"]["location"] == {"index": 81, "tabId": "t.0"}
+    insert_p_styles = [r["updateParagraphStyle"] for r in insert_reqs if "updateParagraphStyle" in r]
+    assert all(ps["paragraphStyle"].get("keepLinesTogether") is True for ps in insert_p_styles)
+    # Header and header spacer have keepWithNext=True
+    assert insert_p_styles[0]["paragraphStyle"].get("keepWithNext") is True
+    assert insert_p_styles[1]["paragraphStyle"].get("keepWithNext") is True
+
+    # 3. Execute Replace (Re-fill Aug 05)
+    mock_daily_05 = {
+        "title": "NL & NWB 050826",
+        "tabs": [
+            {
+                "tabProperties": {"title": "NL RUNDOWN", "tabId": "t.0"},
+                "documentTab": {
+                    "body": {
+                        "content": [
+                            {"paragraph": {"elements": [{"textRun": {"content": "NEWSLINE 05.AUGUST.2026 -- ANCHOR: \n"}}]}},
+                            {"paragraph": {"elements": [{"textRun": {"content": "1. Updated Story\n"}}]}},
+                            {"paragraph": {"elements": [{"textRun": {"content": "หัวข้อข่าวอัปเดต 05\n"}}]}},
+                            {"paragraph": {"elements": [{"pageBreak": {}}]}},
+                        ]
+                    }
+                }
+            }
+        ]
+    }
+    def mock_api_05(method, url, body=None, params=None, headers=None, raw_response=False):
+        if "documents/daily_05" in url:
+            return mock_daily_05
+        if "documents/monthly_aug" in url and "batchUpdate" in url:
+            batch_calls.append(body)
+            return {"replies": []}
+        if "documents/monthly_aug" in url:
+            return mock_monthly_doc
+        if "drive/v3/files/monthly_aug" in url:
+            return {"id": "monthly_aug", "name": "11 รันดาวน์ สิงหาคม 2569", "webViewLink": "https://doc/aug"}
+        return {}
+
+    monkeypatch.setattr(nl_rep, "_api", mock_api_05)
+    res_replace = nl_rep.execute_rundown_fill("daily_05", monthly_doc_id="monthly_aug")
+    assert res_replace["success"] is True
+    assert res_replace["target_monthly_doc"]["action"] == "replaced"
+    assert res_replace["target_monthly_doc"]["total_days"] == 2
+    assert len(batch_calls) == 2
+    replace_reqs = batch_calls[1]["requests"]
+    # Has deleteContentRange for Aug 5 range [81, 155]
+    assert replace_reqs[0]["deleteContentRange"]["range"] == {"startIndex": 81, "endIndex": 155, "tabId": "t.0"}
+    assert replace_reqs[1]["insertText"]["location"] == {"index": 81, "tabId": "t.0"}
+    replace_p_styles = [r["updateParagraphStyle"] for r in replace_reqs if "updateParagraphStyle" in r]
+    assert all(ps["paragraphStyle"].get("keepLinesTogether") is True for ps in replace_p_styles)
+    assert replace_p_styles[0]["paragraphStyle"].get("keepWithNext") is True
+    assert replace_p_styles[1]["paragraphStyle"].get("keepWithNext") is True
+
+
+def test_bulk_month_rundown_fill_logic_mocked(monkeypatch):
+    from datetime import date
+    from app import newsline_reports as nl_rep
+
+    # Test parse_month_year_params
+    y, m = nl_rep.parse_month_year_params(yyyymm="202608")
+    assert y == 2026 and m == 8
+    y, m = nl_rep.parse_month_year_params(yyyymm="256908")
+    assert y == 2026 and m == 8
+    y, m = nl_rep.parse_month_year_params(fy_be_val="2569", month_val="8")
+    assert y == 2026 and m == 8
+    y, m = nl_rep.parse_month_year_params(fy_be_val="2569", month_val="10")
+    assert y == 2025 and m == 10
+    y, m = nl_rep.parse_month_year_params(month_val="2026-08")
+    assert y == 2026 and m == 8
+    y, m = nl_rep.parse_month_year_params(year_val="2026", month_val="สิงหาคม")
+    assert y == 2026 and m == 8
+
+    # Test find_matching_daily_docs_for_month filtering weekdays and month
+    mock_drive_files = [
+        {"id": "doc_03", "name": "NL & NWB 030826", "modifiedTime": "2026-08-03T10:00:00Z"},  # Mon Aug 3 (Keep)
+        {"id": "doc_04", "name": "NL & NWB 040826", "modifiedTime": "2026-08-04T10:00:00Z"},  # Tue Aug 4 (Keep)
+        {"id": "doc_08", "name": "NL & NWB 080826", "modifiedTime": "2026-08-08T10:00:00Z"},  # Sat Aug 8 (Skip weekend)
+        {"id": "doc_09", "name": "NL & NWB 090826", "modifiedTime": "2026-08-09T10:00:00Z"},  # Sun Aug 9 (Skip weekend)
+        {"id": "doc_05_jul", "name": "NL & NWB 050726", "modifiedTime": "2026-07-05T10:00:00Z"},  # Jul (Skip month)
+        {"id": "doc_other", "name": "Unrelated Document", "modifiedTime": "2026-08-01T10:00:00Z"},  # Skip
+    ]
+
+    def mock_api_drive(method, url, body=None, params=None, headers=None, raw_response=False):
+        if "drive/v3/files" in url and "pageSize" in (params or {}):
+            return {"files": mock_drive_files}
+        return {}
+
+    monkeypatch.setattr(nl_rep, "_api", mock_api_drive)
+
+    matched = nl_rep.find_matching_daily_docs_for_month(2026, 8)
+    assert len(matched) == 2
+    assert [d["date"] for d in matched] == [date(2026, 8, 3), date(2026, 8, 4)]
+    assert matched[0]["day"] == 3
+    assert matched[1]["day"] == 4
+
+    # Test preview_month_rundown_fill
+    mock_monthly_doc = {
+        "id": "monthly_aug_id",
+        "title": "11 รันดาวน์ สิงหาคม 2569",
+        "body": {
+            "content": [
+                {"startIndex": 1, "endIndex": 35, "paragraph": {"elements": [{"textRun": {"content": "NEWSLINE 03.AUGUST.2026\n"}}], "paragraphStyle": {"namedStyleType": "TITLE", "alignment": "CENTER"}}},
+                {"startIndex": 35, "endIndex": 50, "paragraph": {"elements": [{"textRun": {"content": "1. Headline Aug 3\n"}}]}},
+            ]
+        }
+    }
+
+    def mock_api_full(method, url, body=None, params=None, headers=None, raw_response=False):
+        if "drive/v3/files/monthly_aug_id" in url:
+            return {"id": "monthly_aug_id", "name": "11 รันดาวน์ สิงหาคม 2569", "webViewLink": "https://doc/aug"}
+        if "drive/v3/files" in url and "pageSize" in (params or {}):
+            return {"files": mock_drive_files}
+        if "documents/monthly_aug_id" in url:
+            return mock_monthly_doc
+        return {}
+
+    monkeypatch.setattr(nl_rep, "_api", mock_api_full)
+
+    prev_month = nl_rep.preview_month_rundown_fill(2026, 8, monthly_doc_id="monthly_aug_id")
+    assert prev_month["month"] == "202608"
+    assert prev_month["counts"]["total_matched"] == 2
+    assert prev_month["counts"]["to_replace"] == 1  # Aug 3 already in doc
+    assert prev_month["counts"]["to_insert"] == 1   # Aug 4 new in doc
+
+    # Test execute_month_rundown_fill calls execute_rundown_fill per day
+    fill_calls = []
+    def mock_execute_rundown_fill(doc_id, monthly_doc_id=None, dry_run=False):
+        fill_calls.append((doc_id, monthly_doc_id, dry_run))
+        return {
+            "success": True,
+            "headline_count": 3,
+            "target_monthly_doc": {"action": "replaced" if "03" in doc_id else "inserted"},
+        }
+
+    monkeypatch.setattr(nl_rep, "execute_rundown_fill", mock_execute_rundown_fill)
+    res_month = nl_rep.execute_month_rundown_fill(2026, 8, monthly_doc_id="monthly_aug_id", dry_run=False)
+    assert res_month["success"] is True
+    assert res_month["counts"]["total_matched"] == 2
+    assert res_month["counts"]["filled"] == 2
+    assert res_month["counts"]["skipped"] == 0
+    assert len(fill_calls) == 2
+    assert fill_calls[0] == ("doc_03", "monthly_aug_id", False)
+    assert fill_calls[1] == ("doc_04", "monthly_aug_id", False)
 
 
 def test_newsline_rundown_routes(monkeypatch):
@@ -2123,6 +2577,36 @@ def test_newsline_rundown_routes(monkeypatch):
     # Missing doc_id -> 400
     assert c.post("/api/newsroom/newsline-rundown/preview", json={}).status_code == 400
     assert c.post("/api/newsroom/newsline-rundown/fill", json={"doc_id": ""}).status_code == 400
+
+    # Bulk Month routes
+    c_m_prev, calls_m_prev = _client(monkeypatch, out=b'{"dry_run": true, "month": "202608"}')
+    r_m_prev = c_m_prev.post(
+        "/api/newsroom/newsline-rundown/preview-month",
+        json={"yyyymm": "202608", "monthly_doc_id": "target_doc_123"},
+    )
+    assert r_m_prev.status_code == 200
+    argv_m_prev = calls_m_prev[0]
+    assert argv_m_prev[2] == "rundown"
+    assert argv_m_prev[3] == "preview-month"
+    assert "--month" in argv_m_prev and "202608" in argv_m_prev
+    assert "--monthly-doc-id" in argv_m_prev and "target_doc_123" in argv_m_prev
+    assert "--dry-run" in argv_m_prev
+
+    c_m_fill, calls_m_fill = _client(monkeypatch, out=b'{"success": true, "counts": {"filled": 20}}')
+    r_m_fill = c_m_fill.post(
+        "/api/newsroom/newsline-rundown/fill-month",
+        json={"fy_be": "2569", "month": "8"},
+    )
+    assert r_m_fill.status_code == 200
+    argv_m_fill = calls_m_fill[0]
+    assert argv_m_fill[2] == "rundown"
+    assert argv_m_fill[3] == "fill-month"
+    assert "--fy-be" in argv_m_fill and "2569" in argv_m_fill
+    assert "--month" in argv_m_fill and "8" in argv_m_fill
+
+    # Missing month params -> 400
+    assert c.post("/api/newsroom/newsline-rundown/preview-month", json={}).status_code == 400
+    assert c.post("/api/newsroom/newsline-rundown/fill-month", json={}).status_code == 400
 
 
 # ---------------------------------------------------------------- newsline docgen tests (Sub-tab 3)

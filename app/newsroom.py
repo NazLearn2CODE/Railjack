@@ -381,6 +381,48 @@ async def api_newsline_rundown_fill(body: dict = Body(...)):
     return await _script(_newsline_rundown_argv(body) + cmd, timeout=120)
 
 
+def _newsline_rundown_fill_month_argv(body: dict) -> list[str]:
+    yyyymm = body.get("yyyymm") or body.get("month_str")
+    fy_be = body.get("fy_be")
+    month = body.get("month")
+    monthly_id = body.get("monthly_doc_id")
+
+    if not yyyymm and not (fy_be and month) and not month:
+        raise HTTPException(400, "yyyymm (e.g. 202608) or fy_be+month required")
+
+    cmd = "preview-month" if body.get("dry_run") else "fill-month"
+    argv = [
+        PY, str(NEWSLINE_REPORTS),
+        "rundown",
+        cmd,
+    ]
+    if yyyymm:
+        argv += ["--month", str(yyyymm).strip()]
+    if fy_be:
+        argv += ["--fy-be", str(fy_be).strip()]
+    if month and not yyyymm:
+        argv += ["--month", str(month).strip()]
+    if monthly_id and str(monthly_id).strip():
+        argv += ["--monthly-doc-id", str(monthly_id).strip()]
+    if body.get("dry_run"):
+        argv.append("--dry-run")
+    return argv
+
+
+@router.post("/api/newsroom/newsline-rundown/preview-month")
+async def api_newsline_rundown_preview_month(body: dict = Body(...)):
+    """Preview whole-month NL rundown daily doc matches and target monthly doc update."""
+    body_copy = dict(body)
+    body_copy["dry_run"] = True
+    return await _script(_newsline_rundown_fill_month_argv(body_copy), timeout=120)
+
+
+@router.post("/api/newsroom/newsline-rundown/fill-month")
+async def api_newsline_rundown_fill_month(body: dict = Body(...)):
+    """Extract and write whole month of daily NL rundowns into target monthly doc. Idempotent per day."""
+    return await _script(_newsline_rundown_fill_month_argv(body), timeout=300)
+
+
 # ---------------------------------------------------------------- newsline docgen (Sub-tab 3: Bulk Template Scaffold)
 # Duplicates 3 templates x 12 months = 36 docs for the fiscal year into target FY folder.
 

@@ -649,11 +649,59 @@ def extract_doc_id(id_or_url: str) -> str:
     return s
 
 
+def find_anchor_in_doc(doc_data: dict, nl_paragraphs: list[tuple[dict, str]] | None = None) -> str | None:
+    """Check daily doc (all tabs incl. NBTWB 'ผู้ประกาศ:' / 'ANCHOR:') for announcer/anchor name.
+    Returns cleaned anchor name if reliably found, else None.
+    """
+    # 1. Check NL tab paragraphs
+    if nl_paragraphs:
+        for _, text in nl_paragraphs:
+            line = text.strip()
+            m = re.search(r'NEWSLINE\s+.*--\s*ANCHOR:\s*(.+)', line, re.IGNORECASE)
+            if m:
+                cand = m.group(1).strip()
+                if cand and not re.match(r'^[_\-\.\s:]+$', cand):
+                    return cand
+            m_gen = re.search(r'(?:ANCHOR|ผู้ประกาศ|Announcer|Presenter)\s*[:：]\s*(.+)', line, re.IGNORECASE)
+            if m_gen:
+                cand = m_gen.group(1).strip()
+                if cand and not re.match(r'^[_\-\.\s:]+$', cand):
+                    return cand
+
+    # 2. Check all tabs across the doc
+    tabs = doc_data.get("tabs", [])
+    for t in tabs:
+        content = t.get("documentTab", {}).get("body", {}).get("content", [])
+        if not content:
+            content = t.get("body", {}).get("content", [])
+        for el in content:
+            if "paragraph" in el:
+                p_text = "".join(e.get("textRun", {}).get("content", "") for e in el["paragraph"].get("elements", [])).strip()
+                m = re.search(r'(?:ผู้ประกาศ|ANCHOR|Announcer|Presenter)\s*[:：]\s*([^\n\r]+)', p_text, re.IGNORECASE)
+                if m:
+                    cand = m.group(1).strip()
+                    if cand and not re.match(r'^[_\-\.\s:]+$', cand) and len(cand) > 1:
+                        return cand
+            elif "table" in el:
+                for row in el["table"].get("tableRows", []):
+                    for cell in row.get("tableCells", []):
+                        for cp in cell.get("content", []):
+                            if "paragraph" in cp:
+                                p_text = "".join(e.get("textRun", {}).get("content", "") for e in cp["paragraph"].get("elements", [])).strip()
+                                m = re.search(r'(?:ผู้ประกาศ|ANCHOR|Announcer|Presenter)\s*[:：]\s*([^\n\r]+)', p_text, re.IGNORECASE)
+                                if m:
+                                    cand = m.group(1).strip()
+                                    if cand and not re.match(r'^[_\-\.\s:]+$', cand) and len(cand) > 1:
+                                        return cand
+    return None
+
+
 def extract_nl_rundown_from_doc(doc_id: str, doc_data: dict | None = None) -> dict:
     """Extract NEWSLINE rundown (date header + numbered headlines) from daily Google Doc.
 
     Source: Daily 'NL & NWB DDMMYY' doc. Reads Tab index 3 (titled 'NL RUNDOWN', tabId 't.0').
     Extracts 1st page content before pageBreak or ***END CREDIT*** or script start.
+    Preserves textRun styling (bold, font, size, foreground, etc.).
     """
     clean_id = extract_doc_id(doc_id)
     if not clean_id:
@@ -676,10 +724,12 @@ def extract_nl_rundown_from_doc(doc_id: str, doc_data: dict | None = None) -> di
 
     if nl_tab:
         content = nl_tab.get("documentTab", {}).get("body", {}).get("content", [])
+        if not content:
+            content = nl_tab.get("body", {}).get("content", [])
     else:
         content = doc_data.get("body", {}).get("content", [])
 
-    page1_paragraphs = []
+    page1_paragraphs: list[tuple[dict, str]] = []
     for el in content:
         if "paragraph" in el:
             p = el["paragraph"]
@@ -689,7 +739,7 @@ def extract_nl_rundown_from_doc(doc_id: str, doc_data: dict | None = None) -> di
                 break
             if "SWDK." in text or "SWDK" in text or "Thank you for joining us" in text:
                 break
-            page1_paragraphs.append(text)
+            page1_paragraphs.append((p, text))
         elif "table" in el:
             t_text = ""
             for row in el["table"].get("tableRows", []):
@@ -703,18 +753,23 @@ def extract_nl_rundown_from_doc(doc_id: str, doc_data: dict | None = None) -> di
     header_line = None
     date_obj = None
     date_str = None
+    anchor_name = find_anchor_in_doc(doc_data, page1_paragraphs)
     story_blocks: list[dict] = []
     current_story: dict | None = None
 
-    for p_raw in page1_paragraphs:
-        line = p_raw.strip()
+    for p, text in page1_paragraphs:
+        line = text.strip()
         if not line:
             continue
 
-        # Check header e.g. "NEWSLINE 05.AUGUST.2026 -- ANCHOR:" or "NEWSLINE 05.AUGUST.2026"
-        m_head = re.search(r'NEWSLINE\s+([0-9]{1,2})\.([A-Za-zก-๙]+)\.([0-9]{4})\s*--\s*ANCHOR:?', line, re.IGNORECASE)
+        # Check header e.g. "NEWSLINE 05.AUGUST.2026 -- ANCHOR: Naz", "NEWSLINE 05.AUGUST.2026 -- ANCHOR:", or "NEWSLINE 05.AUGUST.2026"
+        m_head = re.search(r'NEWSLINE\s+([0-9]{1,2})\.([A-Za-zก-๙]+)\.([0-9]{4})(?:\s*--\s*ANCHOR:?\s*(.*))?', line, re.IGNORECASE)
         if m_head:
             day_s, mon_s, yr_s = m_head.group(1), m_head.group(2).upper(), m_head.group(3)
+            if not anchor_name and m_head.group(4):
+                cand = m_head.group(4).strip()
+                if cand and not re.match(r'^[_\-\.\s:]+$', cand):
+                    anchor_name = cand
             day = int(day_s)
             mon = MONTH_MAP_EN.get(mon_s, MONTH_MAP_TH.get(mon_s, 1))
             yr = int(yr_s)
@@ -724,23 +779,37 @@ def extract_nl_rundown_from_doc(doc_id: str, doc_data: dict | None = None) -> di
             except ValueError:
                 pass
             date_str = f"{day:02d}.{ENGLISH_MONTHS[mon - 1]}.{yr}"
-            header_line = f"NEWSLINE {date_str} -- ANCHOR: "
             continue
 
         m_num = re.match(r'^(\d+)\.\s*(.*)', line)
         if m_num:
             num = int(m_num.group(1))
             rest = m_num.group(2).strip()
-            current_story = {"num": num, "en_lines": [rest], "th_lines": []}
+            current_story = {
+                "num": num,
+                "en_para": p,
+                "en_lines": [rest],
+                "th_lines": [],
+                "th_paras": [],
+            }
             story_blocks.append(current_story)
             continue
 
         if current_story:
             # Soundbite lines check
-            if re.match(r'^\s*SB\d*:', line, re.IGNORECASE) or line.startswith("Country General Manager") or line.startswith("Minister of") or line.startswith("President of") or line.startswith("General Conference") or line.startswith("TECO Representative"):
+            if (re.match(r'^\s*SB\d*:', line, re.IGNORECASE) or
+                line.startswith("Country General Manager") or
+                line.startswith("Minister of") or
+                line.startswith("President of") or
+                line.startswith("General Conference") or
+                line.startswith("TECO Representative") or
+                line.startswith("Director, ISOC") or
+                line.startswith("Thai Language Teacher") or
+                line.startswith("Exchange Student")):
                 continue
             if re.search(r'[\u0e00-\u0e7f]', line):
                 current_story["th_lines"].append(line)
+                current_story["th_paras"].append(p)
             else:
                 current_story["en_lines"].append(line)
 
@@ -755,25 +824,85 @@ def extract_nl_rundown_from_doc(doc_id: str, doc_data: dict | None = None) -> di
             try:
                 date_obj = datetime.date(ce_yr, mon, d_i)
                 date_str = f"{d_i:02d}.{ENGLISH_MONTHS[mon - 1]}.{be_yr}"
-                header_line = f"NEWSLINE {date_str} -- ANCHOR: "
             except ValueError:
                 pass
 
-    if not header_line and date_obj:
-        header_line = f"NEWSLINE {date_str} -- ANCHOR: "
-    elif not header_line:
-        header_line = "NEWSLINE -- ANCHOR: "
+    if date_str:
+        if anchor_name:
+            header_line = f"NEWSLINE {date_str} -- ANCHOR: {anchor_name}"
+        else:
+            header_line = f"NEWSLINE {date_str}"
+    elif date_obj:
+        date_str = f"{date_obj.day:02d}.{ENGLISH_MONTHS[date_obj.month - 1]}.{be_year(date_obj.year)}"
+        if anchor_name:
+            header_line = f"NEWSLINE {date_str} -- ANCHOR: {anchor_name}"
+        else:
+            header_line = f"NEWSLINE {date_str}"
+    else:
+        if anchor_name:
+            header_line = f"NEWSLINE -- ANCHOR: {anchor_name}"
+        else:
+            header_line = "NEWSLINE"
 
-    headlines = []
+    headlines: list[str] = []
+    rich_runs: list[list[dict]] = []
+
     for sb in story_blocks:
         num = sb["num"]
+        prefix = f"{num}. "
         if sb["th_lines"]:
-            th = sb["th_lines"][0].strip()
-            headlines.append(f"{num}. {th}")
+            th_text = sb["th_lines"][0].strip()
+            headline = f"{prefix}{th_text}"
+            headlines.append(headline)
+            runs = []
+            if sb["th_paras"]:
+                cur_off = len(prefix)
+                for elem in sb["th_paras"][0].get("elements", []):
+                    if "textRun" in elem:
+                        tr = elem["textRun"]
+                        c = tr.get("content", "").replace("\n", "").replace("\r", "")
+                        st = {
+                            k: v for k, v in tr.get("textStyle", {}).items()
+                            if v and k in ("bold", "italic", "underline", "strikethrough", "foregroundColor", "backgroundColor", "fontSize", "weightedFontFamily")
+                        }
+                        if c:
+                            if st:
+                                runs.append({"start": cur_off, "end": cur_off + len(c), "style": st})
+                            cur_off += len(c)
+            rich_runs.append(runs)
         else:
-            en = " ".join(sb["en_lines"]).strip()
-            en = re.sub(r'^\[[^\]]+\]\s*', '', en)
-            headlines.append(f"{num}. {en}")
+            en_full = " ".join(sb["en_lines"]).strip()
+            en = re.sub(r'^\[[^\]]+\]\s*', '', en_full)
+            headline = f"{prefix}{en}"
+            headlines.append(headline)
+            runs = []
+            if sb.get("en_para"):
+                en_para = sb["en_para"]
+                p_full = "".join(e.get("textRun", {}).get("content", "") for e in en_para.get("elements", []))
+                idx = p_full.find(en)
+                if idx != -1:
+                    cur_p_pos = 0
+                    for elem in en_para.get("elements", []):
+                        if "textRun" in elem:
+                            tr = elem["textRun"]
+                            c = tr.get("content", "").replace("\n", "").replace("\r", "")
+                            c_len = len(c)
+                            c_start = cur_p_pos
+                            c_end = cur_p_pos + c_len
+                            cur_p_pos = c_end
+
+                            ov_start = max(c_start, idx)
+                            ov_end = min(c_end, idx + len(en))
+                            if ov_start < ov_end:
+                                st = {
+                                    k: v for k, v in tr.get("textStyle", {}).items()
+                                    if v and k in ("bold", "italic", "underline", "strikethrough", "foregroundColor", "backgroundColor", "fontSize", "weightedFontFamily")
+                                }
+                                if st:
+                                    r_s = len(prefix) + (ov_start - idx)
+                                    r_e = len(prefix) + (ov_end - idx)
+                                    runs.append({"start": r_s, "end": r_e, "style": st})
+            rich_runs.append(runs)
 
     thai_date_display = format_thai_western(date_obj) if date_obj else ""
 
@@ -784,18 +913,96 @@ def extract_nl_rundown_from_doc(doc_id: str, doc_data: dict | None = None) -> di
         "date_display": thai_date_display,
         "header": header_line,
         "header_date": date_str,
+        "anchor": anchor_name,
         "headlines": headlines,
         "headline_count": len(headlines),
+        "rich_runs": rich_runs,
     }
+
+
+def parse_monthly_doc_blocks(content: list[dict]) -> list[dict]:
+    """Parse existing monthly compilation doc structured content into sorted list of daily blocks.
+
+    Extracts block ranges (startIndex, endIndex) and date for each day block.
+    """
+    blocks: list[dict] = []
+    current_block: dict | None = None
+
+    for el in content:
+        if "paragraph" not in el:
+            continue
+        p = el["paragraph"]
+        p_start = el.get("startIndex", 1)
+        p_end = el.get("endIndex", p_start + 1)
+        p_text = "".join(e.get("textRun", {}).get("content", "") for e in p.get("elements", []))
+        date_obj = None
+
+        # 1. Check dateElement in paragraph
+        for e in p.get("elements", []):
+            if "dateElement" in e:
+                ts = e["dateElement"].get("dateElementProperties", {}).get("timestamp")
+                if ts:
+                    try:
+                        date_obj = datetime.datetime.fromisoformat(ts.replace("Z", "+00:00")).date()
+                        break
+                    except Exception:
+                        pass
+
+        # 2. Check regex in text (matches headers with or without -- ANCHOR:)
+        if not date_obj and "NEWSLINE" in p_text:
+            m = re.search(r'NEWSLINE\s+(\d{1,2})[\.|\s]([A-Za-zก-๙0-9]+)[\.|\s]([0-9]{2,4})', p_text, re.IGNORECASE)
+            if m:
+                d_i = int(m.group(1))
+                m_s = m.group(2).upper()
+                y_i = int(m.group(3))
+                if m_s.isdigit():
+                    m_i = int(m_s)
+                else:
+                    m_i = MONTH_MAP_EN.get(m_s, MONTH_MAP_TH.get(m_s, 1))
+                if y_i < 100:
+                    ce_y = 2000 + y_i
+                    if ce_y > 2040:
+                        ce_y = (2500 + y_i) - 543
+                elif y_i > 2400:
+                    ce_y = y_i - 543
+                else:
+                    ce_y = y_i
+                try:
+                    date_obj = datetime.date(ce_y, m_i, d_i)
+                except ValueError:
+                    pass
+
+        if date_obj:
+            if current_block:
+                current_block["endIndex"] = p_start
+                blocks.append(current_block)
+            current_block = {
+                "date": date_obj,
+                "header_text": p_text.strip(),
+                "startIndex": p_start,
+                "endIndex": p_end,
+                "headlines": [],
+            }
+        elif current_block:
+            current_block["endIndex"] = p_end
+            if p_text.strip():
+                current_block["headlines"].append(p_text.strip())
+
+    if current_block:
+        blocks.append(current_block)
+
+    blocks.sort(key=lambda b: b["date"])
+    return blocks
 
 
 def parse_monthly_doc_text(text: str) -> list[dict]:
     """Parse existing monthly compilation doc text into sorted list of daily blocks."""
-    pattern = re.compile(r'(NEWSLINE\s+(\d{1,2})\.([A-Za-zก-๙]+)\.([0-9]{4})\s*--\s*ANCHOR:?[^\n]*)', re.IGNORECASE)
+    pattern = re.compile(r'(NEWSLINE\s+(\d{1,2})\.([A-Za-zก-๙]+)\.([0-9]{4})(?:\s*--\s*ANCHOR:?[^\n]*)?)', re.IGNORECASE)
     matches = list(pattern.finditer(text))
     blocks = []
 
     for i, m in enumerate(matches):
+        full_header = m.group(1).strip()
         day = int(m.group(2))
         mon_str = m.group(3).upper()
         mon = MONTH_MAP_EN.get(mon_str, MONTH_MAP_TH.get(mon_str, 1))
@@ -814,7 +1021,7 @@ def parse_monthly_doc_text(text: str) -> list[dict]:
 
         blocks.append({
             "date": d_obj,
-            "header": f"NEWSLINE {day:02d}.{ENGLISH_MONTHS[mon - 1]}.{yr} -- ANCHOR: ",
+            "header": full_header,
             "headlines": headlines,
         })
     blocks.sort(key=lambda b: b["date"])
@@ -833,6 +1040,192 @@ def format_monthly_doc_text(blocks: list[dict]) -> str:
     if not parts:
         return ""
     return "\n\n\n".join(parts) + "\n\n"
+
+
+def build_day_block_requests(
+    header_str: str,
+    headlines: list[str],
+    rich_runs_list: list[list[dict]] | None = None,
+    insert_index: int = 1,
+    tab_id: str | None = None,
+    delete_range: tuple[int, int] | None = None,
+) -> tuple[list[dict], str]:
+    """Construct Docs API batchUpdate requests to write a day-block with full formatting.
+
+    Formatting matches existing monthly blocks:
+    - Header: TITLE, CENTER, bold, yellow background (#FFFF00), 11pt Tahoma
+    - Spacer: NORMAL_TEXT
+    - Headlines: NORMAL_TEXT, 11pt Tahoma, plus preserved source rich runs
+    - End Spacer: NORMAL_TEXT
+    """
+    full_text = ""
+    p_styles: list[dict] = []
+    t_styles: list[dict] = []
+
+    has_headlines = len(headlines) > 0
+
+    # 1. Header paragraph
+    h_line = f"{header_str.strip()} \n"
+    h_start = len(full_text)
+    h_end = h_start + len(h_line)
+    full_text += h_line
+
+    h_style: dict = {
+        "namedStyleType": "TITLE",
+        "alignment": "CENTER",
+        "lineSpacing": 100,
+        "direction": "LEFT_TO_RIGHT",
+        "keepLinesTogether": True,
+    }
+    h_fields = "namedStyleType,alignment,lineSpacing,direction,keepLinesTogether"
+    if has_headlines:
+        h_style["keepWithNext"] = True
+        h_fields += ",keepWithNext"
+
+    p_styles.append({
+        "start": h_start,
+        "end": h_end,
+        "style": h_style,
+        "fields": h_fields,
+    })
+    t_styles.append({
+        "start": h_start,
+        "end": h_end - 1,  # exclude \n
+        "style": {
+            "bold": True,
+            "backgroundColor": {"color": {"rgbColor": {"red": 1.0, "green": 1.0, "blue": 0.0}}},
+            "fontSize": {"magnitude": 11, "unit": "PT"},
+            "weightedFontFamily": {"fontFamily": "Tahoma", "weight": 400},
+        },
+        "fields": "bold,backgroundColor,fontSize,weightedFontFamily",
+    })
+
+    # 2. Header spacer paragraph
+    sp1_start = len(full_text)
+    full_text += "\n"
+    sp1_end = len(full_text)
+    sp1_style: dict = {
+        "namedStyleType": "NORMAL_TEXT",
+        "lineSpacing": 100,
+        "direction": "LEFT_TO_RIGHT",
+        "keepLinesTogether": True,
+    }
+    sp1_fields = "namedStyleType,lineSpacing,direction,keepLinesTogether"
+    if has_headlines:
+        sp1_style["keepWithNext"] = True
+        sp1_fields += ",keepWithNext"
+
+    p_styles.append({
+        "start": sp1_start,
+        "end": sp1_end,
+        "style": sp1_style,
+        "fields": sp1_fields,
+    })
+
+    # 3. Headlines
+    for i, h in enumerate(headlines):
+        line = f"{h.strip()}\n"
+        l_start = len(full_text)
+        l_end = l_start + len(line)
+        full_text += line
+
+        is_last = (i == len(headlines) - 1)
+        hl_style: dict = {
+            "namedStyleType": "NORMAL_TEXT",
+            "lineSpacing": 100,
+            "direction": "LEFT_TO_RIGHT",
+            "keepLinesTogether": True,
+        }
+        hl_fields = "namedStyleType,lineSpacing,direction,keepLinesTogether"
+        if not is_last:
+            hl_style["keepWithNext"] = True
+            hl_fields += ",keepWithNext"
+
+        p_styles.append({
+            "start": l_start,
+            "end": l_end,
+            "style": hl_style,
+            "fields": hl_fields,
+        })
+        t_styles.append({
+            "start": l_start,
+            "end": l_end,
+            "style": {
+                "fontSize": {"magnitude": 11, "unit": "PT"},
+                "weightedFontFamily": {"fontFamily": "Tahoma", "weight": 400},
+            },
+            "fields": "fontSize,weightedFontFamily",
+        })
+
+        if rich_runs_list and i < len(rich_runs_list):
+            for rr in rich_runs_list[i]:
+                st = rr.get("style", {})
+                if st:
+                    t_styles.append({
+                        "start": l_start + rr["start"],
+                        "end": l_start + rr["end"],
+                        "style": st,
+                        "fields": ",".join(st.keys()),
+                    })
+
+    # 4. End spacer paragraph
+    sp2_start = len(full_text)
+    full_text += "\n"
+    sp2_end = len(full_text)
+    p_styles.append({
+        "start": sp2_start,
+        "end": sp2_end,
+        "style": {
+            "namedStyleType": "NORMAL_TEXT",
+            "lineSpacing": 100,
+            "direction": "LEFT_TO_RIGHT",
+            "keepLinesTogether": True,
+        },
+        "fields": "namedStyleType,lineSpacing,direction,keepLinesTogether",
+    })
+
+    reqs: list[dict] = []
+
+    # Optional deletion of old day's block
+    if delete_range and delete_range[1] > delete_range[0]:
+        d_rg = {"startIndex": delete_range[0], "endIndex": delete_range[1]}
+        if tab_id:
+            d_rg["tabId"] = tab_id
+        reqs.append({"deleteContentRange": {"range": d_rg}})
+
+    # Insert day block text
+    loc: dict = {"index": insert_index}
+    if tab_id:
+        loc["tabId"] = tab_id
+    reqs.append({"insertText": {"location": loc, "text": full_text}})
+
+    # Apply paragraph styles
+    for ps in p_styles:
+        rg = {"startIndex": insert_index + ps["start"], "endIndex": insert_index + ps["end"]}
+        if tab_id:
+            rg["tabId"] = tab_id
+        reqs.append({
+            "updateParagraphStyle": {
+                "range": rg,
+                "paragraphStyle": ps["style"],
+                "fields": ps["fields"],
+            }
+        })
+
+    # Apply text styles
+    for ts in t_styles:
+        rg = {"startIndex": insert_index + ts["start"], "endIndex": insert_index + ts["end"]}
+        if tab_id:
+            rg["tabId"] = tab_id
+        reqs.append({
+            "updateTextStyle": {
+                "range": rg,
+                "textStyle": ts["style"],
+                "fields": ts["fields"],
+            }
+        })
+
+    return reqs, full_text
 
 
 def find_default_monthly_rundown_doc(target_date: datetime.date) -> dict | None:
@@ -879,12 +1272,16 @@ def preview_rundown_fill(doc_id: str, monthly_doc_id: str | None = None) -> dict
     if not monthly_info:
         _fatal(f"Monthly compilation doc for {format_thai_western(date_obj)} not found — provide target monthly_doc_id")
 
-    m_doc = _api("GET", f"https://docs.googleapis.com/v1/documents/{monthly_info['id']}")
-    full_text = "".join(
-        "".join(e.get("textRun", {}).get("content", "") for e in el.get("paragraph", {}).get("elements", []))
-        for el in m_doc.get("body", {}).get("content", []) if "paragraph" in el
-    )
-    existing_blocks = parse_monthly_doc_text(full_text)
+    m_doc = _api("GET", f"https://docs.googleapis.com/v1/documents/{monthly_info['id']}", params={"includeTabsContent": "true"})
+    tabs = m_doc.get("tabs", [])
+    if tabs:
+        content = tabs[0].get("documentTab", {}).get("body", {}).get("content", [])
+        if not content:
+            content = tabs[0].get("body", {}).get("content", [])
+    else:
+        content = m_doc.get("body", {}).get("content", [])
+
+    existing_blocks = parse_monthly_doc_blocks(content)
     existing_dates = [b["date"].isoformat() for b in existing_blocks]
     action = "replace" if daily["date"] in existing_dates else "insert"
 
@@ -902,7 +1299,7 @@ def preview_rundown_fill(doc_id: str, monthly_doc_id: str | None = None) -> dict
 
 
 def execute_rundown_fill(doc_id: str, monthly_doc_id: str | None = None, dry_run: bool = False) -> dict:
-    """Extract daily rundown and write/replace day's block in monthly compilation doc."""
+    """Extract daily rundown and write/replace day's block in monthly compilation doc with formatting preserved."""
     prev = preview_rundown_fill(doc_id, monthly_doc_id)
     if dry_run:
         return prev
@@ -912,44 +1309,57 @@ def execute_rundown_fill(doc_id: str, monthly_doc_id: str | None = None, dry_run
     daily = prev["daily_doc"]
     date_obj = datetime.date.fromisoformat(daily["date"])
 
-    m_doc = _api("GET", f"https://docs.googleapis.com/v1/documents/{m_id}")
-    body = m_doc.get("body", {})
-    content = body.get("content", [])
-    end_idx = content[-1]["endIndex"] if content else 1
+    m_doc = _api("GET", f"https://docs.googleapis.com/v1/documents/{m_id}", params={"includeTabsContent": "true"})
+    tabs = m_doc.get("tabs", [])
+    if tabs:
+        tab = tabs[0]
+        tab_id = tab.get("tabProperties", {}).get("tabId")
+        content = tab.get("documentTab", {}).get("body", {}).get("content", [])
+        if not content:
+            content = tab.get("body", {}).get("content", [])
+    else:
+        tab_id = None
+        content = m_doc.get("body", {}).get("content", [])
 
-    full_text = "".join(
-        "".join(e.get("textRun", {}).get("content", "") for e in el.get("paragraph", {}).get("elements", []))
-        for el in content if "paragraph" in el
-    )
-    existing_blocks = parse_monthly_doc_text(full_text)
+    doc_end_idx = content[-1]["endIndex"] if content else 1
 
-    new_block = {
-        "date": date_obj,
-        "header": daily["header"],
-        "headlines": daily["headlines"],
-    }
+    existing_blocks = parse_monthly_doc_blocks(content)
 
     action = "inserted"
-    found = False
-    for i, b in enumerate(existing_blocks):
-        if b["date"] == date_obj:
-            existing_blocks[i] = new_block
-            found = True
-            action = "replaced"
-            break
-    if not found:
-        existing_blocks.append(new_block)
+    del_range = None
+    insert_index = 1
 
-    new_text = format_monthly_doc_text(existing_blocks)
+    matched = [b for b in existing_blocks if b["date"] == date_obj]
+    if matched:
+        action = "replaced"
+        m_block = matched[0]
+        del_start = m_block["startIndex"]
+        del_end = min(m_block["endIndex"], max(del_start, doc_end_idx - 1))
+        del_range = (del_start, del_end)
+        insert_index = del_start
+    else:
+        action = "inserted"
+        later_blocks = [b for b in existing_blocks if b["date"] > date_obj]
+        if later_blocks:
+            insert_index = later_blocks[0]["startIndex"]
+        elif existing_blocks:
+            insert_index = min(existing_blocks[-1]["endIndex"], max(1, doc_end_idx - 1))
+        else:
+            insert_index = 1
 
-    requests = []
-    if end_idx > 2:
-        requests.append({"deleteContentRange": {"range": {"startIndex": 1, "endIndex": end_idx - 1}}})
-    if new_text:
-        requests.append({"insertText": {"location": {"index": 1}, "text": new_text}})
+    requests, _ = build_day_block_requests(
+        header_str=daily["header"],
+        headlines=daily["headlines"],
+        rich_runs_list=daily.get("rich_runs", []),
+        insert_index=insert_index,
+        tab_id=tab_id,
+        delete_range=del_range,
+    )
 
     if requests:
         _api("POST", f"https://docs.googleapis.com/v1/documents/{m_id}:batchUpdate", body={"requests": requests})
+
+    total_days = len(existing_blocks) if action == "replaced" else (len(existing_blocks) + 1)
 
     return {
         "success": True,
@@ -962,7 +1372,258 @@ def execute_rundown_fill(doc_id: str, monthly_doc_id: str | None = None, dry_run
             "name": target["name"],
             "url": target["url"],
             "action": action,
-            "total_days": len(existing_blocks),
+            "total_days": total_days,
+        },
+    }
+
+
+def parse_month_year_params(
+    yyyymm: str | int | None = None,
+    fy_be_val: str | int | None = None,
+    month_val: str | int | None = None,
+    year_val: str | int | None = None,
+) -> tuple[int, int]:
+    """Resolve CE year (int) and month (1-12) from various parameter schemes."""
+    if yyyymm:
+        s = str(yyyymm).strip().replace("-", "").replace("/", "")
+        if len(s) == 6 and s.isdigit():
+            y = int(s[:4])
+            m = int(s[4:])
+            if y > 2400:
+                y -= 543
+            if 1 <= m <= 12:
+                return y, m
+        _fatal(f"invalid yyyymm: '{yyyymm}' — use YYYYMM (e.g. 202608)")
+
+    if fy_be_val is not None and month_val is not None:
+        try:
+            fy = int(str(fy_be_val).strip())
+        except ValueError:
+            _fatal(f"invalid fiscal year: '{fy_be_val}'")
+        m_str = str(month_val).strip()
+        if m_str.isdigit():
+            m = int(m_str)
+        else:
+            m = MONTH_MAP_EN.get(m_str.upper(), MONTH_MAP_TH.get(m_str, 0))
+        if not (1 <= m <= 12):
+            _fatal(f"invalid month: '{month_val}'")
+        ce_y = (fy - 543) - (1 if m >= 10 else 0)
+        return ce_y, m
+
+    if month_val is not None:
+        m_str = str(month_val).strip().replace("-", "").replace("/", "")
+        if len(m_str) == 6 and m_str.isdigit():
+            return parse_month_year_params(yyyymm=m_str)
+        if year_val is not None:
+            try:
+                y = int(str(year_val).strip())
+                if y > 2400:
+                    y -= 543
+            except ValueError:
+                _fatal(f"invalid year: '{year_val}'")
+            if m_str.isdigit():
+                m = int(m_str)
+            else:
+                m = MONTH_MAP_EN.get(m_str.upper(), MONTH_MAP_TH.get(m_str, 0))
+            if 1 <= m <= 12:
+                return y, m
+        now = datetime.date.today()
+        m = int(m_str) if m_str.isdigit() else MONTH_MAP_EN.get(m_str.upper(), MONTH_MAP_TH.get(m_str, 0))
+        if 1 <= m <= 12:
+            return now.year, m
+        _fatal(f"invalid month: '{month_val}'")
+
+    _fatal("yyyymm (e.g. 202608) or fy_be+month required")
+    raise ValueError("Invalid parameters")
+
+
+def find_matching_daily_docs_for_month(year: int, month: int) -> list[dict]:
+    """Find available daily 'NL & NWB DDMMYY' docs for that month from Google Drive.
+    Filters by DDMMYY matching target month and excludes weekends (Mon-Fri weekdays only).
+    """
+    target_mm = f"{month:02d}"
+    target_yy_ce = f"{year % 100:02d}"
+    target_yy_be = f"{(year + 543) % 100:02d}"
+
+    files: list[dict] = []
+    page = None
+    while True:
+        params = {
+            "q": "name contains 'NL' and mimeType='application/vnd.google-apps.document' and trashed=false",
+            "fields": "nextPageToken,files(id,name,modifiedTime,webViewLink)",
+            "supportsAllDrives": "true",
+            "includeItemsFromAllDrives": "true",
+            "pageSize": "100",
+        }
+        if page:
+            params["pageToken"] = page
+        data = _api("GET", DRIVE, params=params)
+        files.extend(data.get("files", []))
+        page = data.get("nextPageToken")
+        if not page or len(files) >= 300:
+            break
+
+    matched: list[dict] = []
+    seen_dates: set[datetime.date] = set()
+
+    for f in files:
+        fname = f.get("name", "").strip()
+        m = re.search(r'(\d{2})(\d{2})(\d{2})', fname)
+        if not m:
+            continue
+        d_s, m_s, y_s = m.group(1), m.group(2), m.group(3)
+        if m_s != target_mm:
+            continue
+        if y_s != target_yy_ce and y_s != target_yy_be:
+            continue
+        try:
+            d_i = int(d_s)
+            d_obj = datetime.date(year, month, d_i)
+        except ValueError:
+            continue
+
+        if d_obj.weekday() >= 5:
+            continue
+
+        if d_obj in seen_dates:
+            continue
+        seen_dates.add(d_obj)
+
+        matched.append({
+            "id": f["id"],
+            "name": fname,
+            "url": f.get("webViewLink", f"https://docs.google.com/document/d/{f['id']}/edit"),
+            "date": d_obj,
+            "date_iso": d_obj.isoformat(),
+            "date_display": format_thai_western(d_obj),
+            "day": d_i,
+            "modified": f.get("modifiedTime", ""),
+        })
+
+    matched.sort(key=lambda x: x["date"])
+    return matched
+
+
+def preview_month_rundown_fill(year: int, month: int, monthly_doc_id: str | None = None) -> dict:
+    """Preview all matching daily docs and planned insertions/replacements for the whole month."""
+    sample_date = datetime.date(year, month, 1)
+    monthly_info = None
+
+    if monthly_doc_id and str(monthly_doc_id).strip():
+        m_id = extract_doc_id(monthly_doc_id)
+        m_meta = _api("GET", f"{DRIVE}/{m_id}", params={"fields": "id,name,webViewLink", "supportsAllDrives": "true"})
+        monthly_info = {
+            "id": m_meta.get("id", m_id),
+            "name": m_meta.get("name", "Target Monthly Doc"),
+            "url": m_meta.get("webViewLink", f"https://docs.google.com/document/d/{m_id}/edit"),
+        }
+    else:
+        monthly_info = find_default_monthly_rundown_doc(sample_date)
+
+    if not monthly_info:
+        _fatal(f"Monthly compilation doc for {THAI_MONTHS[month - 1]} {be_year(year)} not found — provide target monthly_doc_id")
+
+    m_doc = _api("GET", f"https://docs.googleapis.com/v1/documents/{monthly_info['id']}", params={"includeTabsContent": "true"})
+    tabs = m_doc.get("tabs", [])
+    if tabs:
+        content = tabs[0].get("documentTab", {}).get("body", {}).get("content", [])
+        if not content:
+            content = tabs[0].get("body", {}).get("content", [])
+    else:
+        content = m_doc.get("body", {}).get("content", [])
+
+    existing_blocks = parse_monthly_doc_blocks(content)
+    existing_dates = [b["date"].isoformat() for b in existing_blocks]
+
+    matching_docs = find_matching_daily_docs_for_month(year, month)
+    matching_with_actions = []
+    for d in matching_docs:
+        action = "replace" if d["date_iso"] in existing_dates else "insert"
+        matching_with_actions.append({
+            "id": d["id"],
+            "name": d["name"],
+            "url": d["url"],
+            "date": d["date_iso"],
+            "date_iso": d["date_iso"],
+            "date_display": d["date_display"],
+            "day": d["day"],
+            "action": action,
+        })
+
+    return {
+        "dry_run": True,
+        "month": f"{year}{month:02d}",
+        "month_display": f"{THAI_MONTHS[month - 1]} {be_year(year)}",
+        "year": year,
+        "month_num": month,
+        "fy_be": fy_be(year, month),
+        "target_monthly_doc": {
+            **monthly_info,
+            "existing_dates": existing_dates,
+            "total_existing_days": len(existing_blocks),
+        },
+        "matching_docs": matching_with_actions,
+        "counts": {
+            "total_matched": len(matching_docs),
+            "to_insert": sum(1 for d in matching_with_actions if d["action"] == "insert"),
+            "to_replace": sum(1 for d in matching_with_actions if d["action"] == "replace"),
+        },
+    }
+
+
+def execute_month_rundown_fill(year: int, month: int, monthly_doc_id: str | None = None, dry_run: bool = False) -> dict:
+    """Run execute_rundown_fill for each matching daily doc in the target month.
+    Idempotent per day.
+    """
+    prev = preview_month_rundown_fill(year, month, monthly_doc_id)
+    if dry_run:
+        return prev
+
+    target = prev["target_monthly_doc"]
+    m_id = target["id"]
+    matching_docs = prev.get("matching_docs", [])
+
+    days_filled = []
+    days_skipped = []
+
+    for d in matching_docs:
+        try:
+            res = execute_rundown_fill(d["id"], monthly_doc_id=m_id, dry_run=False)
+            days_filled.append({
+                "date": d["date_iso"],
+                "date_display": d["date_display"],
+                "doc_id": d["id"],
+                "doc_name": d["name"],
+                "headlines": res.get("headline_count", len(res.get("headlines", []))),
+                "action": res.get("target_monthly_doc", {}).get("action", "inserted"),
+            })
+        except Exception as e:
+            days_skipped.append({
+                "date": d["date_iso"],
+                "doc_id": d["id"],
+                "doc_name": d["name"],
+                "reason": str(e),
+            })
+
+    return {
+        "success": True,
+        "dry_run": False,
+        "month": prev["month"],
+        "month_display": prev["month_display"],
+        "year": year,
+        "month_num": month,
+        "fy_be": prev["fy_be"],
+        "target_monthly_doc": {
+            "id": target["id"],
+            "name": target["name"],
+            "url": target["url"],
+        },
+        "days_filled": days_filled,
+        "days_skipped": days_skipped,
+        "counts": {
+            "total_matched": len(matching_docs),
+            "filled": len(days_filled),
+            "skipped": len(days_skipped),
         },
     }
 
@@ -1170,12 +1831,25 @@ def main(argv=None):
 
     if argv and argv[0] == "rundown":
         p = argparse.ArgumentParser(description="NEWSLINE Rundown extraction and monthly doc fill")
-        p.add_argument("command", nargs="?", choices=["fill", "preview"], default="fill")
-        p.add_argument("--doc-id", required=True, help="Daily doc ID or URL")
+        p.add_argument("command", nargs="?", choices=["fill", "preview", "fill-month", "preview-month"], default="fill")
+        p.add_argument("--doc-id", default=None, help="Daily doc ID or URL")
         p.add_argument("--monthly-doc-id", default=None, help="Target monthly doc ID (optional)")
+        p.add_argument("--month", default=None, help="Target month YYYYMM (e.g. 202608) or month number (1-12)")
+        p.add_argument("--fy-be", default=None, help="Fiscal year BE (e.g. 2569)")
+        p.add_argument("--year", default=None, help="CE year (e.g. 2026)")
         p.add_argument("--dry-run", action="store_true", help="Dry run preview mode")
         args = p.parse_args(argv[1:])
-        dry = args.dry_run or args.command == "preview"
+        dry = args.dry_run or args.command in ("preview", "preview-month")
+
+        if args.command in ("fill-month", "preview-month") or (args.month and not args.doc_id):
+            y, m = parse_month_year_params(yyyymm=args.month, fy_be_val=args.fy_be, month_val=args.month, year_val=args.year)
+            res = execute_month_rundown_fill(y, m, monthly_doc_id=args.monthly_doc_id, dry_run=dry)
+            print(json.dumps(res, ensure_ascii=False))
+            return
+
+        if not args.doc_id:
+            _fatal("doc-id is required for single day fill (or use fill-month with --month)")
+
         res = execute_rundown_fill(args.doc_id, args.monthly_doc_id, dry_run=dry)
         print(json.dumps(res, ensure_ascii=False))
         return
