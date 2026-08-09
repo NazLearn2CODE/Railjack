@@ -30,6 +30,7 @@ QUEUE = SCRIPTS / "queue.py"
 APPEND = SCRIPTS / "nl_append.py"
 RADIO = SCRIPTS / "radio.py"
 NEWSLINE = SCRIPTS / "newsline.py"
+NEWSLINE_REPORTS = Path(__file__).parent / "newsline_reports.py" if (Path(__file__).parent / "newsline_reports.py").exists() else SCRIPTS / "newsline_reports.py"
 # The Rules Gem drives REWRITE (news-producer prompt → two-layer broadcast
 # script). ~/Gems is the office canonical copy; home has no ~/Gems, so the
 # vault-synced gem is the source here — _gem_text falls through to it.
@@ -303,6 +304,42 @@ async def api_newsline_generate(body: dict = Body(...)):
     """Real run — copies + stamps every planned daily doc (up to 31 days × 2
     calls: copy + batchUpdate), hence the generous 300s cap."""
     return await _script(_newsline_argv(body) + ["generate"], timeout=300)
+
+
+# ---------------------------------------------------------------- newsline reports
+# Monthly NBT contractor work-report docs generator: Cover doc + Log doc per (period, date-range).
+# `newsline_reports.py` is the contract — this panel builds argv and surfaces `_fatal` (→ 400).
+
+
+def _newsline_reports_argv(body: dict) -> list[str]:
+    """Period, start, and end required. Raises 400 on missing fields."""
+    period = body.get("period")
+    start = body.get("start")
+    end = body.get("end")
+    if period is None or not str(period).strip():
+        raise HTTPException(400, "period required")
+    if start is None or not str(start).strip():
+        raise HTTPException(400, "start date required")
+    if end is None or not str(end).strip():
+        raise HTTPException(400, "end date required")
+    return [
+        PY, str(NEWSLINE_REPORTS),
+        "--period", str(period).strip(),
+        "--start", str(start).strip(),
+        "--end", str(end).strip(),
+    ]
+
+
+@router.post("/api/newsroom/newsline-reports/preview")
+async def api_newsline_reports_preview(body: dict = Body(...)):
+    """Dry-run plan (no writes, pure compute): planned doc filenames + enumerated Mon-Fri Thai-numeral list."""
+    return await _script(_newsline_reports_argv(body) + ["--dry-run", "preview"])
+
+
+@router.post("/api/newsroom/newsline-reports/generate")
+async def api_newsline_reports_generate(body: dict = Body(...)):
+    """Real run — duplicates cover + log templates, fills contents, saves to FY folder. Idempotent."""
+    return await _script(_newsline_reports_argv(body) + ["generate"], timeout=180)
 
 
 # ---------------------------------------------------------------- rewrite

@@ -1079,7 +1079,10 @@ def _df_para(text, start):
 
 def test_df_find_dates_variants():
     df = _load_doc_format()
-    got = lambda s: [m for _, _, m in df.find_dates(s)]
+
+    def got(s):
+        return [m for _, _, m in df.find_dates(s)]
+
     assert got("filed January 5, 2026 in Bangkok") == ["January 5, 2026"]
     assert got("on 5 January the vote held") == ["5 January"]
     assert got("dated 2026-07-28 today") == ["2026-07-28", "today"]
@@ -1302,7 +1305,7 @@ def test_nl_append_emits_bold_and_underline_spans(monkeypatch):
             doc_posted.append(body)
         return {}
 
-    monkeypatch.setattr(nl, "nl_tab", fake_nl_tab)
+    monkeypatch.setattr(nl, "find_tab", lambda *a, **k: ("t.0", 100))
     monkeypatch.setattr(nl, "api", fake_api)
 
     # Text with both **bold** name and ~~date~~ marker
@@ -1345,7 +1348,7 @@ def test_nl_append_bold_after_underline_aligns(monkeypatch):
     marker bolded the wrong span. parse_markers (single pass) fixes it."""
     nl = _load_nl_append()
     posted = []
-    monkeypatch.setattr(nl, "nl_tab", lambda tok, doc_id: ("t.0", 100))
+    monkeypatch.setattr(nl, "find_tab", lambda tok, doc_id, *a: ("t.0", 100))
     monkeypatch.setattr(
         nl, "api",
         lambda method, url, tok, body=None: (posted.append(body), {})[1],
@@ -1384,7 +1387,7 @@ def test_nl_append_marker_date_not_doubled_by_backstop(monkeypatch):
     nl = _load_nl_append()
     doc_posted = []
 
-    monkeypatch.setattr(nl, "nl_tab", lambda *a: ("t.0", 100))
+    monkeypatch.setattr(nl, "find_tab", lambda *a, **k: ("t.0", 100))
     monkeypatch.setattr(nl, "api",
                         lambda m, u, t, body=None: doc_posted.append(body) or {})
 
@@ -1768,3 +1771,206 @@ def test_annotate_infographics_empty_picks_is_identity():
     """Zero qualifying paragraphs is a valid result — the script must come back unchanged."""
     from app.newsroom import _annotate_infographics
     assert _annotate_infographics(_INFO_SCRIPT, []) == _INFO_SCRIPT
+
+
+# ---------------------------------------------------------------- newsline reports
+
+
+def _load_newsline_reports():
+    import importlib.util
+
+    for p in (
+        Path(__file__).parent.parent / "app" / "newsline_reports.py",
+        newsroom.SCRIPTS / "newsline_reports.py",
+        Path.home() / ".claude" / "skills" / "newsroom" / "scripts" / "newsline_reports.py",
+    ):
+        if p.exists():
+            spec = importlib.util.spec_from_file_location("newsline_reports_mod", p)
+            mod = importlib.util.module_from_spec(spec)
+            assert spec.loader is not None
+            spec.loader.exec_module(mod)
+            return mod
+    pytest.skip("newsline_reports.py not found")
+
+
+def test_nl_reports_thai_digits_and_dates():
+    nl_rep = _load_newsline_reports()
+    from datetime import date
+    assert nl_rep.to_thai_digits(0) == "๐"
+    assert nl_rep.to_thai_digits(123456789) == "๑๒๓๔๕๖๗๘๙"
+    assert nl_rep.be_year(2026) == 2569
+    assert nl_rep.format_thai_western(date(2026, 8, 21)) == "21 สิงหาคม 2569"
+    assert nl_rep.format_thai_numerals(date(2026, 8, 21)) == "๒๑ สิงหาคม ๒๕๖๙"
+
+
+def test_nl_reports_fy_be_derivation():
+    nl_rep = _load_newsline_reports()
+    # Before Oct 1 (Jan-Sep) -> CE + 543
+    assert nl_rep.fy_be(2026, 1) == 2569
+    assert nl_rep.fy_be(2026, 8) == 2569
+    assert nl_rep.fy_be(2026, 9) == 2569
+    # On or after Oct 1 (Oct-Dec) -> CE + 543 + 1
+    assert nl_rep.fy_be(2026, 10) == 2570
+    assert nl_rep.fy_be(2026, 11) == 2570
+    assert nl_rep.fy_be(2026, 12) == 2570
+
+
+def test_nl_reports_filename_period_prefix():
+    nl_rep = _load_newsline_reports()
+    from datetime import date
+    # Period 11, August 2026
+    c_name = nl_rep.cover_doc_name(11, date(2026, 8, 1), date(2026, 8, 31))
+    l_name = nl_rep.log_doc_name(11, date(2026, 8, 1), date(2026, 8, 31))
+    assert c_name == "11 ใบรายงานผลการปฏิบัติงาน แบบ QR Code สิงหาคม 2569 ณอรรฆย์ โรจนสุวรรณ.docx"
+    assert l_name == "11 รายงานผลการปฏิบัติงาน สิงหาคม 2569.docx"
+    assert c_name.startswith("11 ")
+    assert l_name.startswith("11 ")
+
+    # String period and whitespace strip
+    c_name_str = nl_rep.cover_doc_name(" 5 ", date(2026, 8, 1), date(2026, 8, 31))
+    l_name_str = nl_rep.log_doc_name(" 5 ", date(2026, 8, 1), date(2026, 8, 31))
+    assert c_name_str == "5 ใบรายงานผลการปฏิบัติงาน แบบ QR Code สิงหาคม 2569 ณอรรฆย์ โรจนสุวรรณ.docx"
+    assert l_name_str == "5 รายงานผลการปฏิบัติงาน สิงหาคม 2569.docx"
+
+
+def test_nl_reports_build_plan_aug2026():
+    nl_rep = _load_newsline_reports()
+    from datetime import date
+    plan = nl_rep.build_plan(5, date(2026, 8, 1), date(2026, 8, 31))
+    assert plan["period"] == "5"
+    assert plan["fy_be"] == 2569
+    assert plan["weekday_count"] == 21
+    assert plan["cover_filename"] == "5 ใบรายงานผลการปฏิบัติงาน แบบ QR Code สิงหาคม 2569 ณอรรฆย์ โรจนสุวรรณ.docx"
+    assert plan["log_filename"] == "5 รายงานผลการปฏิบัติงาน สิงหาคม 2569.docx"
+    # First Mon-Fri in Aug 2026 is Mon Aug 3 (Aug 1=Sat, Aug 2=Sun)
+    assert plan["rows"][0] == "๓ สิงหาคม ๒๕๖๙  รายการ NEWSLINE"
+    assert plan["rows"][-1] == "๓๑ สิงหาคม ๒๕๖๙  รายการ NEWSLINE"
+    assert len(plan["rows"]) == 21
+
+
+def test_nl_reports_preview_makes_no_network_writes(monkeypatch, capsys):
+    nl_rep = _load_newsline_reports()
+
+    def boom(*a, **k):
+        raise AssertionError("preview touched a write path")
+
+    monkeypatch.setattr(nl_rep, "google_token", boom)
+    monkeypatch.setattr(nl_rep, "create_folder", boom)
+    monkeypatch.setattr(nl_rep, "copy_file", boom)
+    monkeypatch.setattr(nl_rep, "upload_media", boom)
+    monkeypatch.setattr(
+        nl_rep, "find_or_create_fy_folder",
+        lambda root_id, fy, dry=False: ("FY_FOLDER_ID", f"งบประมาณ {fy}", False),
+    )
+
+    nl_rep.main(["--period", "5", "--start", "2026-08-01", "--end", "2026-08-31", "--dry-run"])
+    out = json.loads(capsys.readouterr().out)
+    assert out["dry_run"] is True
+    assert out["fy_be"] == 2569
+    assert out["period"] == "5"
+    assert out["weekday_count"] == 21
+    assert len(out["rows"]) == 21
+    assert out["created"] == []
+    assert out["cover"]["name"] == "5 ใบรายงานผลการปฏิบัติงาน แบบ QR Code สิงหาคม 2569 ณอรรฆย์ โรจนสุวรรณ.docx"
+    assert out["log"]["name"] == "5 รายงานผลการปฏิบัติงาน สิงหาคม 2569.docx"
+
+
+def test_nl_reports_generate_idempotent_skips_duplicates(monkeypatch, capsys):
+    nl_rep = _load_newsline_reports()
+
+    monkeypatch.setattr(
+        nl_rep, "find_or_create_fy_folder",
+        lambda root_id, fy, dry=False: ("FY_ID", f"งบประมาณ {fy}", False),
+    )
+    # Both cover and log already exist in the folder
+    monkeypatch.setattr(
+        nl_rep, "find_existing_files",
+        lambda fid: [
+            {"id": "c1", "name": "5 ใบรายงานผลการปฏิบัติงาน แบบ QR Code สิงหาคม 2569 ณอรรฆย์ โรจนสุวรรณ.docx", "webViewLink": "http://cover"},
+            {"id": "l1", "name": "5 รายงานผลการปฏิบัติงาน สิงหาคม 2569.docx", "webViewLink": "http://log"},
+        ],
+    )
+
+    def boom(*a, **k):
+        raise AssertionError("idempotent generate attempted to write")
+
+    monkeypatch.setattr(nl_rep, "copy_file", boom)
+    monkeypatch.setattr(nl_rep, "upload_media", boom)
+
+    nl_rep.main(["--period", "5", "--start", "2026-08-01", "--end", "2026-08-31", "generate"])
+    out = json.loads(capsys.readouterr().out)
+    assert out["dry_run"] is False
+    assert out["idempotent"] is True
+    assert out["cover"] == {"id": "c1", "name": "5 ใบรายงานผลการปฏิบัติงาน แบบ QR Code สิงหาคม 2569 ณอรรฆย์ โรจนสุวรรณ.docx", "url": "http://cover"}
+    assert out["log"] == {"id": "l1", "name": "5 รายงานผลการปฏิบัติงาน สิงหาคม 2569.docx", "url": "http://log"}
+    assert len(out["skipped"]) == 2
+    assert out["created"] == []
+
+
+def test_nl_reports_fill_cover_xml():
+    nl_rep = _load_newsline_reports()
+    from datetime import date
+    sample_xml = """<?xml version="1.0" encoding="UTF-8"?>
+    <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+      <w:body>
+        <w:p>
+          <w:r><w:t>รายงานผลการปฏิบัติงานประจำ งวดที่....</w:t></w:r>
+          <w:r><w:t>X</w:t></w:r>
+          <w:r><w:t>......ระหว่างวันที่....</w:t></w:r>
+        </w:p>
+      </w:body>
+    </w:document>""".encode("utf-8")
+    filled = nl_rep.fill_cover_xml(sample_xml, 11, date(2026, 8, 1), date(2026, 8, 31)).decode("utf-8")
+    assert "รายงานผลการปฏิบัติงานประจำ งวดที่....11......ระหว่างวันที่....1 สิงหาคม 2569 – 31 สิงหาคม 2569....." in filled
+
+
+def test_nl_reports_fill_log_xml():
+    nl_rep = _load_newsline_reports()
+    from datetime import date
+    sample_xml = """<?xml version="1.0" encoding="UTF-8"?>
+    <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+      <w:body>
+        <w:p><w:r><w:t>รายงานผลการปฏิบัติงานงวดที่ X ปีงบประมาณ 256X</w:t></w:r></w:p>
+        <w:p><w:r><w:t>ชื่อ-สกุลนายณอรรฆย์ โรจนสุวรรณ</w:t></w:r></w:p>
+        <w:p><w:r><w:t>ตั้งแต่วันที่ ๑ ตุลาคม - ๒๐ ตุลาคม ๒๕๖๘</w:t></w:r></w:p>
+        <w:p><w:r><w:t>วันที่ ๑ ตุลาคม ๒๕๖๘</w:t></w:r></w:p>
+        <w:p><w:r><w:t>รายการ NEWSLINE</w:t></w:r></w:p>
+      </w:body>
+    </w:document>""".encode("utf-8")
+    weekdays = [date(2026, 8, 3), date(2026, 8, 4)]
+    filled = nl_rep.fill_log_xml(sample_xml, 11, date(2026, 8, 1), date(2026, 8, 31), weekdays).decode("utf-8")
+    assert "รายงานผลการปฏิบัติงานงวดที่ ๑๑ ปีงบประมาณ ๒๕๖๙" in filled
+    assert "ตั้งแต่วันที่ ๑ สิงหาคม ๒๕๖๙ - ๓๑ สิงหาคม ๒๕๖๙" in filled
+    assert "วันที่ ๓ สิงหาคม ๒๕๖๙" in filled
+    assert "วันที่ ๔ สิงหาคม ๒๕๖๙" in filled
+    assert "รายการ NEWSLINE" in filled
+
+
+def test_nl_reports_preview_and_generate_routes(monkeypatch):
+    c, calls = _client(monkeypatch, out=b'{"dry_run": true}')
+    r_prev = c.post(
+        "/api/newsroom/newsline-reports/preview",
+        json={"period": 5, "start": "2026-08-01", "end": "2026-08-31"},
+    )
+    assert r_prev.status_code == 200
+    argv = calls[0]
+    assert argv[0] == "python3"
+    assert argv[1].endswith("newsline_reports.py")
+    assert argv[2:8] == ["--period", "5", "--start", "2026-08-01", "--end", "2026-08-31"]
+    assert "--dry-run" in argv
+
+    c2, calls2 = _client(monkeypatch, out=b'{"created": []}')
+    r_gen = c2.post(
+        "/api/newsroom/newsline-reports/generate",
+        json={"period": "11", "start": "2026-08-01", "end": "2026-08-31"},
+    )
+    assert r_gen.status_code == 200
+    argv2 = calls2[0]
+    assert "--dry-run" not in argv2
+    assert argv2[-1] == "generate"
+
+    # Missing fields -> 400
+    assert c.post("/api/newsroom/newsline-reports/preview", json={"start": "2026-08-01", "end": "2026-08-31"}).status_code == 400
+    assert c.post("/api/newsroom/newsline-reports/preview", json={"period": 5, "end": "2026-08-31"}).status_code == 400
+    assert c.post("/api/newsroom/newsline-reports/preview", json={"period": 5, "start": "2026-08-01"}).status_code == 400
+

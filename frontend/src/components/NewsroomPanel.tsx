@@ -182,6 +182,47 @@ interface NewslineResponse {
   _fatal?: string;
 }
 
+interface NewslineReportsResponse {
+  dry_run?: boolean;
+  idempotent?: boolean;
+  period?: string | number;
+  fy_be?: number;
+  start?: string;
+  end?: string;
+  start_display?: string;
+  end_display?: string;
+  start_display_th?: string;
+  end_display_th?: string;
+  cover_filename?: string;
+  log_filename?: string;
+  weekday_count?: number;
+  rows?: string[];
+  folder?: {
+    id?: string;
+    name?: string;
+    created?: boolean;
+  };
+  cover?: {
+    id?: string;
+    name?: string;
+    url?: string;
+    template_id?: string;
+  };
+  log?: {
+    id?: string;
+    name?: string;
+    url?: string;
+    template_id?: string;
+  };
+  created?: Array<{
+    id?: string;
+    name?: string;
+    url?: string;
+  }>;
+  skipped?: string[];
+  _fatal?: string;
+}
+
 interface NewsDoc {
   id: string;
   name: string;
@@ -420,7 +461,7 @@ function DocPicker({
 }
 
 export default function NewsroomPanel({ module: _module }: { module: ModuleConfig }) {
-  const [tab, setTab] = useState<"queue" | "docgen" | "radio">("queue");
+  const [tab, setTab] = useState<"queue" | "docgen" | "radio" | "reports">("queue");
   const [queue, setQueue] = useState<Queue | null>(null);
   const [selected, setSelected] = useState<Story | null>(null);
   const [sendText, setSendText] = useState("");
@@ -454,6 +495,17 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
   const [nlGenResult, setNlGenResult] = useState<NewslineResponse | null>(null);
   const [nlGenLoading, setNlGenLoading] = useState<boolean>(false);
   const [nlGenGenerating, setNlGenGenerating] = useState<boolean>(false);
+
+  // NEWSLINE Reports state (contractor work-report cover + log generator)
+  const defaultStartStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-01`;
+  const defaultEndStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate()).padStart(2, "0")}`;
+  const [repPeriod, setRepPeriod] = useState<string>("5");
+  const [repStart, setRepStart] = useState<string>(defaultStartStr);
+  const [repEnd, setRepEnd] = useState<string>(defaultEndStr);
+  const [repPreview, setRepPreview] = useState<NewslineReportsResponse | null>(null);
+  const [repResult, setRepResult] = useState<NewslineReportsResponse | null>(null);
+  const [repLoading, setRepLoading] = useState<boolean>(false);
+  const [repGenerating, setRepGenerating] = useState<boolean>(false);
 
   // RADIO News Fill state — folder browser (RT-2026 → month → day)
   const RRT_PARENT = "1LSw5NwDhwg7PE9pJUO6jKPcd3yFBCOI9";
@@ -643,6 +695,64 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setNlGenGenerating(false);
+    }
+  };
+
+  const handleReportsPreview = async () => {
+    if (!repPeriod.trim() || !repStart || !repEnd) return;
+    setRepLoading(true);
+    setError(null);
+    setRepPreview(null);
+    setRepResult(null);
+    try {
+      const res = await fetch("/api/newsroom/newsline-reports/preview", {
+        method: "POST",
+        headers: CT,
+        body: JSON.stringify({
+          period: repPeriod.trim(),
+          start: repStart,
+          end: repEnd,
+        }),
+      });
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({ detail: res.statusText }));
+        setError(typeof d.detail === "string" ? d.detail : JSON.stringify(d.detail));
+      } else {
+        const data: NewslineReportsResponse = await res.json();
+        setRepPreview(data);
+      }
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setRepLoading(false);
+    }
+  };
+
+  const handleReportsGenerate = async () => {
+    if (!repPreview || !repPeriod.trim() || !repStart || !repEnd) return;
+    setRepGenerating(true);
+    setError(null);
+    try {
+      const res = await fetch("/api/newsroom/newsline-reports/generate", {
+        method: "POST",
+        headers: CT,
+        body: JSON.stringify({
+          period: repPeriod.trim(),
+          start: repStart,
+          end: repEnd,
+        }),
+      });
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({ detail: res.statusText }));
+        setError(typeof d.detail === "string" ? d.detail : JSON.stringify(d.detail));
+      } else {
+        const data: NewslineReportsResponse = await res.json();
+        setRepResult(data);
+      }
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setRepGenerating(false);
     }
   };
 
@@ -1142,6 +1252,12 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
           onClick={() => setTab("radio")}
         >
           RADIO
+        </button>
+        <button
+          className={`btn btn--compact ${tab === "reports" ? "btn--signal" : ""}`}
+          onClick={() => setTab("reports")}
+        >
+          NEWSLINE REPORTS
         </button>
         {tab === "queue" && (
           <>
@@ -2437,6 +2553,224 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
                 </div>
               )}
             </div>
+          </div>
+        </div>
+      )}
+
+      {tab === "reports" && (
+        <div className="hud hud--bracket reveal reveal-1 flex min-h-0 flex-1 flex-col gap-3 p-3">
+          <span className="label">NEWSLINE REPORTS</span>
+
+          {/* Form controls */}
+          <div className="flex flex-wrap items-center gap-3">
+            <label className="flex items-center gap-1.5 mono text-xs">
+              <span className="label">Period (งวดที่)</span>
+              <input
+                type="text"
+                className="input mono px-2 py-1 text-xs"
+                style={{ width: 80 }}
+                placeholder="e.g. 5"
+                value={repPeriod}
+                onChange={(e) => {
+                  setRepPeriod(e.target.value);
+                  setRepPreview(null);
+                  setRepResult(null);
+                }}
+              />
+            </label>
+
+            <label className="flex items-center gap-1.5 mono text-xs">
+              <span className="label">Start</span>
+              <input
+                type="date"
+                className="input mono px-2 py-1 text-xs"
+                value={repStart}
+                onChange={(e) => {
+                  setRepStart(e.target.value);
+                  setRepPreview(null);
+                  setRepResult(null);
+                }}
+              />
+            </label>
+
+            <label className="flex items-center gap-1.5 mono text-xs">
+              <span className="label">End</span>
+              <input
+                type="date"
+                className="input mono px-2 py-1 text-xs"
+                value={repEnd}
+                onChange={(e) => {
+                  setRepEnd(e.target.value);
+                  setRepPreview(null);
+                  setRepResult(null);
+                }}
+              />
+            </label>
+
+            <div className="ml-auto flex gap-2">
+              <button
+                className="btn btn--compact"
+                onClick={() => void handleReportsPreview()}
+                disabled={repLoading || repGenerating || !repPeriod.trim() || !repStart || !repEnd}
+              >
+                {repLoading ? "PREVIEWING…" : "PREVIEW"}
+              </button>
+              <button
+                className="btn btn--compact btn--signal"
+                onClick={() => void handleReportsGenerate()}
+                disabled={!repPreview || repLoading || repGenerating}
+                title={!repPreview ? "Run PREVIEW first" : "Generate report docs in Google Drive"}
+              >
+                {repGenerating ? "GENERATING…" : "GENERATE"}
+              </button>
+            </div>
+          </div>
+
+          {/* Target Folder & Summary banner */}
+          {(repPreview || repResult) && (
+            <div className="flex flex-col gap-1.5 border border-edge px-3 py-2 text-xs mono" style={{ background: "var(--color-void)" }}>
+              {(repResult?.folder || repPreview?.folder) && (() => {
+                const f = repResult?.folder || repPreview?.folder!;
+                return (
+                  <div className="flex items-center gap-2">
+                    <span className="label" style={{ color: "var(--color-signal)" }}>TARGET FOLDER:</span>
+                    <span style={{ color: "var(--color-phosphor)" }}>{f.name}</span>
+                    {f.id && <span style={{ color: "var(--color-muted)" }}>({f.id})</span>}
+                    {f.created && <span className="label" style={{ color: "var(--color-go)" }}>NEW</span>}
+                  </div>
+                );
+              })()}
+              {(() => {
+                const p = repResult || repPreview!;
+                return (
+                  <div className="flex flex-wrap items-center gap-3 text-xs">
+                    <span className="label">SUMMARY:</span>
+                    <span style={{ color: "var(--color-phosphor-dim)" }}>
+                      FY {p.fy_be} · งวดที่ {p.period} · {p.start_display} – {p.end_display} · {p.weekday_count} weekdays
+                    </span>
+                    {p.idempotent && (
+                      <span className="label" style={{ color: "var(--color-hazard)" }}>
+                        (EXISTING DOCS MATCHED)
+                      </span>
+                    )}
+                  </div>
+                );
+              })()}
+            </div>
+          )}
+
+          {/* Output / Files & Weekday rows list */}
+          <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-auto border border-edge p-2" style={{ background: "var(--color-void)" }}>
+            {repResult ? (
+              <div className="flex flex-col gap-3">
+                <div>
+                  <span className="label mb-1 block" style={{ color: "var(--color-go)" }}>
+                    {repResult.idempotent ? "EXISTING DOCUMENTS REUSED" : "CREATED DOCUMENTS (2)"}
+                  </span>
+                  <div className="flex flex-col gap-1">
+                    {repResult.cover && (
+                      <div className="mono flex items-center gap-2 border-b border-edge-soft py-1 text-xs">
+                        <span className="pip pip--go" />
+                        <span className="label" style={{ color: "var(--color-signal)" }}>[COVER]</span>
+                        <span className="flex-1 truncate" style={{ color: "var(--color-phosphor)" }}>
+                          {repResult.cover.name}
+                        </span>
+                        {repResult.cover.url && (
+                          <a
+                            href={repResult.cover.url}
+                            target="_blank"
+                            rel="noreferrer"
+                            style={{ color: "var(--color-signal)" }}
+                          >
+                            open ↗
+                          </a>
+                        )}
+                      </div>
+                    )}
+                    {repResult.log && (
+                      <div className="mono flex items-center gap-2 border-b border-edge-soft py-1 text-xs">
+                        <span className="pip pip--go" />
+                        <span className="label" style={{ color: "var(--color-signal)" }}>[LOG]</span>
+                        <span className="flex-1 truncate" style={{ color: "var(--color-phosphor)" }}>
+                          {repResult.log.name}
+                        </span>
+                        {repResult.log.url && (
+                          <a
+                            href={repResult.log.url}
+                            target="_blank"
+                            rel="noreferrer"
+                            style={{ color: "var(--color-signal)" }}
+                          >
+                            open ↗
+                          </a>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {repResult.rows && repResult.rows.length > 0 && (
+                  <div className="border-t border-edge-soft pt-2">
+                    <span className="label mb-1 block" style={{ color: "var(--color-phosphor-dim)" }}>
+                      ENUMERATED WEEKDAYS ({repResult.rows.length})
+                    </span>
+                    <div className="flex flex-col gap-0.5" style={{ maxHeight: 200, overflowY: "auto" }}>
+                      {repResult.rows.map((row, idx) => (
+                        <div key={idx} className="mono text-xs py-0.5" style={{ color: "var(--color-phosphor-dim)" }}>
+                          <span style={{ color: "var(--color-muted)", marginRight: 6 }}>{idx + 1}.</span>
+                          {row}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            ) : repPreview ? (
+              <div className="flex flex-col gap-3">
+                <div>
+                  <span className="label mb-1 block" style={{ color: "var(--color-signal)" }}>
+                    PLANNED DOCUMENTS (2)
+                  </span>
+                  <div className="flex flex-col gap-1">
+                    <div className="mono flex items-center gap-2 border-b border-edge-soft py-1 text-xs">
+                      <span className="pip pip--signal" />
+                      <span className="label" style={{ color: "var(--color-signal)" }}>[COVER]</span>
+                      <span className="flex-1 truncate" style={{ color: "var(--color-phosphor-dim)" }}>
+                        {repPreview.cover_filename}
+                      </span>
+                    </div>
+                    <div className="mono flex items-center gap-2 border-b border-edge-soft py-1 text-xs">
+                      <span className="pip pip--signal" />
+                      <span className="label" style={{ color: "var(--color-signal)" }}>[LOG]</span>
+                      <span className="flex-1 truncate" style={{ color: "var(--color-phosphor-dim)" }}>
+                        {repPreview.log_filename}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                {repPreview.rows && repPreview.rows.length > 0 && (
+                  <div className="border-t border-edge-soft pt-2">
+                    <span className="label mb-1 block" style={{ color: "var(--color-signal)" }}>
+                      PLAN TO ENUMERATE ({repPreview.weekday_count} WEEKDAYS — THAI NUMERALS)
+                    </span>
+                    <div className="flex flex-col gap-0.5" style={{ maxHeight: 250, overflowY: "auto" }}>
+                      {repPreview.rows.map((row, idx) => (
+                        <div key={idx} className="mono text-xs py-0.5 flex items-center gap-2" style={{ color: "var(--color-phosphor-dim)" }}>
+                          <span className="pip pip--signal" />
+                          <span style={{ color: "var(--color-muted)", minWidth: 20 }}>{idx + 1}.</span>
+                          <span>{row}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="flex flex-1 items-center justify-center">
+                <span className="label">— Enter period & date range, then click PREVIEW —</span>
+              </div>
+            )}
           </div>
         </div>
       )}
