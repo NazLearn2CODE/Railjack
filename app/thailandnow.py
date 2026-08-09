@@ -14,6 +14,7 @@ one place we call z.ai). See docs/thailandnow-plan.md.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import os
 import re
@@ -35,6 +36,27 @@ from .config import CONFIG
 from .zai import zai_message
 
 router = APIRouter()
+
+_WP_SECRETS = Path.home() / "n8n" / ".secrets.env"
+_RAILJACK_ENV = Path.home() / ".config" / "railjack" / "env"
+
+
+def _secret(key: str) -> str | None:
+    """Read a secret: env first, then ~/.config/railjack/env, then ~/n8n/.secrets.env
+    (KEY=value lines; values may be unquoted-with-spaces — split on first '=' + strip outer
+    whitespace only, embedded spaces survive). Mirrors zai._resolve_key(); no shell-out."""
+    v = os.environ.get(key)
+    if v:
+        return v
+    for env_path in (_RAILJACK_ENV, _WP_SECRETS, Path("/home/NAZ/n8n/.secrets.env")):
+        if env_path.is_file():
+            for line in env_path.read_text().splitlines():
+                line = line.strip()
+                if line.startswith(f"{key}="):
+                    val = line.split("=", 1)[1].strip().strip("'\"")
+                    if val:
+                        return val
+    return None
 
 
 def _opts() -> dict:
@@ -335,11 +357,24 @@ async def _google_create_doc(token: str, folder_id: str, name: str, body: str) -
 
 
 def _trello_creds() -> tuple[str, str]:
-    key = os.environ.get("TRELLO_KEY", "")
-    tok = os.environ.get("TRELLO_TOKEN", "")
+    trello_json_path = Path.home() / ".config" / "railjack" / "trello.json"
+    if trello_json_path.is_file():
+        try:
+            data = json.loads(trello_json_path.read_text())
+            key = data.get("key") or data.get("api_key") or data.get("trello_key") or ""
+            tok = data.get("token") or data.get("trello_token") or ""
+            if key and tok:
+                return str(key).strip(), str(tok).strip()
+        except Exception:
+            pass
+    key = _secret("TRELLO_KEY") or os.environ.get("TRELLO_KEY", "")
+    tok = _secret("TRELLO_TOKEN") or os.environ.get("TRELLO_TOKEN", "")
     if not key or not tok:
-        raise HTTPException(503, "TRELLO_KEY/TRELLO_TOKEN not in the service env")
-    return key, tok
+        raise HTTPException(
+            503,
+            "TRELLO_KEY/TRELLO_TOKEN not configured (set ~/.config/railjack/trello.json, env, or secrets)",
+        )
+    return key.strip(), tok.strip()
 
 
 async def _trello(method: str, path: str, params: dict | None = None, body: dict | None = None):
@@ -2184,6 +2219,19 @@ async def _drive_read_doc(token: str, doc_id: str) -> str:
         return r.text
 
 
+async def _drive_read_doc_html(token: str, doc_id: str) -> str:
+    """Export a Google Doc as HTML (mimeType=text/html). Returns empty string if export fails."""
+    hdr = {"Authorization": f"Bearer {token}"}
+    async with httpx.AsyncClient(timeout=30) as c:
+        r = await c.get(
+            f"https://www.googleapis.com/drive/v3/files/{doc_id}/export",
+            headers=hdr, params={"mimeType": "text/html"},
+        )
+        if r.status_code != 200:
+            return ""
+        return r.text
+
+
 def _archive_tokenize(text: str) -> set[str]:
     """Lowercase alnum tokens ≥2 chars. Strips [], quotes — only alnum runs survive."""
     return {t for t in re.findall(r"[a-z0-9]+", text.lower()) if len(t) >= 2}
@@ -2334,7 +2382,6 @@ async def archive_ask(payload: dict = Body(default={})):
 # post/page/media sets (no fetching of thailandnow.in.th pages → Sucuri-proof);
 # only external links/images need real HTTP checks (S2).
 
-_WP_SECRETS = Path("/home/NAZ/n8n/.secrets.env")
 # WP-generated archive/asset paths — an internal href into one of these is NOT a
 # broken post link even though it isn't a post/page URL.
 _WP_ARCHIVE_PREFIXES = (
@@ -2350,35 +2397,43 @@ _SEO_STOP = {  # generic + site words, stripped for orphan-suggestion token over
 }
 
 
-def _secret(key: str) -> str | None:
-    """Read a secret: env first, then /home/NAZ/n8n/.secrets.env (``KEY=value``
-    lines; values may be unquoted-with-spaces — split on first '=' + strip outer
-    whitespace only, embedded spaces survive). Mirrors zai._resolve_key(); no
-    shell-out."""
-    v = os.environ.get(key)
-    if v:
-        return v
-    if _WP_SECRETS.is_file():
-        for line in _WP_SECRETS.read_text().splitlines():
-            line = line.strip()
-            if line.startswith(f"{key}="):
-                val = line.split("=", 1)[1].strip().strip("'\"")
-                if val:
-                    return val
-    return None
-
-
 def _wp_creds() -> tuple[str, str, str]:
-    """(base_url, user, app-password). URL overridable via options.wordpress_url;
-    user/password via _secret(). HTTPException(503) if incomplete."""
+    """(base_url, user, app-password). Checks ~/.config/railjack/wp.json first,
+    then options.wordpress_url, then WORDPRESS_URL/USERNAME/APPLICATION_PASSWORD
+    in env or secrets files. HTTPException(503) if incomplete."""
+    wp_json_path = Path.home() / ".config" / "railjack" / "wp.json"
+    if wp_json_path.is_file():
+        try:
+            data = json.loads(wp_json_path.read_text())
+            url = (data.get("url") or data.get("wordpress_url") or "").rstrip("/")
+            user = data.get("username") or data.get("user") or data.get("wordpress_username") or ""
+            pwd = (
+                data.get("application_password")
+                or data.get("password")
+                or data.get("wordpress_application_password")
+                or data.get("wordpress_password")
+                or data.get("app_password")
+                or ""
+            )
+            if url and user and pwd:
+                return str(url).strip().rstrip("/"), str(user).strip(), str(pwd).strip()
+        except Exception:
+            pass
+
     opts = _opts()
     url = (opts.get("wordpress_url") or _secret("WORDPRESS_URL") or "").rstrip("/")
     user = _secret("WORDPRESS_USERNAME") or ""
-    pwd = _secret("WORDPRESS_PASSWORD") or ""
+    pwd = (
+        _secret("WORDPRESS_APPLICATION_PASSWORD")
+        or _secret("WORDPRESS_PASSWORD")
+        or _secret("WORDPRESS_APP_PASSWORD")
+        or ""
+    )
     if not (url and user and pwd):
         raise HTTPException(
-            503, "WordPress creds not configured (WORDPRESS_URL/USERNAME/PASSWORD "
-                 "in env or /home/NAZ/n8n/.secrets.env)",
+            503,
+            "WordPress creds not configured (WORDPRESS_URL/USERNAME/APPLICATION_PASSWORD "
+            "in env, ~/.config/railjack/wp.json, or /home/NAZ/n8n/.secrets.env)",
         )
     return url, user, pwd
 
@@ -2390,13 +2445,13 @@ def _wp_site_host() -> str:
 
 
 async def _wp(method: str, path: str, params: dict | None = None, json_body: dict | None = None):
-    """Authed WP REST call (Basic auth via httpx). Returns parsed JSON or None."""
+    """Authed WP REST call (Basic auth via httpx). Returns parsed JSON or dict/None."""
     url, user, pwd = _wp_creds()
-    async with httpx.AsyncClient(timeout=30, auth=(user, pwd)) as c:
+    async with httpx.AsyncClient(timeout=30, auth=(user, pwd), follow_redirects=True) as c:
         r = await c.request(method, f"{url}/wp-json/wp/v2{path}", params=params or {}, json=json_body)
         if r.status_code >= 400:
             raise HTTPException(502, f"WP {method} {path}: {r.status_code} {r.text[:200]}")
-        return r.json() if r.content else None
+        return r.json() if r.content else {}
 
 
 _WP_RB_CACHE: dict[int, str] = {}           # post_id -> rest_base (process-lifetime)
@@ -3166,6 +3221,731 @@ async def seo_apply_fix_bulk(req: SeoApplyFixBulkReq):
     }
 
 
+# --- WordPress OP (publish-from-card) + Gem SEO -----------------------------
+
+
+def _get_seo_gem_system_prompt() -> str:
+    candidates = [
+        Path(__file__).resolve().parent / "gems" / "gemini-gem-thailandnow-seo.md",
+        Path(__file__).resolve().parent.parent / "assets" / "gemini-gem-thailandnow-seo.md",
+        Path.home() / "Cephalon" / "10-knowledge" / "ai-workflow" / "gemini-gem-thailandnow-seo.md",
+    ]
+    content = ""
+    for path in candidates:
+        if path.exists():
+            content = path.read_text(encoding="utf-8")
+            break
+    if content:
+        return _extract_gem_body(content)
+    return ""
+
+
+AGY_BIN = os.path.expanduser("~/.local/bin/agy")
+
+
+async def _agy_complete(prompt: str, timeout: float = 120.0, add_dir: str | None = None, effort: str = "medium") -> str | None:
+    """Run agy CLI (AI-Pro Gemini quota) as a subprocess. Never raises (returns None on failure)."""
+    try:
+        cmd = [
+            AGY_BIN,
+            "--model",
+            "gemini-3.6-flash",
+            "--effort",
+            effort,
+            "--output-format",
+            "text",
+        ]
+        if add_dir:
+            cmd.extend(["--add-dir", add_dir])
+        cmd.extend(["-p", prompt])
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        if proc.returncode == 0:
+            return stdout.decode(errors="replace")
+    except Exception:
+        pass
+    return None
+
+
+def _parse_gemini_seo(text: str) -> dict | None:
+    if not text or not isinstance(text, str):
+        return None
+
+    s = text.strip()
+    if s.startswith("```"):
+        s = re.sub(r"^```[a-zA-Z]*\n?", "", s).strip()
+        s = re.sub(r"\n?```$", "", s).strip()
+
+    keyphrases: list[str] = []
+    metas: list[str] = []
+    hashtags: str = ""
+    ai_a: str = ""
+    ai_b: list[str] = []
+
+    current_section: str | None = None
+
+    for line in s.splitlines():
+        line_s = line.strip()
+
+        if re.search(r"#+\s*(?:\d+[\.\)]\s*)?Focus Keyphrases", line, re.I):
+            current_section = "keyphrases"
+            continue
+        elif re.search(r"#+\s*(?:\d+[\.\)]\s*)?Meta Descriptions?", line, re.I):
+            current_section = "metas"
+            continue
+        elif re.search(r"#+\s*(?:\d+[\.\)]\s*)?Related Hashtags?", line, re.I):
+            current_section = "hashtags"
+            continue
+        elif re.search(r"#+\s*(?:\d+[\.\)]\s*)?Version A", line, re.I) or (re.search(r"AI Summary", line, re.I) and "Version A" in line):
+            current_section = "ai_a"
+            continue
+        elif re.search(r"#+\s*(?:\d+[\.\)]\s*)?Version B", line, re.I) or (re.search(r"Key Takeaways", line, re.I) and ("Version B" in line or "Key Takeaways" in line)):
+            current_section = "ai_b"
+            continue
+        elif re.search(r"\*\*(?:AI Summary|Key Takeaways):?\*\*", line, re.I):
+            if "AI Summary" in line:
+                current_section = "ai_a"
+                rem = re.sub(r"\*\*AI Summary:?\*\*", "", line).strip()
+                if rem:
+                    ai_a = (ai_a + " " + rem).strip() if ai_a else rem
+                continue
+            elif "Key Takeaways" in line:
+                current_section = "ai_b"
+                continue
+        elif re.search(r"#+\s*(?:\d+[\.\)]\s*)?AI SEO Block", line, re.I):
+            current_section = "ai_block"
+            continue
+        elif line_s.startswith("##") and not re.search(r"Version", line, re.I):
+            current_section = None
+            continue
+
+        if not line_s:
+            continue
+
+        if current_section == "keyphrases":
+            m = re.match(r"^\d+[\.\)]\s*(.+)", line_s)
+            if m:
+                item = m.group(1).strip()
+                if " - Priority:" in item:
+                    kp = item.split(" - Priority:")[0].strip()
+                elif " Priority:" in item:
+                    kp = item.split(" Priority:")[0].strip(" -:")
+                else:
+                    kp = item
+                if kp:
+                    keyphrases.append(kp)
+
+        elif current_section == "metas":
+            m = re.match(r"^\d+[\.\)]\s*(.+)", line_s)
+            if m:
+                item = m.group(1).strip()
+                item_clean = re.sub(r"\s*\(\s*\d+\s*\)\s*$", "", item).strip()
+                if item_clean:
+                    metas.append(item_clean)
+
+        elif current_section == "hashtags":
+            if "#" in line_s:
+                tags = re.findall(r"#\w+", line_s)
+                if tags:
+                    if hashtags:
+                        hashtags += " " + " ".join(tags)
+                    else:
+                        hashtags = " ".join(tags)
+
+        elif current_section == "ai_a":
+            if not line_s.startswith("#") and not line_s.startswith("**Key Takeaways"):
+                clean_l = re.sub(r"^\*\*AI Summary:?\*\*\s*", "", line_s).strip()
+                if clean_l and not clean_l.lower().startswith("ai summary:"):
+                    if ai_a:
+                        ai_a += " " + clean_l
+                    else:
+                        ai_a = clean_l
+
+        elif current_section == "ai_b":
+            if line_s.startswith(("*", "-")):
+                bullet = re.sub(r"^[\*\-]\s*", "", line_s).strip()
+                if bullet and not bullet.lower().startswith("ai summary"):
+                    ai_b.append(bullet)
+
+    if not hashtags:
+        all_tags = re.findall(r"#\w+", s)
+        if all_tags:
+            hashtags = " ".join(all_tags[:5])
+
+    if not keyphrases or not metas or not hashtags or not ai_a or not ai_b:
+        return None
+
+    def _clean(x: str) -> str:
+        return re.sub(r"[\*`]+", "", x).strip()  # strip markdown emphasis/code → clean plaintext SEO fields
+
+    return {
+        "keyphrases": [_clean(k) for k in keyphrases],
+        "metas": [_clean(m) for m in metas],
+        "hashtags": _clean(hashtags),
+        "ai_a": _clean(ai_a),
+        "ai_b": [_clean(b) for b in ai_b[:5]],
+    }
+
+
+async def _generate_event_seo(title: str, body: str, category: str = "Events") -> tuple[dict, str]:
+    gem_core = _get_seo_gem_system_prompt()
+    article = f"TITLE: {title}\nBODY: {body}\nCategory: {category}"
+    agy_prompt = (
+        f"{gem_core}\n\n"
+        f"--- ARTICLE ---\n"
+        f"{article}\n\n"
+        f"Now output ONLY the four SEO sections (Focus Keyphrases, Meta Descriptions, "
+        f"Related Hashtags, AI SEO Block with Version A and Version B), no preamble."
+    )
+
+    # 1. PRIMARY: agy (AI-Pro Gemini quota)
+    raw = await _agy_complete(agy_prompt)
+    if raw:
+        parsed = _parse_gemini_seo(raw)
+        if parsed:
+            return parsed, "gemini-3.6-flash (agy)"
+
+    # 2. FALLBACK: glm-5 via zai_message (OmniRoute)
+    try:
+        raw = await zai_message(article, max_tokens=4096, system=gem_core, model="glm-5", timeout=120.0)
+        if raw:
+            parsed = _parse_gemini_seo(raw)
+            if parsed:
+                return parsed, "glm-5"
+    except Exception:
+        pass
+
+    raise HTTPException(503, "SEO generation failed: agy + glm-5 both failed")
+
+
+async def _wp_upload_media_bytes(
+    image_bytes: bytes, filename: str, content_type: str = "image/jpeg", alt_text: str = ""
+) -> dict:
+    """Upload media bytes to WP REST API POST /wp-json/wp/v2/media (Basic auth) and set alt text."""
+    url, user, pwd = _wp_creds()
+    headers = {
+        "Content-Type": content_type,
+        "Content-Disposition": f'attachment; filename="{filename}"',
+    }
+    async with httpx.AsyncClient(timeout=30, auth=(user, pwd), follow_redirects=True) as c:
+        r = await c.post(f"{url}/wp-json/wp/v2/media", headers=headers, content=image_bytes)
+        if r.status_code >= 400:
+            raise HTTPException(502, f"WP media upload failed: {r.status_code} {r.text[:200]}")
+        media = r.json()
+        media_id = media.get("id")
+        source_url = media.get("source_url") or (media.get("guid") or {}).get("rendered", "")
+
+        if media_id and alt_text:
+            try:
+                r_alt = await c.post(
+                    f"{url}/wp-json/wp/v2/media/{media_id}",
+                    json={"alt_text": alt_text},
+                )
+                if r_alt.status_code >= 400:
+                    await c.post(
+                        f"{url}/wp-json/wp/v2/media/{media_id}",
+                        json={"meta": {"_wp_attachment_image_alt": alt_text}},
+                    )
+            except Exception:
+                pass
+
+        return {"id": media_id, "source_url": source_url, "alt": alt_text}
+
+
+async def _agy_describe_image(image_bytes: bytes, ext: str = "jpg") -> str:
+    """Describe image in one concise sentence for WordPress SEO alt text via agy vision."""
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmpdir:
+        img_path = Path(tmpdir) / f"image.{ext}"
+        img_path.write_bytes(image_bytes)
+        alt = await _agy_complete(
+            "describe this image in one concise sentence for WordPress SEO alt text, output only the description",
+            add_dir=tmpdir,
+            effort="low",
+        )
+        if alt:
+            return alt.strip().strip('"\'').strip()
+    return ""
+
+
+def _clean_gutenberg_attributes(html_text: str) -> str:
+    s = re.sub(r"</?(?:span|font)\b[^>]*>", "", html_text, flags=re.IGNORECASE)
+
+    def _clean_tag(m: re.Match) -> str:
+        tag = m.group(1)
+        tag_lower = tag.lower()
+        if tag_lower in ("figure", "figcaption"):
+            return m.group(0)
+        attrs = m.group(2)
+        class_m = re.search(r'class=["\'](wp-block-[^"\']+)["\']', attrs, re.IGNORECASE)
+        href_m = re.search(r'href=["\']([^"\']+)["\']', attrs, re.IGNORECASE)
+        src_m = re.search(r'src=["\']([^"\']+)["\']', attrs, re.IGNORECASE)
+        alt_m = re.search(r'alt=["\']([^"\']*)["\']', attrs, re.IGNORECASE)
+
+        new_attrs = []
+        if class_m:
+            new_attrs.append(f'class="{class_m.group(1)}"')
+        if href_m:
+            new_attrs.append(f'href="{href_m.group(1)}"')
+            new_attrs.append('target="_blank"')
+            new_attrs.append('rel="noopener"')
+        if src_m:
+            new_attrs.append(f'src="{src_m.group(1)}"')
+        if alt_m:
+            new_attrs.append(f'alt="{alt_m.group(1)}"')
+
+        attr_str = (" " + " ".join(new_attrs)) if new_attrs else ""
+        return f"<{tag}{attr_str}>"
+
+    return re.sub(r"<([a-zA-Z0-9]+)\b([^>]*)>", _clean_tag, s)
+
+
+def _convert_google_html_to_gutenberg(doc_html: str, img_map: dict[str, dict] | None = None) -> str:
+    if not doc_html:
+        return ""
+
+    body_match = re.search(r"<body[^>]*>(.*?)</body>", doc_html, re.IGNORECASE | re.DOTALL)
+    content = body_match.group(1) if body_match else doc_html
+
+    # Replace headings h1, h2, h3 -> <h2 class="wp-block-heading">
+    content = re.sub(r"<h[123]\b[^>]*>", '<h2 class="wp-block-heading">', content, flags=re.IGNORECASE)
+    content = re.sub(r"</h[123]>", "</h2>", content, flags=re.IGNORECASE)
+
+    # Replace paragraphs <p ...> -> <p class="wp-block-paragraph">
+    content = re.sub(r"<p\b[^>]*>", '<p class="wp-block-paragraph">', content, flags=re.IGNORECASE)
+
+    # Replace list items/lists
+    content = re.sub(r"<ul\b[^>]*>", '<ul class="wp-block-list">', content, flags=re.IGNORECASE)
+    content = re.sub(r"<ol\b[^>]*>", '<ol class="wp-block-list">', content, flags=re.IGNORECASE)
+
+    # Replace <img> tags
+    img_map = img_map or {}
+
+    def _replace_img(m: re.Match) -> str:
+        img_tag = m.group(0)
+        src_m = re.search(r'src=["\']([^"\']+)["\']', img_tag, re.IGNORECASE)
+        if src_m:
+            src = src_m.group(1)
+            if src in img_map:
+                info = img_map[src]
+                img_id = info.get("id", 0)
+                source_url = info.get("source_url", src)
+                alt = info.get("alt", "")
+                return f'<figure class="wp-block-image size-large"><img src="{source_url}" alt="{alt}" class="wp-image-{img_id}"/></figure>'
+        return ""
+
+    content = re.sub(r"<img\b[^>]*>", _replace_img, content, flags=re.IGNORECASE)
+
+    # Clean leftover attributes
+    content = _clean_gutenberg_attributes(content)
+
+    # Clean empty paragraphs
+    content = re.sub(r'<p class="wp-block-paragraph">\s*(?:&nbsp;)?\s*</p>', '', content, flags=re.IGNORECASE)
+
+    return content.strip()
+
+
+def _seo_best(content: str, keyphrases: list[str], metas: list[str] | None = None, title: str = "") -> tuple[str, str]:
+    if not keyphrases:
+        return "", (metas[0] if metas and len(metas) > 0 else "")
+
+    h2_headings = " ".join(re.findall(r"<h2[^>]*>(.*?)</h2>", content, re.IGNORECASE | re.DOTALL))
+    h2_clean = re.sub(r"<[^>]+>", "", h2_headings)
+
+    first_para_m = re.search(r"<p[^>]*>(.*?)</p>", content, re.IGNORECASE | re.DOTALL)
+    first_para_clean = re.sub(r"<[^>]+>", "", first_para_m.group(1)) if first_para_m else ""
+
+    body_clean = re.sub(r"<[^>]+>", "", content)
+
+    title_low = title.lower()
+    h2_low = h2_clean.lower()
+    first_para_low = first_para_clean.lower()
+    body_low = body_clean.lower()
+
+    best_kp = keyphrases[0]
+    best_score = -1
+
+    for kp in keyphrases:
+        kp_low = kp.lower().strip()
+        if not kp_low:
+            continue
+        score = (
+            title_low.count(kp_low) * 3
+            + h2_low.count(kp_low) * 2
+            + first_para_low.count(kp_low) * 2
+            + body_low.count(kp_low) * 1
+        )
+        if score > best_score:
+            best_score = score
+            best_kp = kp
+
+    best_meta = metas[0] if (metas and len(metas) > 0) else ""
+    if metas:
+        kp_words = set(re.findall(r"\w+", best_kp.lower()))
+        best_meta_score = -1
+        for m in metas:
+            m_low = m.lower()
+            m_words = set(re.findall(r"\w+", m_low))
+            overlap = len(kp_words & m_words)
+            exact_bonus = 5 if best_kp.lower() in m_low else 0
+            score = overlap + exact_bonus
+            if score > best_meta_score:
+                best_meta_score = score
+                best_meta = m
+
+    return best_kp, best_meta
+
+
+def _convert_text_to_gutenberg(doc_text: str) -> str:
+    """Convert plain text to Gutenberg paragraph blocks when HTML export is empty/minimal.
+    Strips leading standalone social-platform labels (e.g. 'Facebook', 'Instagram')."""
+    if not doc_text or not doc_text.strip():
+        return ""
+    lines = doc_text.splitlines()
+    start_idx = 0
+    for idx, line in enumerate(lines):
+        s = line.strip().strip("\ufeff").strip()
+        if s:
+            if re.match(r"^(facebook|instagram|twitter|x|tiktok|threads|youtube|linkedin)\s*:?$", s, re.I):
+                start_idx = idx + 1
+            break
+    cleaned_text = "\n".join(lines[start_idx:]).strip()
+    if not cleaned_text:
+        return ""
+
+    blocks = re.split(r"\n\s*\n", cleaned_text)
+    p_blocks = []
+    for b in blocks:
+        s = b.strip()
+        if not s:
+            continue
+        s_html = s.replace("\n", "<br />")
+        p_blocks.append(f'<p class="wp-block-paragraph">{s_html}</p>')
+    return "\n\n".join(p_blocks)
+
+
+def _extract_doc_title(doc_html: str, doc_text: str = "") -> str:
+    """The writer's headline from the Google Doc — first <h1>/<h2>, else '' if no heading found
+    (caller falls back to card name)."""
+    if doc_html:
+        m = re.search(r"<h[12][^>]*>(.*?)</h[12]>", doc_html, re.S | re.I)
+        if m:
+            t = re.sub(r"<[^>]+>", "", m.group(1)).strip()
+            if t:
+                return t[:200]
+    return ""
+
+
+@router.get("/api/thailandnow/events/to-publish")
+async def events_to_publish() -> dict:
+    """List Trello cards from the 'To publish (NAZ + TOON)' list (685686f5a5d5ec7d657af3c6)."""
+    cards_raw = await _trello("GET", "/lists/685686f5a5d5ec7d657af3c6/cards", {"fields": "id,name"})
+    cards = cards_raw if isinstance(cards_raw, list) else []
+    return {
+        "cards": [
+            {"id": c["id"], "name": c["name"]}
+            for c in cards
+            if isinstance(c, dict) and "id" in c and "name" in c
+        ]
+    }
+
+
+@router.post("/api/thailandnow/events/analyze-card")
+async def analyze_card(payload: dict = Body(default={})) -> dict:
+    """Fetch card attachments & desc, find Google Doc, extract text, and run Gem SEO."""
+    card_id = (payload.get("card_id") or "").strip()
+    if not card_id:
+        raise HTTPException(400, "card_id required")
+
+    card = await _trello("GET", f"/cards/{card_id}", {"fields": "name,desc"})
+    if not isinstance(card, dict) or not card.get("name"):
+        raise HTTPException(404, f"Trello card {card_id} not found")
+    card_name = card.get("name", "")
+    card_desc = card.get("desc", "")
+
+    attachments = await _trello("GET", f"/cards/{card_id}/attachments", {"fields": "name,url"})
+    doc_id = None
+    if isinstance(attachments, list):
+        for att in attachments:
+            if isinstance(att, dict) and att.get("url") and "docs.google.com/document" in att["url"]:
+                m = re.search(r"/document/d/([^/]+)", att["url"])
+                if m:
+                    doc_id = m.group(1)
+                    break
+
+    if not doc_id and card_desc and "docs.google.com/document" in card_desc:
+        m = re.search(r"/document/d/([^/]+)", card_desc)
+        if m:
+            doc_id = m.group(1)
+
+    if not doc_id:
+        raise HTTPException(404, f"No Google Doc attachment or link found on card {card_id}")
+
+    token = await _google_token()
+    doc_text = await _drive_read_doc(token, doc_id)
+
+    title = re.sub(r"^(Article|Event)\s*\|\s*", "", card_name, flags=re.IGNORECASE).strip() or card_name
+    category = "Events"
+
+    seo, seo_model = await _generate_event_seo(title, doc_text, category)
+
+    return {
+        "card_id": card_id,
+        "title": title,
+        "doc_text": doc_text,
+        "seo": seo,
+        "seo_model": seo_model,
+    }
+
+
+@router.post("/api/thailandnow/events/publish-from-card")
+async def publish_event_from_card(payload: dict = Body(default={})) -> dict:
+    card_id = (payload.get("card_id") or "").strip()
+    if not card_id:
+        raise HTTPException(400, "card_id required")
+
+    card = await _trello("GET", f"/cards/{card_id}", {"fields": "name,desc,due"})
+    if not isinstance(card, dict) or not card.get("name"):
+        raise HTTPException(404, f"Trello card {card_id} not found")
+    card_name = card.get("name", "")
+    card_desc = card.get("desc", "")
+
+    due_raw = card.get("due")
+    year = datetime.now().year
+    if due_raw:
+        try:
+            year = datetime.fromisoformat(str(due_raw).replace("Z", "+00:00")).year
+        except Exception:
+            m = re.match(r"^(\d{4})", str(due_raw).strip())
+            if m:
+                year = int(m.group(1))
+
+    attachments = await _trello("GET", f"/cards/{card_id}/attachments", {"fields": "name,url"})
+    doc_id = None
+    if isinstance(attachments, list):
+        for att in attachments:
+            if isinstance(att, dict) and att.get("url") and "docs.google.com/document" in att["url"]:
+                m = re.search(r"/document/d/([^/]+)", att["url"])
+                if m:
+                    doc_id = m.group(1)
+                    break
+
+    if not doc_id and card_desc and "docs.google.com/document" in card_desc:
+        m = re.search(r"/document/d/([^/]+)", card_desc)
+        if m:
+            doc_id = m.group(1)
+
+    if not doc_id:
+        raise HTTPException(404, f"No Google Doc attachment or link found on card {card_id}")
+
+    token = await _google_token()
+    doc_text = await _drive_read_doc(token, doc_id)
+    doc_html = await _drive_read_doc_html(token, doc_id)
+
+    doc_title = _extract_doc_title(doc_html, doc_text)
+    card_title = re.sub(r"^(Article|Event)\s*\|\s*", "", card_name, flags=re.IGNORECASE).strip() or card_name
+    title = doc_title or card_title  # writer's headline, not the card name
+    if not re.search(r"\b20\d{2}\s*$", title):
+        title = f"{title} {year}"
+    category = "Events"
+
+    img_urls = re.findall(r'<img\b[^>]*?\bsrc=["\']([^"\']+)["\']', doc_html, re.IGNORECASE)
+    img_map: dict[str, dict] = {}
+    images_uploaded = 0
+
+    async with httpx.AsyncClient(timeout=20, follow_redirects=True) as c:
+        for idx, src in enumerate(img_urls):
+            if src in img_map:
+                continue
+            try:
+                img_bytes: bytes | None = None
+                ext = "jpg"
+                if src.startswith("data:"):
+                    # Google Doc export embeds images as base64 data URIs — decode directly.
+                    mext = re.match(r"data:image/([a-zA-Z0-9.+-]+)", src)
+                    ext = (mext.group(1).lower().split("+")[0] if mext else "png")
+                    ext = "jpg" if ext in ("jpeg", "jpe") else (ext.split(".")[0] or "png")
+                    b64 = src.split(",", 1)[1] if "," in src else ""
+                    img_bytes = base64.b64decode(b64) if b64 else None
+                elif src.startswith("http"):
+                    r_img = await c.get(src)
+                    if r_img.status_code != 200:
+                        continue
+                    c_type = r_img.headers.get("content-type", "image/jpeg")
+                    ext = "png" if "png" in c_type else ("webp" if "webp" in c_type else "jpg")
+                    img_bytes = r_img.content
+                else:
+                    continue
+                if not img_bytes:
+                    continue
+                alt = await _agy_describe_image(img_bytes, ext=ext)
+                media = await _wp_upload_media_bytes(
+                    img_bytes,
+                    filename=f"event-{card_id}-{idx+1}.{ext}",
+                    content_type=f"image/{ext}",
+                    alt_text=alt,
+                )
+                if media and media.get("id"):
+                    img_map[src] = media
+                    images_uploaded += 1
+            except Exception:
+                pass
+
+    # Drop the title heading from the body so the post doesn't repeat its own title (matches published-house style, e.g. post 20427).
+    _body_html = doc_html
+    if doc_title:
+        _tm = re.search(r"<h[12][^>]*>(.*?)</h[12]>", doc_html, re.S | re.I)
+        if _tm and re.sub(r"<[^>]+>", "", _tm.group(1)).strip() == doc_title:
+            _body_html = doc_html[:_tm.start()] + doc_html[_tm.end():]
+
+    if len((doc_html or "").strip()) < 500 or not re.search(r"<(?:p|h[1-6])\b", doc_html or "", re.I):
+        gutenberg_body = _convert_text_to_gutenberg(doc_text)
+    else:
+        gutenberg_body = _convert_google_html_to_gutenberg(_body_html, img_map)
+    seo_data, seo_model = await _generate_event_seo(title, doc_text, category)
+    best_kp, best_meta = _seo_best(gutenberg_body, seo_data["keyphrases"], seo_data["metas"], title=title)
+
+    takeaways_html = "\n".join(f"<li>{b}</li>" for b in seo_data["ai_b"])
+    takeaways_block = (
+        f'<h2 class="wp-block-heading">Key Takeaways</h2>\n<ul class="wp-block-list">\n{takeaways_html}\n</ul>'
+    )
+    # Seat Key Takeaways near the top — right after the lead paragraph (published-house style, e.g. post 20427).
+    _first_p = re.search(r"</p>", gutenberg_body)
+    if _first_p:
+        at = _first_p.end()
+        content = gutenberg_body[:at] + "\n\n" + takeaways_block + "\n\n" + gutenberg_body[at:]
+    else:
+        content = takeaways_block + "\n\n" + gutenberg_body
+
+    slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
+    wp_body = {
+        "title": title,
+        "content": content,
+        "status": "draft",
+        "slug": slug,
+    }
+
+    res = await _wp("POST", "/event", json_body=wp_body)
+    if not res or not isinstance(res, dict) or "id" not in res:
+        raise HTTPException(502, "WordPress event creation returned invalid response")
+
+    post_id = res["id"]
+    permalink = res.get("link", "")
+    _o = urllib.parse.urlparse(permalink)
+    link = f"{_o.scheme}://{_o.netloc}/wp-admin/post.php?post={post_id}&action=edit" if _o.netloc else permalink  # editor link (permalink is blank until published)
+
+    return {
+        "wp_id": post_id,
+        "link": link,
+        "status": "draft",
+        "seo_model": seo_model,
+        "images_uploaded": images_uploaded,
+        "seo": {
+            "focus_keyphrase": best_kp,
+            "meta_description": best_meta,
+            "keyphrases": seo_data["keyphrases"],
+            "metas": seo_data["metas"],
+            "key_takeaways": seo_data["ai_b"],
+        },
+    }
+
+
+@router.post("/api/thailandnow/events/wp-publish")
+async def publish_event_to_wp(payload: dict = Body(default={})):
+    if not isinstance(payload, dict):
+        raise HTTPException(400, "Invalid JSON payload")
+
+    title = (payload.get("title") or "").strip()
+    body_text = (payload.get("body") or "").strip()
+
+    if not title or not body_text:
+        raise HTTPException(400, "missing title or body")
+
+    category = (payload.get("category") or "Events").strip()
+    start_date = (payload.get("start_date") or "").strip()
+    end_date = (payload.get("end_date") or "").strip()
+    location = (payload.get("location") or "").strip()
+    source_url = (payload.get("url") or "").strip()
+    urls = payload.get("urls") or ([source_url] if source_url else [])
+
+    is_publish = bool(payload.get("publish", False))
+    post_status = "publish" if is_publish else "draft"
+
+    seo_data, seo_model = await _generate_event_seo(title, body_text, category)
+
+    takeaways_html = "\n".join(f"<li>{b}</li>" for b in seo_data["ai_b"])
+
+    if start_date and end_date and start_date != end_date:
+        dates_str = f"{start_date} to {end_date}"
+    else:
+        dates_str = start_date or end_date or "TBA"
+
+    source_links = ", ".join(f'<a href="{u}" target="_blank" rel="noopener">{u}</a>' for u in urls if u)
+    source_html = f"<p><strong>Source:</strong> {source_links}</p>" if source_links else ""
+
+    venue_html = f"<p><strong>Venue:</strong> {location}</p>\n" if location else ""
+
+    content = (
+        f'<div class="ai-summary">\n<p><strong>AI Summary:</strong> {seo_data["ai_a"]}</p>\n</div>\n\n'
+        f'{body_text}\n\n'
+        f'<div class="key-takeaways">\n<h3>Key Takeaways</h3>\n<ul>\n{takeaways_html}\n</ul>\n</div>\n\n'
+        f'<div class="event-details">\n'
+        f'<p><strong>Dates:</strong> {dates_str}</p>\n'
+        f'{venue_html}'
+        f'{source_html}\n'
+        f'</div>\n\n'
+        f'<p class="hashtags">{seo_data["hashtags"]}</p>'
+    )
+
+    wp_body: dict = {
+        "title": title,
+        "content": content,
+        "status": post_status,
+    }
+
+    slug = (payload.get("slug") or "").strip()
+    if slug:
+        wp_body["slug"] = slug
+    if payload.get("categories"):
+        wp_body["categories"] = payload["categories"]
+    if payload.get("tags"):
+        wp_body["tags"] = payload["tags"]
+
+    res = await _wp("POST", "/event", json_body=wp_body)
+    if not res or not isinstance(res, dict) or "id" not in res:
+        raise HTTPException(502, "WordPress event creation returned invalid response")
+
+    post_id = res["id"]
+    permalink = res.get("link", "")
+    _o = urllib.parse.urlparse(permalink)
+    link = f"{_o.scheme}://{_o.netloc}/wp-admin/post.php?post={post_id}&action=edit" if _o.netloc else permalink
+
+    try:
+        updated_post = await _wp("GET", f"/event/{post_id}")
+        if updated_post and isinstance(updated_post, dict):
+            link = updated_post.get("link") or link
+    except Exception:
+        pass
+
+    return {
+        "wp_id": post_id,
+        "link": link,
+        "status": post_status,
+        "seo_model": seo_model,
+        "seo": {
+            "keyphrases": seo_data["keyphrases"],
+            "metas": seo_data["metas"],
+            "hashtags": seo_data["hashtags"],
+            "ai_a": seo_data["ai_a"],
+            "ai_b": seo_data["ai_b"],
+        },
+    }
+
+
 if __name__ == "__main__":
     # Self-check the non-trivial pure logic (no network, no creds).
     # R5: LLM-JSON parsing + date normalization / window filtering.
@@ -3375,3 +4155,49 @@ if __name__ == "__main__":
     with unittest.mock.patch.dict(os.environ, {"PEXELS_API_KEY": "", "PIXABAY_API_KEY": ""}):
         assert asyncio.run(_pexels_photos("test")) == [] and asyncio.run(_pixabay_photos("test")) == [], "keyless stock helpers should return []"
     print("OK archive + story scout: tokenize + title score + presence/detail classify + recursive union + news extract")
+
+    # WPOP: doc title extraction, gutenberg conversion, text fallback, seo parsing, best seo
+    assert _extract_doc_title("<h1>Sun-Dried Squid Festival</h1><p>Body</p>") == "Sun-Dried Squid Festival"
+    assert _extract_doc_title("<p>No heading here</p>") == ""
+    _fb_text = "Facebook\n\nSun-Dried Squid Festival\n\nCome and enjoy squid."
+    _gt = _convert_text_to_gutenberg(_fb_text)
+    assert '<p class="wp-block-paragraph">Sun-Dried Squid Festival</p>' in _gt
+    assert "Facebook" not in _gt
+    _clean_html = _clean_gutenberg_attributes('<span style="color:red"><a href="https://example.com" class="wp-block-x">Link</a></span>')
+    assert "<span" not in _clean_html and 'class="wp-block-x"' in _clean_html and 'target="_blank"' in _clean_html
+    _gdoc_html = '<body class="doc-content"><h1>Main Event</h1><p>First paragraph.</p><img src="img1.jpg"></body>'
+    _conv = _convert_google_html_to_gutenberg(_gdoc_html, {"img1.jpg": {"id": 101, "source_url": "https://site/img1.jpg", "alt": "Squid"}})
+    assert '<h2 class="wp-block-heading">Main Event</h2>' in _conv
+    assert '<p class="wp-block-paragraph">First paragraph.</p>' in _conv
+    assert '<figure class="wp-block-image size-large"><img src="https://site/img1.jpg" alt="Squid"></figure>' in _conv
+    _best_k, _best_m = _seo_best("<p>Sun-Dried Squid Festival is amazing.</p>", ["Squid Festival", "Thailand Travel"], ["Enjoy Sun-Dried Squid Festival in Rayong (125 chars)"], title="Sun-Dried Squid Festival")
+    assert _best_k == "Squid Festival"
+    assert _best_m.startswith("Enjoy Sun-Dried")
+    _seo_raw = (
+        "## Focus Keyphrases (5 options)\n"
+        "1. Squid Festival - Priority: High - Reason: Popular search\n"
+        "2. Rayong Food - Priority: Med - Reason: Location\n\n"
+        "## Meta Descriptions (5 options)\n"
+        "1. Enjoy the annual Sun-Dried Squid Festival in Rayong this August with fresh seafood. (128)\n\n"
+        "## Related Hashtags\n"
+        "#SquidFestival #Rayong #ThailandEvents #Seafood #ThailandNOW\n\n"
+        "## AI SEO Block\n"
+        "### Version A — AI Summary\n"
+        "The Sun-Dried Squid Festival takes place in Rayong on August 15, 2026, offering fresh seafood from local fishermen.\n\n"
+        "### Version B — Key Takeaways\n"
+        "- The Sun-Dried Squid Festival takes place in Rayong in August 2026.\n"
+        "- Visitors can taste fresh squid dried under natural sunlight on the beach.\n"
+        "- Local fishermen demonstrate traditional squid preservation techniques.\n"
+        "- The event supports community tourism and coastal livelihoods in Rayong.\n"
+        "- Admission is free for all international and local visitors.\n"
+    )
+    _parsed_seo = _parse_gemini_seo(_seo_raw)
+    assert _parsed_seo and len(_parsed_seo["keyphrases"]) == 2
+    assert _parsed_seo["keyphrases"][0] == "Squid Festival"
+    assert _parsed_seo["metas"][0].startswith("Enjoy the annual")
+    assert "#SquidFestival" in _parsed_seo["hashtags"]
+    assert "Sun-Dried Squid Festival takes place" in _parsed_seo["ai_a"]
+    assert len(_parsed_seo["ai_b"]) == 5
+    _seo_gem_prompt = _get_seo_gem_system_prompt()
+    assert "## Role & Purpose" in _seo_gem_prompt or "Role & Purpose" in _seo_gem_prompt
+    print("OK WPOP: doc title + gutenberg conversion + text fallback + seo parse + seo best")

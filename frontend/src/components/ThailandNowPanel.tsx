@@ -924,7 +924,7 @@ function HealthSubTab() {
 }
 
 export default function ThailandNowPanel({ module: _module }: { module: ModuleConfig }) {
-  const [tab, setTab] = useState<"writers" | "events" | "archive" | "seo" | "story-scout">("writers");
+  const [tab, setTab] = useState<"writers" | "events" | "archive" | "seo" | "story-scout" | "wordpress">("writers");
   const { data, error } = usePolling<DesksResp>("/api/thailandnow/desks", 15000);
 
   return (
@@ -960,6 +960,12 @@ export default function ThailandNowPanel({ module: _module }: { module: ModuleCo
         >
           SEO
         </button>
+        <button
+          className={`btn btn--compact ${tab === "wordpress" ? "btn--signal" : ""}`}
+          onClick={() => setTab("wordpress")}
+        >
+          WORDPRESS OP
+        </button>
       </div>
 
       {tab === "writers" && (
@@ -969,6 +975,7 @@ export default function ThailandNowPanel({ module: _module }: { module: ModuleCo
       {tab === "archive" && <ArchiveTab />} {/* NEW: ArchiveTab render */}
       {tab === "story-scout" && <StoryScoutTab />}
       {tab === "seo" && <SeoTab />}
+      {tab === "wordpress" && <WpOpTab />}
     </div>
   );
 }
@@ -2493,5 +2500,403 @@ function NbListView({ notebooks, selNb, setSelNb, onPickUrl, busy }: {
         ))
       )}
     </div>
+  );
+}
+
+/* ------------------------------ WORDPRESS OP ------------------------------ */
+
+interface TrelloToPublishCard {
+  id: string;
+  name: string;
+}
+
+interface ToPublishResp {
+  cards: TrelloToPublishCard[];
+}
+
+interface AnalyzeCardResp {
+  card_id: string;
+  title: string;
+  doc_text: string;
+  seo_model: string;
+  seo: {
+    keyphrases: string[];
+    metas: string[];
+    hashtags: string;
+    ai_a: string;
+    ai_b: string[];
+  };
+}
+
+interface PublishFromCardResp {
+  wp_id: number;
+  link: string;
+  status: string;
+  seo_model: string;
+  images_uploaded: number;
+  seo: {
+    keyphrases: string[];
+    metas: string[];
+    hashtags: string;
+    ai_a: string;
+    ai_b: string[];
+    focus_keyphrase?: string;
+    meta_description?: string;
+    best_keyphrase?: string;
+    best_meta?: string;
+    key_takeaways?: string[];
+  };
+}
+
+function CopyButton({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+  const handleCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      // ignore
+    }
+  };
+
+  return (
+    <button type="button" className="btn btn--compact" onClick={handleCopy}>
+      {copied ? "COPIED!" : "COPY"}
+    </button>
+  );
+}
+
+function WpOpTab() {
+  const [cards, setCards] = useState<TrelloToPublishCard[]>([]);
+  const [loadingCards, setLoadingCards] = useState(false);
+  const [cardsErr, setCardsErr] = useState<string | null>(null);
+
+  const [selectedCardId, setSelectedCardId] = useState<string | null>(null);
+  const [analyzing, setAnalyzing] = useState(false);
+  const [analyzeErr, setAnalyzeErr] = useState<string | null>(null);
+  const [analysis, setAnalysis] = useState<AnalyzeCardResp | null>(null);
+
+  const [publishing, setPublishing] = useState(false);
+  const [publishErr, setPublishErr] = useState<string | null>(null);
+  const [publishResult, setPublishResult] = useState<PublishFromCardResp | null>(null);
+
+  const loadCards = useCallback(async () => {
+    setLoadingCards(true);
+    setCardsErr(null);
+    try {
+      const res = await fetchJSON<ToPublishResp>("/api/thailandnow/events/to-publish");
+      setCards(res.cards || []);
+    } catch (e) {
+      setCardsErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setLoadingCards(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadCards();
+  }, [loadCards]);
+
+  const handleAnalyze = async (cardId: string) => {
+    setSelectedCardId(cardId);
+    setAnalyzing(true);
+    setAnalyzeErr(null);
+    setAnalysis(null);
+    setPublishing(false);
+    setPublishErr(null);
+    setPublishResult(null);
+
+    const r = await post<AnalyzeCardResp>("/api/thailandnow/events/analyze-card", {
+      card_id: cardId,
+    });
+
+    setAnalyzing(false);
+    if (r.ok && r.data) {
+      setAnalysis(r.data);
+    } else {
+      setAnalyzeErr(r.error ?? "Card analysis failed");
+    }
+  };
+
+  const handlePublishFromCard = async () => {
+    if (!analysis) return;
+    setPublishing(true);
+    setPublishErr(null);
+
+    const r = await post<PublishFromCardResp>("/api/thailandnow/events/publish-from-card", {
+      card_id: analysis.card_id,
+    });
+
+    setPublishing(false);
+    if (r.ok && r.data) {
+      setPublishResult(r.data);
+    } else {
+      setPublishErr(r.error ?? "Publish from card failed");
+    }
+  };
+
+  return (
+    <>
+      <section className="hud hud--bracket reveal reveal-1 p-3 flex flex-col gap-2">
+        <div className="flex items-center justify-between">
+          <div className="label">WORDPRESS OP · TO PUBLISH (NAZ + TOON)</div>
+          <button
+            type="button"
+            className="btn btn--compact"
+            disabled={loadingCards}
+            onClick={() => void loadCards()}
+          >
+            {loadingCards ? "REFRESHING…" : "REFRESH"}
+          </button>
+        </div>
+
+        <div className="mono text-xs" style={{ color: "var(--color-muted)" }}>
+          Select a card to analyze its Google Doc &amp; generate SEO copy (~1–2 min: fetching doc + generating SEO)
+        </div>
+
+        {loadingCards && (
+          <div className="mono caret mt-1" style={{ color: "var(--color-signal)" }}>
+            FETCHING CARDS FROM TRELLO…
+          </div>
+        )}
+
+        {cardsErr && (
+          <div className="mt-1">
+            <ErrLine msg={cardsErr} />
+          </div>
+        )}
+
+        {!loadingCards && !cardsErr && cards.length === 0 && (
+          <div className="mono mt-1" style={{ color: "var(--color-muted)" }}>
+            No cards found in &apos;To publish (NAZ + TOON)&apos; Trello list.
+          </div>
+        )}
+
+        {cards.length > 0 && (
+          <div className="scroll-y flex flex-col gap-1 mt-1" style={{ maxHeight: 240 }}>
+            {cards.map((c) => {
+              const isSelected = selectedCardId === c.id;
+              const isThisAnalyzing = isSelected && analyzing;
+              return (
+                <div key={c.id} className="row-in flex items-center justify-between gap-2 p-2">
+                  <div className="flex items-center gap-2 overflow-hidden">
+                    <span className={`pip ${isSelected ? "pip--go" : "pip--signal"}`} />
+                    <span
+                      className="mono text-sm truncate font-bold"
+                      style={{ color: isSelected ? "var(--color-signal)" : "var(--color-phosphor)" }}
+                    >
+                      {c.name}
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    className={`btn btn--compact ${isSelected ? "btn--armed" : "btn--signal"}`}
+                    disabled={analyzing}
+                    onClick={() => void handleAnalyze(c.id)}
+                  >
+                    {isThisAnalyzing ? "ANALYZING…" : "ANALYZE"}
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </section>
+
+      {analyzing && (
+        <section className="hud hud--bracket reveal reveal-2 p-3">
+          <div className="mono caret" style={{ color: "var(--color-signal)" }}>
+            ANALYZING CARD &amp; GENERATING SEO… ~1–2 min (fetching doc + generating SEO)
+          </div>
+        </section>
+      )}
+
+      {analyzeErr && (
+        <section className="hud hud--bracket reveal reveal-2 p-3">
+          <ErrLine msg={analyzeErr} />
+        </section>
+      )}
+
+      {analysis && !analyzing && (
+        <section className="hud hud--bracket reveal reveal-2 flex flex-col gap-3 p-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <div className="label">ANALYSIS · {analysis.title}</div>
+              {publishResult ? (
+                <div className="flex items-center gap-2">
+                  <span className="pip pip--go" />
+                  <span className="mono font-bold text-xs" style={{ color: "var(--color-go)" }}>
+                    done ✓
+                  </span>
+                  <a
+                    href={publishResult.link}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="btn btn--compact btn--go text-xs font-bold"
+                  >
+                    OPEN DRAFT #{publishResult.wp_id} ↗
+                  </a>
+                  <span className="mono text-xs" style={{ color: "var(--color-muted)" }}>
+                    (Images uploaded: {publishResult.images_uploaded})
+                  </span>
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  className="btn btn--signal btn--compact"
+                  disabled={publishing}
+                  onClick={() => void handlePublishFromCard()}
+                >
+                  {publishing ? "PUBLISHING DRAFT…" : "Publish to WordPress"}
+                </button>
+              )}
+            </div>
+            <div className="mono text-xs" style={{ color: "var(--color-muted)" }}>
+              Model: {analysis.seo_model} (Card ID: #{analysis.card_id})
+            </div>
+          </div>
+
+          {publishErr && (
+            <div className="mt-1">
+              <ErrLine msg={publishErr} />
+            </div>
+          )}
+
+          {/* Google Doc Text */}
+          <div className="border border-edge bg-void p-2">
+            <div className="label mb-1">GOOGLE DOC TEXT</div>
+            <pre
+              className="mono scroll-y p-2 text-xs"
+              style={{
+                maxHeight: 260,
+                whiteSpace: "pre-wrap",
+                wordBreak: "break-word",
+                color: "var(--color-phosphor-dim)",
+                background: "var(--color-surface-2, rgba(0,0,0,0.18))",
+                borderRadius: 4,
+              }}
+            >
+              {analysis.doc_text}
+            </pre>
+          </div>
+
+          <div className="label mt-1">SEO OUTPUTS (MANUAL YOAST PASTE)</div>
+
+          {/* Focus Keyphrases */}
+          <div className="flex flex-col gap-1">
+            <div className="label">FOCUS KEYPHRASES (5)</div>
+            {(publishResult?.seo?.keyphrases || analysis.seo?.keyphrases || []).map((kp, idx) => {
+              const isBest =
+                publishResult?.seo?.focus_keyphrase === kp ||
+                publishResult?.seo?.best_keyphrase === kp;
+              return (
+                <div
+                  key={idx}
+                  className="row-in flex items-center justify-between gap-2 p-2"
+                  style={
+                    isBest
+                      ? { border: "1px solid var(--color-go)", background: "rgba(0, 255, 128, 0.08)" }
+                      : undefined
+                  }
+                >
+                  <div className="flex items-center gap-2 overflow-hidden">
+                    {isBest && (
+                      <span
+                        className="mono text-xs font-bold px-1.5 py-0.5 rounded"
+                        style={{ background: "var(--color-go)", color: "#000" }}
+                      >
+                        BEST KEYPHRASE
+                      </span>
+                    )}
+                    <span
+                      className="mono"
+                      style={{ color: isBest ? "var(--color-go)" : "var(--color-phosphor-dim)" }}
+                    >
+                      {kp}
+                    </span>
+                  </div>
+                  <CopyButton text={kp} />
+                </div>
+              );
+            })}
+          </div>
+
+          {/* Meta Descriptions */}
+          <div className="flex flex-col gap-1">
+            <div className="label">META DESCRIPTIONS (5)</div>
+            {(publishResult?.seo?.metas || analysis.seo?.metas || []).map((meta, idx) => {
+              const isBest =
+                publishResult?.seo?.meta_description === meta ||
+                publishResult?.seo?.best_meta === meta;
+              return (
+                <div
+                  key={idx}
+                  className="row-in flex items-center justify-between gap-2 p-2"
+                  style={
+                    isBest
+                      ? { border: "1px solid var(--color-go)", background: "rgba(0, 255, 128, 0.08)" }
+                      : undefined
+                  }
+                >
+                  <div className="flex items-center gap-2 overflow-hidden">
+                    {isBest && (
+                      <span
+                        className="mono text-xs font-bold px-1.5 py-0.5 rounded"
+                        style={{ background: "var(--color-go)", color: "#000" }}
+                      >
+                        BEST META
+                      </span>
+                    )}
+                    <span
+                      className="mono"
+                      style={{ color: isBest ? "var(--color-go)" : "var(--color-phosphor-dim)" }}
+                    >
+                      {meta}
+                    </span>
+                  </div>
+                  <CopyButton text={meta} />
+                </div>
+              );
+            })}
+          </div>
+
+          {/* Hashtags */}
+          <div className="row-in flex flex-col gap-1 p-2">
+            <div className="flex items-center justify-between">
+              <span className="label">HASHTAGS</span>
+              <CopyButton text={analysis.seo?.hashtags || ""} />
+            </div>
+            <div className="mono" style={{ color: "var(--color-phosphor-dim)" }}>
+              {analysis.seo?.hashtags}
+            </div>
+          </div>
+
+          {/* Version A */}
+          <div className="row-in flex flex-col gap-1 p-2">
+            <div className="flex items-center justify-between">
+              <span className="label">VERSION A (AI SUMMARY)</span>
+              <CopyButton text={analysis.seo?.ai_a || ""} />
+            </div>
+            <div className="mono" style={{ color: "var(--color-phosphor-dim)", whiteSpace: "pre-wrap" }}>
+              {analysis.seo?.ai_a}
+            </div>
+          </div>
+
+          {/* Version B */}
+          <div className="row-in flex flex-col gap-1 p-2">
+            <div className="flex items-center justify-between">
+              <span className="label">VERSION B (KEY TAKEAWAYS)</span>
+              <CopyButton text={(analysis.seo?.ai_b || []).map((b) => `• ${b}`).join("\n")} />
+            </div>
+            <div className="mono flex flex-col gap-1" style={{ color: "var(--color-phosphor-dim)" }}>
+              {(analysis.seo?.ai_b || []).map((item, idx) => (
+                <div key={idx}>• {item}</div>
+              ))}
+            </div>
+          </div>
+        </section>
+      )}
+    </>
   );
 }
