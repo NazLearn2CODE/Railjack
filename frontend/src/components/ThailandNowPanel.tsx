@@ -2517,6 +2517,7 @@ interface ToPublishResp {
 interface AnalyzeCardResp {
   card_id: string;
   title: string;
+  kind?: string;
   location?: string;
   dates_raw?: string;
   start_date?: string;
@@ -2538,6 +2539,7 @@ interface PublishFromCardResp {
   wp_id: number;
   link: string;
   status: string;
+  kind?: string;
   title?: string;
   location?: string;
   dates_raw?: string;
@@ -2579,6 +2581,7 @@ function CopyButton({ text }: { text: string }) {
 }
 
 function WpOpTab() {
+  const [mode, setMode] = useState<"articles" | "events">("articles");
   const [cards, setCards] = useState<TrelloToPublishCard[]>([]);
   const [loadingCards, setLoadingCards] = useState(false);
   const [cardsErr, setCardsErr] = useState<string | null>(null);
@@ -2620,6 +2623,7 @@ function WpOpTab() {
 
     const r = await post<AnalyzeCardResp>("/api/thailandnow/events/analyze-card", {
       card_id: cardId,
+      kind: mode === "articles" ? "article" : "event",
     });
 
     setAnalyzing(false);
@@ -2637,6 +2641,7 @@ function WpOpTab() {
 
     const r = await post<PublishFromCardResp>("/api/thailandnow/events/publish-from-card", {
       card_id: analysis.card_id,
+      kind: mode === "articles" ? "article" : "event",
     });
 
     setPublishing(false);
@@ -2662,8 +2667,39 @@ function WpOpTab() {
           </button>
         </div>
 
+        {/* Mode Selector: Articles vs Events */}
+        <div className="flex items-center gap-2 mt-1">
+          <span className="label">POST TYPE:</span>
+          <button
+            type="button"
+            className={`btn btn--compact ${mode === "articles" ? "btn--signal font-bold" : ""}`}
+            onClick={() => {
+              setMode("articles");
+              setSelectedCardId(null);
+              setAnalysis(null);
+              setPublishResult(null);
+            }}
+          >
+            📝 Articles (/posts)
+          </button>
+          <button
+            type="button"
+            className={`btn btn--compact ${mode === "events" ? "btn--signal font-bold" : ""}`}
+            onClick={() => {
+              setMode("events");
+              setSelectedCardId(null);
+              setAnalysis(null);
+              setPublishResult(null);
+            }}
+          >
+            🎪 Events (/event)
+          </button>
+        </div>
+
         <div className="mono text-xs" style={{ color: "var(--color-muted)" }}>
-          Select a card to analyze its Google Doc &amp; generate SEO copy (~1–2 min: fetching doc + generating SEO)
+          {mode === "articles"
+            ? "Draft standard WordPress Articles (/posts) with Key Takeaways and image spacers."
+            : "Draft Event custom posts (/event) with Key Takeaways, dates, location, and images."}
         </div>
 
         {loadingCards && (
@@ -2748,18 +2784,22 @@ function WpOpTab() {
                   >
                     OPEN DRAFT #{publishResult.wp_id} ↗
                   </a>
-                  <span className="mono text-xs" style={{ color: "var(--color-muted)" }}>
-                    (Images uploaded: {publishResult.images_uploaded})
-                  </span>
+                  {publishResult.images_uploaded > 0 && (
+                    <span className="mono text-xs" style={{ color: "var(--color-muted)" }}>
+                      (Images uploaded: {publishResult.images_uploaded})
+                    </span>
+                  )}
                 </div>
               ) : (
                 <button
                   type="button"
-                  className="btn btn--signal btn--compact"
+                  className="btn btn--signal btn--compact font-bold"
                   disabled={publishing}
                   onClick={() => void handlePublishFromCard()}
                 >
-                  {publishing ? "PUBLISHING DRAFT…" : "Publish to WordPress"}
+                  {publishing
+                    ? "PUBLISHING DRAFT…"
+                    : `Publish ${mode === "articles" ? "Article" : "Event"} to WordPress (${mode === "articles" ? "/posts" : "/event"})`}
                 </button>
               )}
             </div>
@@ -2774,8 +2814,8 @@ function WpOpTab() {
             </div>
           )}
 
-          {/* WordPress Event Inputs */}
-          {((analysis.location || publishResult?.location) || (analysis.dates_raw || publishResult?.dates_raw)) && (
+          {/* WordPress Event Inputs (Only shown for Events) */}
+          {mode === "events" && ((analysis.location || publishResult?.location) || (analysis.dates_raw || publishResult?.dates_raw)) && (
             <div className="flex flex-col gap-2 p-2 border border-edge bg-void rounded">
               <div className="label">WORDPRESS EVENT INPUTS</div>
 

@@ -3619,6 +3619,7 @@ def _extract_google_doc_data(
     card_name: str = "",
     default_year: int | None = None,
     append_year: bool = False,
+    is_article: bool = False,
 ) -> dict:
     year = default_year or datetime.now().year
     card_title = re.sub(r"^(Article|Event)\s*\|\s*", "", card_name, flags=re.IGNORECASE).strip() or card_name
@@ -3626,7 +3627,7 @@ def _extract_google_doc_data(
     if not doc_json or not isinstance(doc_json, dict) or "body" not in doc_json:
         doc_title = _extract_doc_title(doc_html, fallback_text)
         title = doc_title or card_title
-        if append_year and not re.search(r"\b20\d{2}\s*$", title):
+        if append_year and not is_article and not re.search(r"\b20\d{2}\s*$", title):
             title = f"{title} {year}"
         return {
             "title": title,
@@ -3655,40 +3656,47 @@ def _extract_google_doc_data(
             h1_idx = i
             parts = [pe.get("textRun", {}).get("content", "") for pe in para.get("elements", [])]
             doc_title = "".join(parts).strip()
+            doc_title = re.sub(r"\s+", " ", doc_title)
             break
 
     title = doc_title or card_title
-    if append_year and not re.search(r"\b20\d{2}\s*$", title):
+    if append_year and not is_article and not re.search(r"\b20\d{2}\s*$", title):
         title = f"{title} {year}"
 
-    # 2. Extract Location and Dates from paragraphs following H1
     location = ""
     dates_raw = ""
-    idx = (h1_idx + 1) if h1_idx >= 0 else 0
+    start_date = ""
+    end_date = ""
 
-    if h1_idx >= 0:
-        while idx < len(body_content):
-            para = body_content[idx].get("paragraph")
-            if para:
-                t = "".join(pe.get("textRun", {}).get("content", "") for pe in para.get("elements", [])).strip()
-                if t:
-                    location = t
-                    idx += 1
-                    break
-            idx += 1
+    if is_article:
+        # Articles do not have location/dates headers below title
+        content_start_idx = (h1_idx + 1) if h1_idx >= 0 else 0
+    else:
+        # Events have Location and Dates in the paragraphs following H1
+        idx = (h1_idx + 1) if h1_idx >= 0 else 0
+        if h1_idx >= 0:
+            while idx < len(body_content):
+                para = body_content[idx].get("paragraph")
+                if para:
+                    t = "".join(pe.get("textRun", {}).get("content", "") for pe in para.get("elements", [])).strip()
+                    if t:
+                        location = t
+                        idx += 1
+                        break
+                idx += 1
 
-        while idx < len(body_content):
-            para = body_content[idx].get("paragraph")
-            if para:
-                t = "".join(pe.get("textRun", {}).get("content", "") for pe in para.get("elements", [])).strip()
-                if t:
-                    dates_raw = t
-                    idx += 1
-                    break
-            idx += 1
+            while idx < len(body_content):
+                para = body_content[idx].get("paragraph")
+                if para:
+                    t = "".join(pe.get("textRun", {}).get("content", "") for pe in para.get("elements", [])).strip()
+                    if t:
+                        dates_raw = t
+                        idx += 1
+                        break
+                idx += 1
 
-    content_start_idx = idx
-    start_date, end_date = _parse_event_dates(dates_raw, default_year=year)
+        content_start_idx = idx
+        start_date, end_date = _parse_event_dates(dates_raw, default_year=year)
 
     body_paras = []
     for el in body_content[content_start_idx:]:
@@ -3717,6 +3725,7 @@ def _build_gutenberg_from_doc_ast(
     img_map: dict[str, dict],
     takeaways: list[str],
     content_start_idx: int = 0,
+    is_article: bool = False,
 ) -> str:
     takeaway_items = "".join(
         f"<!-- wp:list-item -->\n<li>{html.escape(t)}</li>\n<!-- /wp:list-item -->\n\n" for t in takeaways
@@ -3735,6 +3744,12 @@ def _build_gutenberg_from_doc_ast(
         f'<!-- wp:paragraph -->\n<p></p>\n<!-- /wp:paragraph -->'
     )
 
+    three_enters = (
+        '<!-- wp:paragraph -->\n<p></p>\n<!-- /wp:paragraph -->\n\n'
+        '<!-- wp:paragraph -->\n<p></p>\n<!-- /wp:paragraph -->\n\n'
+        '<!-- wp:paragraph -->\n<p></p>\n<!-- /wp:paragraph -->'
+    )
+
     blocks: list[str] = []
     group_inserted = False
     idx = content_start_idx
@@ -3749,13 +3764,14 @@ def _build_gutenberg_from_doc_ast(
         style = (para.get("paragraphStyle") or {}).get("namedStyleType", "")
         elements = para.get("elements", [])
 
-        # Check for image
+        # Check for image if not an article
         img_id = None
-        for pe in elements:
-            io = pe.get("inlineObjectElement")
-            if io:
-                img_id = io.get("inlineObjectId")
-                break
+        if not is_article:
+            for pe in elements:
+                io = pe.get("inlineObjectElement")
+                if io:
+                    img_id = io.get("inlineObjectId")
+                    break
 
         if img_id:
             if not group_inserted:
@@ -3789,18 +3805,28 @@ def _build_gutenberg_from_doc_ast(
                 group_inserted = True
             h_text = "".join(pe.get("textRun", {}).get("content", "") for pe in elements).strip()
             anchor = f"h-{_slugify_anchor(h_text)}"
-            h_block = (
-                f'<!-- wp:heading {{"anchor":"{anchor}"}} -->\n'
-                f'<h2 id="{anchor}" class="wp-block-heading"><strong>{html.escape(h_text)}</strong></h2>\n'
-                f'<!-- /wp:heading -->'
-            )
+            if is_article:
+                h_block = (
+                    f'<!-- wp:heading {{"anchor":"{anchor}"}} -->\n'
+                    f'<h2 id="{anchor}" class="wp-block-heading"><strong>{html.escape(h_text)}</strong></h2>\n'
+                    f'<!-- /wp:heading -->\n\n'
+                    f'{three_enters}'
+                )
+            else:
+                h_block = (
+                    f'<!-- wp:heading {{"anchor":"{anchor}"}} -->\n'
+                    f'<h2 id="{anchor}" class="wp-block-heading"><strong>{html.escape(h_text)}</strong></h2>\n'
+                    f'<!-- /wp:heading -->'
+                )
             blocks.append(h_block)
         else:
             para_block = f'<!-- wp:paragraph -->\n<p>{p_text}</p>\n<!-- /wp:paragraph -->'
             blocks.append(para_block)
 
     if not group_inserted:
-        if blocks:
+        if len(blocks) >= 2:
+            blocks.insert(2, group_block)
+        elif blocks:
             blocks.insert(1, group_block)
         else:
             blocks.append(group_block)
@@ -3954,17 +3980,25 @@ async def events_to_publish() -> dict:
 
 
 @router.post("/api/thailandnow/events/analyze-card")
+@router.post("/api/thailandnow/articles/analyze-card")
 async def analyze_card(payload: dict = Body(default={})) -> dict:
-    """Fetch card attachments & desc, find Google Doc, extract text, and run Gem SEO."""
+    """Fetch card attachments & desc, find Google Doc, extract text, and run Gem SEO.
+    Supports both Events (default) and Articles (kind='article' or card name starting with 'Article |')."""
     card_id = (payload.get("card_id") or "").strip()
     if not card_id:
         raise HTTPException(400, "card_id required")
+
+    kind = (payload.get("kind") or "").strip().lower()
 
     card = await _trello("GET", f"/cards/{card_id}", {"fields": "name,desc,due"})
     if not isinstance(card, dict) or not card.get("name"):
         raise HTTPException(404, f"Trello card {card_id} not found")
     card_name = card.get("name", "")
     card_desc = card.get("desc", "")
+
+    if not kind:
+        kind = "article" if card_name.lower().startswith("article") else "event"
+    is_article = (kind == "article")
 
     due_raw = card.get("due")
     year = datetime.now().year
@@ -4006,10 +4040,11 @@ async def analyze_card(payload: dict = Body(default={})) -> dict:
         card_name=card_name,
         default_year=year,
         append_year=False,
+        is_article=is_article,
     )
     title = parsed["title"]
     clean_body = parsed["clean_body_text"] or doc_text
-    category = "Events"
+    category = "Articles" if is_article else "Events"
 
     seo, seo_model = await _generate_event_seo(title, clean_body, category)
     best_kp, best_meta = _seo_best(clean_body, seo["keyphrases"], seo["metas"], title=title)
@@ -4019,6 +4054,7 @@ async def analyze_card(payload: dict = Body(default={})) -> dict:
     return {
         "card_id": card_id,
         "title": title,
+        "kind": kind,
         "location": parsed["location"],
         "dates_raw": parsed["dates_raw"],
         "start_date": parsed["start_date"],
@@ -4030,16 +4066,23 @@ async def analyze_card(payload: dict = Body(default={})) -> dict:
 
 
 @router.post("/api/thailandnow/events/publish-from-card")
+@router.post("/api/thailandnow/articles/publish-from-card")
 async def publish_event_from_card(payload: dict = Body(default={})) -> dict:
     card_id = (payload.get("card_id") or "").strip()
     if not card_id:
         raise HTTPException(400, "card_id required")
+
+    kind = (payload.get("kind") or "").strip().lower()
 
     card = await _trello("GET", f"/cards/{card_id}", {"fields": "name,desc,due"})
     if not isinstance(card, dict) or not card.get("name"):
         raise HTTPException(404, f"Trello card {card_id} not found")
     card_name = card.get("name", "")
     card_desc = card.get("desc", "")
+
+    if not kind:
+        kind = "article" if card_name.lower().startswith("article") else "event"
+    is_article = (kind == "article")
 
     due_raw = card.get("due")
     year = datetime.now().year
@@ -4080,87 +4123,92 @@ async def publish_event_from_card(payload: dict = Body(default={})) -> dict:
         doc_html=doc_html,
         card_name=card_name,
         default_year=year,
-        append_year=True,
+        append_year=(not is_article),
+        is_article=is_article,
     )
     title = parsed["title"]
     clean_body = parsed["clean_body_text"] or doc_text
-    category = "Events"
+    category = "Articles" if is_article else "Events"
 
     img_map: dict[str, dict] = {}
     images_uploaded = 0
 
-    # 1. Upload inline images from Google Docs AST if available
-    inline_objs = parsed.get("inline_objects") or {}
-    if inline_objs:
-        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as c:
-            for idx, (k, v) in enumerate(inline_objs.items()):
-                emb = (v.get("inlineObjectProperties") or {}).get("embeddedObject") or {}
-                uri = (emb.get("imageProperties") or {}).get("contentUri")
-                if not uri:
-                    continue
-                try:
-                    r_img = await c.get(uri)
-                    if r_img.status_code == 200:
-                        c_type = r_img.headers.get("content-type", "image/png")
-                        ext = "png" if "png" in c_type else ("webp" if "webp" in c_type else "jpg")
-                        alt = await _agy_describe_image(r_img.content, ext=ext)
+    # Inline image uploads only for Events (Articles leave 3 enters under each H2 for manual image placement)
+    if not is_article:
+        inline_objs = parsed.get("inline_objects") or {}
+        if inline_objs:
+            async with httpx.AsyncClient(timeout=30, follow_redirects=True) as c:
+                for idx, (k, v) in enumerate(inline_objs.items()):
+                    emb = (v.get("inlineObjectProperties") or {}).get("embeddedObject") or {}
+                    uri = (emb.get("imageProperties") or {}).get("contentUri")
+                    if not uri:
+                        continue
+                    try:
+                        r_img = await c.get(uri)
+                        if r_img.status_code == 200:
+                            c_type = r_img.headers.get("content-type", "image/png")
+                            ext = "png" if "png" in c_type else ("webp" if "webp" in c_type else "jpg")
+                            alt = await _agy_describe_image(r_img.content, ext=ext)
+                            media = await _wp_upload_media_bytes(
+                                r_img.content,
+                                filename=f"event-{card_id}-{idx+1}.{ext}",
+                                content_type=f"image/{ext}",
+                                alt_text=alt,
+                            )
+                            if media and media.get("id"):
+                                img_map[k] = media
+                                images_uploaded += 1
+                    except Exception:
+                        pass
+        elif doc_html:
+            img_urls = re.findall(r'<img\b[^>]*?\bsrc=["\']([^"\']+)["\']', doc_html, re.IGNORECASE)
+            async with httpx.AsyncClient(timeout=20, follow_redirects=True) as c:
+                for idx, src in enumerate(img_urls):
+                    if src in img_map:
+                        continue
+                    try:
+                        img_bytes: bytes | None = None
+                        ext = "jpg"
+                        if src.startswith("data:"):
+                            mext = re.match(r"data:image/([a-zA-Z0-9.+-]+)", src)
+                            ext = (mext.group(1).lower().split("+")[0] if mext else "png")
+                            ext = "jpg" if ext in ("jpeg", "jpe") else (ext.split(".")[0] or "png")
+                            b64 = src.split(",", 1)[1] if "," in src else ""
+                            img_bytes = base64.b64decode(b64) if b64 else None
+                        elif src.startswith("http"):
+                            r_img = await c.get(src)
+                            if r_img.status_code != 200:
+                                continue
+                            c_type = r_img.headers.get("content-type", "image/jpeg")
+                            ext = "png" if "png" in c_type else ("webp" if "webp" in c_type else "jpg")
+                            img_bytes = r_img.content
+                        else:
+                            continue
+                        if not img_bytes:
+                            continue
+                        alt = await _agy_describe_image(img_bytes, ext=ext)
                         media = await _wp_upload_media_bytes(
-                            r_img.content,
+                            img_bytes,
                             filename=f"event-{card_id}-{idx+1}.{ext}",
                             content_type=f"image/{ext}",
                             alt_text=alt,
                         )
                         if media and media.get("id"):
-                            img_map[k] = media
+                            img_map[src] = media
                             images_uploaded += 1
-                except Exception:
-                    pass
-    elif doc_html:
-        # Fallback to HTML export images
-        img_urls = re.findall(r'<img\b[^>]*?\bsrc=["\']([^"\']+)["\']', doc_html, re.IGNORECASE)
-        async with httpx.AsyncClient(timeout=20, follow_redirects=True) as c:
-            for idx, src in enumerate(img_urls):
-                if src in img_map:
-                    continue
-                try:
-                    img_bytes: bytes | None = None
-                    ext = "jpg"
-                    if src.startswith("data:"):
-                        mext = re.match(r"data:image/([a-zA-Z0-9.+-]+)", src)
-                        ext = (mext.group(1).lower().split("+")[0] if mext else "png")
-                        ext = "jpg" if ext in ("jpeg", "jpe") else (ext.split(".")[0] or "png")
-                        b64 = src.split(",", 1)[1] if "," in src else ""
-                        img_bytes = base64.b64decode(b64) if b64 else None
-                    elif src.startswith("http"):
-                        r_img = await c.get(src)
-                        if r_img.status_code != 200:
-                            continue
-                        c_type = r_img.headers.get("content-type", "image/jpeg")
-                        ext = "png" if "png" in c_type else ("webp" if "webp" in c_type else "jpg")
-                        img_bytes = r_img.content
-                    else:
-                        continue
-                    if not img_bytes:
-                        continue
-                    alt = await _agy_describe_image(img_bytes, ext=ext)
-                    media = await _wp_upload_media_bytes(
-                        img_bytes,
-                        filename=f"event-{card_id}-{idx+1}.{ext}",
-                        content_type=f"image/{ext}",
-                        alt_text=alt,
-                    )
-                    if media and media.get("id"):
-                        img_map[src] = media
-                        images_uploaded += 1
-                except Exception:
-                    pass
+                    except Exception:
+                        pass
 
     seo_data, seo_model = await _generate_event_seo(title, clean_body, category)
     takeaways = seo_data.get("ai_b") or []
 
     if doc_json and parsed.get("body_content"):
         content = _build_gutenberg_from_doc_ast(
-            parsed["body_content"], img_map, takeaways, parsed["content_start_idx"]
+            parsed["body_content"],
+            img_map,
+            takeaways,
+            parsed["content_start_idx"],
+            is_article=is_article,
         )
     else:
         # Fallback when no AST available
@@ -4197,9 +4245,11 @@ async def publish_event_from_card(payload: dict = Body(default={})) -> dict:
         "slug": slug,
     }
 
-    res = await _wp("POST", "/event", json_body=wp_body)
+    # Articles post to /posts (standard post), Events post to /event
+    wp_endpoint = "/posts" if is_article else "/event"
+    res = await _wp("POST", wp_endpoint, json_body=wp_body)
     if not res or not isinstance(res, dict) or "id" not in res:
-        raise HTTPException(502, "WordPress event creation returned invalid response")
+        raise HTTPException(502, f"WordPress {wp_endpoint} creation returned invalid response")
 
     post_id = res["id"]
     permalink = res.get("link", "")
@@ -4210,6 +4260,7 @@ async def publish_event_from_card(payload: dict = Body(default={})) -> dict:
         "wp_id": post_id,
         "link": link,
         "status": "draft",
+        "kind": kind,
         "title": title,
         "location": parsed["location"],
         "dates_raw": parsed["dates_raw"],

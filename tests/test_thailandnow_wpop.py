@@ -58,7 +58,7 @@ async def test_analyze_card_happy_path_attachment(monkeypatch):
     async def mock_generate_event_seo(title, body_text, category="Events"):
         assert title == "AUG #02"  # Prefix stripped!
         assert body_text == "Full text content of Google Doc AUG #02."
-        assert category == "Events"
+        assert category == "Articles"  # Card name starts with "Article |" → auto-detected
         seo = {
             "keyphrases": ["k1", "k2", "k3", "k4", "k5"],
             "metas": ["m1", "m2", "m3", "m4", "m5"],
@@ -553,3 +553,84 @@ def test_extract_google_doc_data_and_build_gutenberg():
     assert "<p>Intro paragraph 1 content.</p>" in gutenberg
     assert "<p>Intro paragraph 2 content.</p>" in gutenberg
 
+
+def test_extract_google_doc_data_article_mode():
+    """Articles skip location/date rows — content starts immediately after H1."""
+    from app.thailandnow import _extract_google_doc_data
+
+    doc_ast = {
+        "body": {
+            "content": [
+                {"paragraph": {"paragraphStyle": {"namedStyleType": "NORMAL_TEXT"}, "elements": [{"textRun": {"content": "Editor note\n"}}]}},
+                {"paragraph": {"paragraphStyle": {"namedStyleType": "HEADING_1"}, "elements": [{"textRun": {"content": "Thai PM wraps 1st Indonesia visit\n"}}]}},
+                {"paragraph": {"paragraphStyle": {"namedStyleType": "NORMAL_TEXT"}, "elements": [{"textRun": {"content": "Thai Prime Minister Anutin concluded a visit.\n"}}]}},
+                {"paragraph": {"paragraphStyle": {"namedStyleType": "NORMAL_TEXT"}, "elements": [{"textRun": {"content": "The trip ran August 3rd to 4th.\n"}}]}},
+                {"paragraph": {"paragraphStyle": {"namedStyleType": "HEADING_2"}, "elements": [{"textRun": {"content": "Economic agenda\n"}}]}},
+                {"paragraph": {"paragraphStyle": {"namedStyleType": "NORMAL_TEXT"}, "elements": [{"textRun": {"content": "Trade talks progressed.\n"}}]}},
+            ]
+        },
+        "inlineObjects": {}
+    }
+
+    parsed = _extract_google_doc_data(
+        doc_ast, card_name="Article | AUG #02", default_year=2026, append_year=False, is_article=True
+    )
+    assert parsed["title"] == "Thai PM wraps 1st Indonesia visit"
+    # No location or dates for articles
+    assert parsed["location"] == ""
+    assert parsed["dates_raw"] == ""
+    assert parsed["start_date"] == ""
+    assert parsed["end_date"] == ""
+    # Intro para 1 is in body
+    assert "Thai Prime Minister Anutin" in parsed["clean_body_text"]
+
+
+def test_build_gutenberg_from_doc_ast_article_three_enters():
+    """Articles get 3 empty-para spacers directly under each H2."""
+    from app.thailandnow import _extract_google_doc_data, _build_gutenberg_from_doc_ast
+    import re
+
+    doc_ast = {
+        "body": {
+            "content": [
+                {"paragraph": {"paragraphStyle": {"namedStyleType": "HEADING_1"}, "elements": [{"textRun": {"content": "Test Article Title\n"}}]}},
+                {"paragraph": {"paragraphStyle": {"namedStyleType": "NORMAL_TEXT"}, "elements": [{"textRun": {"content": "Intro para 1.\n"}}]}},
+                {"paragraph": {"paragraphStyle": {"namedStyleType": "NORMAL_TEXT"}, "elements": [{"textRun": {"content": "Intro para 2.\n"}}]}},
+                {"paragraph": {"paragraphStyle": {"namedStyleType": "HEADING_2"}, "elements": [{"textRun": {"content": "Section One\n"}}]}},
+                {"paragraph": {"paragraphStyle": {"namedStyleType": "NORMAL_TEXT"}, "elements": [{"textRun": {"content": "Body text under section one.\n"}}]}},
+                {"paragraph": {"paragraphStyle": {"namedStyleType": "HEADING_2"}, "elements": [{"textRun": {"content": "Section Two\n"}}]}},
+                {"paragraph": {"paragraphStyle": {"namedStyleType": "NORMAL_TEXT"}, "elements": [{"textRun": {"content": "Body text under section two.\n"}}]}},
+            ]
+        },
+        "inlineObjects": {}
+    }
+
+    parsed = _extract_google_doc_data(doc_ast, is_article=True)
+    takeaways = ["Key point one", "Key point two"]
+    gutenberg = _build_gutenberg_from_doc_ast(
+        parsed["body_content"], {}, takeaways, parsed["content_start_idx"], is_article=True
+    )
+
+    # Key Takeaways group block present
+    assert '<!-- wp:group {"style":{"color":{"background":"#efefef"}}' in gutenberg
+    assert '<h2 id="h-key-takeaways"' in gutenberg
+    assert "<li>Key point one</li>" in gutenberg
+
+    empty_para = "<!-- wp:paragraph -->\n<p></p>\n<!-- /wp:paragraph -->"
+
+    # Section One heading followed by 3 empty paras before body text
+    pos = gutenberg.find('id="h-section-one"')
+    assert pos != -1
+    section_chunk = gutenberg[pos:gutenberg.find("<p>Body text under section one", pos)]
+    count = section_chunk.count(empty_para)
+    assert count == 3, f"Expected 3 empty-para spacers after H2, got {count}"
+
+    # Section Two also gets 3 spacers
+    pos2 = gutenberg.find('id="h-section-two"')
+    assert pos2 != -1
+    section2_chunk = gutenberg[pos2:gutenberg.find("<p>Body text under section two", pos2)]
+    count2 = section2_chunk.count(empty_para)
+    assert count2 == 3, f"Expected 3 empty-para spacers after second H2, got {count2}"
+
+    # No image blocks in article mode
+    assert "wp:image" not in gutenberg
