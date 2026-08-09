@@ -396,6 +396,7 @@ interface NewslineDocgenResponse {
   dry_run?: boolean;
   success?: boolean;
   fy_be?: number;
+  period?: number | null;
   folder?: {
     id?: string;
     name?: string;
@@ -742,10 +743,25 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
   const [autofillApplying, setAutofillApplying] = useState<boolean>(false);
 
   // Sub-tab ③: NL Document Generator state (12 months x 3 templates bulk scaffold)
+  const MONTHS_FY_ORDER = [
+    { period: 1, month: 10, name_th: "ตุลาคม", year_offset: -1 },
+    { period: 2, month: 11, name_th: "พฤศจิกายน", year_offset: -1 },
+    { period: 3, month: 12, name_th: "ธันวาคม", year_offset: -1 },
+    { period: 4, month: 1, name_th: "มกราคม", year_offset: 0 },
+    { period: 5, month: 2, name_th: "กุมภาพันธ์", year_offset: 0 },
+    { period: 6, month: 3, name_th: "มีนาคม", year_offset: 0 },
+    { period: 7, month: 4, name_th: "เมษายน", year_offset: 0 },
+    { period: 8, month: 5, name_th: "พฤษภาคม", year_offset: 0 },
+    { period: 9, month: 6, name_th: "มิถุนายน", year_offset: 0 },
+    { period: 10, month: 7, name_th: "กรกฎาคม", year_offset: 0 },
+    { period: 11, month: 8, name_th: "สิงหาคม", year_offset: 0 },
+    { period: 12, month: 9, name_th: "กันยายน", year_offset: 0 },
+  ];
   const currentYear = now.getFullYear();
   const currentMonth = now.getMonth() + 1;
   const defaultFyBe = currentYear + 543 + (currentMonth >= 10 ? 1 : 0);
   const [bulkFyBe, setBulkFyBe] = useState<string>(String(defaultFyBe));
+  const [bulkPeriod, setBulkPeriod] = useState<string>("all");
   const [bulkPreview, setBulkPreview] = useState<NewslineDocgenResponse | null>(null);
   const [bulkResult, setBulkResult] = useState<NewslineDocgenResponse | null>(null);
   const [bulkLoading, setBulkLoading] = useState<boolean>(false);
@@ -1248,12 +1264,16 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
     setBulkPreview(null);
     setBulkResult(null);
     try {
+      const payload: Record<string, unknown> = {
+        fy_be: bulkFyBe.trim(),
+      };
+      if (bulkPeriod && bulkPeriod !== "all") {
+        payload.period = parseInt(bulkPeriod, 10);
+      }
       const res = await fetch("/api/newsroom/newsline-docgen/preview", {
         method: "POST",
         headers: CT,
-        body: JSON.stringify({
-          fy_be: bulkFyBe.trim(),
-        }),
+        body: JSON.stringify(payload),
       });
       if (!res.ok) {
         const d = await res.json().catch(() => ({ detail: res.statusText }));
@@ -1274,12 +1294,16 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
     setBulkGenerating(true);
     setError(null);
     try {
+      const payload: Record<string, unknown> = {
+        fy_be: bulkFyBe.trim(),
+      };
+      if (bulkPeriod && bulkPeriod !== "all") {
+        payload.period = parseInt(bulkPeriod, 10);
+      }
       const res = await fetch("/api/newsroom/newsline-docgen/generate", {
         method: "POST",
         headers: CT,
-        body: JSON.stringify({
-          fy_be: bulkFyBe.trim(),
-        }),
+        body: JSON.stringify(payload),
       });
       if (!res.ok) {
         const d = await res.json().catch(() => ({ detail: res.statusText }));
@@ -4043,7 +4067,7 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
                   <input
                     type="text"
                     className="input mono px-2 py-1 text-xs"
-                    style={{ width: 100 }}
+                    style={{ width: 90 }}
                     placeholder="e.g. 2569"
                     value={bulkFyBe}
                     onChange={(e) => {
@@ -4054,8 +4078,34 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
                   />
                 </label>
 
+                <label className="flex items-center gap-1.5 mono text-xs">
+                  <span className="label">Period (งวดที่)</span>
+                  <select
+                    className="input mono px-2 py-1 text-xs"
+                    value={bulkPeriod}
+                    onChange={(e) => {
+                      setBulkPeriod(e.target.value);
+                      setBulkPreview(null);
+                      setBulkResult(null);
+                    }}
+                  >
+                    <option value="all">All missing (12 periods · 36 docs)</option>
+                    {MONTHS_FY_ORDER.map((item) => {
+                      const fyNum = parseInt(bulkFyBe, 10) || 2569;
+                      const calBe = fyNum + item.year_offset;
+                      return (
+                        <option key={item.period} value={String(item.period)}>
+                          งวดที่ {item.period} — {item.name_th} {calBe}
+                        </option>
+                      );
+                    })}
+                  </select>
+                </label>
+
                 <span className="text-xs mono" style={{ color: "var(--color-muted)" }}>
-                  Thai FY (Oct 1 – Sep 30) · Generates 12 months × 3 templates = 36 docs
+                  {bulkPeriod === "all"
+                    ? "Thai FY (Oct 1 – Sep 30) · Generates 12 months × 3 templates = 36 docs"
+                    : "Single Period · Generates 3 docs (QR + Main report + Rundown)"}
                 </span>
 
                 <div className="ml-auto flex gap-2">
@@ -4064,15 +4114,15 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
                     onClick={() => void handleDocgenPreview()}
                     disabled={bulkLoading || bulkGenerating || !bulkFyBe.trim()}
                   >
-                    {bulkLoading ? "PREVIEWING…" : "PREVIEW (36 DOCS)"}
+                    {bulkLoading ? "PREVIEWING…" : `PREVIEW (${bulkPeriod === "all" ? "36 DOCS" : "3 DOCS"})`}
                   </button>
                   <button
                     className="btn btn--compact btn--signal"
                     onClick={() => void handleDocgenGenerate()}
                     disabled={!bulkPreview || bulkLoading || bulkGenerating}
-                    title={!bulkPreview ? "Run PREVIEW first" : "Duplicate templates in Google Drive"}
+                    title={!bulkPreview ? "Run PREVIEW first" : "Generate and fill templates in Google Drive"}
                   >
-                    {bulkGenerating ? "GENERATING…" : "GENERATE"}
+                    {bulkGenerating ? "GENERATING…" : `GENERATE (${bulkPeriod === "all" ? "ALL MISSING" : `PERIOD ${bulkPeriod}`})`}
                   </button>
                 </div>
               </div>
@@ -4191,7 +4241,7 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
                 ) : bulkPreview ? (
                   <div className="flex flex-col gap-3">
                     <span className="label mb-1 block" style={{ color: "var(--color-signal)" }}>
-                      PLANNED 36 DOCUMENTS ACROSS 12 FISCAL MONTHS
+                      PLANNED {bulkPreview.total_planned ?? (bulkPreview.periods?.reduce((acc, p) => acc + p.docs.length, 0) ?? 36)} DOCUMENTS {bulkPeriod === "all" ? "ACROSS 12 FISCAL MONTHS" : `FOR PERIOD ${bulkPeriod}`}
                     </span>
                     <div className="flex flex-col gap-2">
                       {bulkPreview.periods?.map((p) => (
@@ -4242,7 +4292,7 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
                   </div>
                 ) : (
                   <div className="flex flex-1 flex-col items-center justify-center gap-2">
-                    <span className="label">— Enter Fiscal Year (BE) and click PREVIEW (36 DOCS) —</span>
+                    <span className="label">— Select Period & Fiscal Year (BE) and click PREVIEW —</span>
                   </div>
                 )}
               </div>

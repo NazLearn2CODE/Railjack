@@ -6,6 +6,9 @@ venv/
 *.egg-info/
 .pytest_cache/
 .ruff_cache/
+*.db
+*.db-shm
+*.db-wal
 
 # Runtime — machine-local logs (session logs + any generated run logs)
 logs/

@@ -20,6 +20,7 @@ _fatal into a clean HTTP 400.
 from __future__ import annotations
 
 import argparse
+import calendar
 import copy
 import datetime
 import io
@@ -46,8 +47,8 @@ except ImportError:
 
 # --- binding contract (NEWSLINE-REPORTS-BRIEF.md) ------------------------
 DEST_ROOT_FOLDER = "1aregEEnnZPm2JhP2_-S0X03f8a-5ViuN"  # "ส่งงาน NEWLINE (Producer)"
-TEMPLATE_COVER = "1vqhrBRUUgbDSX9PoNBaRWDr6mqPSSgU7"
-TEMPLATE_LOG = "1FFRqsOV8XdgDPAlM0u0Vyzak8LyN71bc"
+TEMPLATE_COVER = "1kxM-xzgbDWBxqott2pMUTZwhxvhFN-89IfmBAKkGxng"
+TEMPLATE_LOG = "1RryObHlaO7x5uWU2Fuhn60EczWA5TzchvjgQ133Bu1w"
 TEMPLATE_RUNDOWN = "15T7kZZqmlGKHkvhysbzVA79PH_PcEB1weu10zR1ygSM"
 
 DEFAULT_TOKEN = Path.home() / ".config" / "railjack" / "google_token.json"
@@ -1673,10 +1674,235 @@ MONTHS_FY_ORDER = [
 ]
 
 
-def build_docgen_plan(fy_be: int) -> list[dict]:
-    """Generate plan for 36 docs (12 months × 3 templates) for given fiscal year (BE)."""
+def period_date_range(period: int, fy_be: int) -> tuple[datetime.date, datetime.date, int]:
+    """Derive (start_ce, end_ce, cal_be) for given period (1-12) and fiscal year BE.
+
+    Rule:
+    - period 1 (Oct): start = date(cal_ce, 10, 1), end = date(cal_ce, 10, 20)
+    - period 12 (Sep): start = date(cal_ce, 8, 21), end = last day of Sep (date(cal_ce, 9, 30))
+    - period 2-11: start = 21st of PREVIOUS month, end = 20th of current month
+    """
+    info = next((m for m in MONTHS_FY_ORDER if m["period"] == period), None)
+    if not info:
+        raise ValueError(f"invalid period: {period} (must be 1-12)")
+    cal_be = fy_be + info["year_offset"]
+    cal_ce = cal_be - 543
+    month = info["month"]
+    if period == 1:
+        start_ce = datetime.date(cal_ce, 10, 1)
+        end_ce = datetime.date(cal_ce, 10, 20)
+    elif period == 12:
+        start_ce = datetime.date(cal_ce, 8, 21)
+        last_day = calendar.monthrange(cal_ce, 9)[1]
+        end_ce = datetime.date(cal_ce, 9, last_day)
+    else:
+        if month == 1:
+            start_ce = datetime.date(cal_ce - 1, 12, 21)
+        else:
+            start_ce = datetime.date(cal_ce, month - 1, 21)
+        end_ce = datetime.date(cal_ce, month, 20)
+    return start_ce, end_ce, cal_be
+
+
+def format_main_report_range(start_d: datetime.date, end_d: datetime.date) -> str:
+    """Format date range for main report header in Thai numerals.
+    e.g. ๒๑ กรกฎาคม - ๒๐ สิงหาคม ๒๕๖๙ (same year) or ๒๑ ธันวาคม ๒๕๖๘ - ๒๐ มกราคม ๒๕๖๙ (cross year)."""
+    start_be = be_year(start_d.year)
+    end_be = be_year(end_d.year)
+    start_day_th = to_thai_digits(start_d.day)
+    start_month_th = THAI_MONTHS[start_d.month - 1]
+    end_day_th = to_thai_digits(end_d.day)
+    end_month_th = THAI_MONTHS[end_d.month - 1]
+    end_year_th = to_thai_digits(end_be)
+
+    if start_be == end_be:
+        return f"{start_day_th} {start_month_th} - {end_day_th} {end_month_th} {end_year_th}"
+    else:
+        start_year_th = to_thai_digits(start_be)
+        return f"{start_day_th} {start_month_th} {start_year_th} - {end_day_th} {end_month_th} {end_year_th}"
+
+
+def build_qr_fill_requests(period: int, fy_be: int) -> list[dict]:
+    """Construct Docs API batchUpdate requests for QR cover doc."""
+    start_d, end_d, cal_be = period_date_range(period, fy_be)
+    start_be = be_year(start_d.year)
+    end_be = be_year(end_d.year)
+    start_month_th = THAI_MONTHS[start_d.month - 1]
+    end_month_th = THAI_MONTHS[end_d.month - 1]
+
+    # Target date range string: western digits, Thai month names, space + en-dash (\u2013) + space
+    target_range = f"{start_d.day} {start_month_th} {start_be} \u2013 {end_d.day} {end_month_th} {end_be}"
+
+    return [
+        {
+            "replaceAllText": {
+                "containsText": {
+                    "text": "....5......",
+                    "matchCase": True,
+                },
+                "replaceText": f"....{period}......",
+            }
+        },
+        {
+            "replaceAllText": {
+                "containsText": {
+                    "text": "21 กุมภาพันธ์ 2569 \u2013 20 มีนาคม 2569",
+                    "matchCase": True,
+                },
+                "replaceText": target_range,
+            }
+        },
+    ]
+
+
+def fill_qr_doc(doc_id: str, period: int, fy_be: int) -> dict:
+    """Fill copied QR cover doc via Docs API batchUpdate."""
+    clean_id = doc_id.split("/d/")[-1].split("/")[0].split("?")[0].strip()
+    requests = build_qr_fill_requests(period, fy_be)
+    return _api("POST", f"https://docs.googleapis.com/v1/documents/{clean_id}:batchUpdate", body={"requests": requests})
+
+
+def build_main_report_fill_requests(period: int, fy_be: int) -> list[dict]:
+    """Construct Docs API batchUpdate requests for main report doc (header + day-slots)."""
+    start_d, end_d, cal_be = period_date_range(period, fy_be)
+    weekdays = weekdays_in_range(start_d, end_d)
+    period_th = to_thai_digits(period)
+    fy_th = to_thai_digits(fy_be)
+    target_range_th = format_main_report_range(start_d, end_d)
+
+    # 1. Delete sample day slots (indices 208..418)
+    requests: list[dict] = [
+        {
+            "deleteContentRange": {
+                "range": {
+                    "startIndex": 208,
+                    "endIndex": 418,
+                }
+            }
+        }
+    ]
+
+    # 2. Insert new weekday slot lines at index 208
+    full_text = ""
+    style_requests: list[dict] = []
+    cur_offset = 208
+
+    for d in weekdays:
+        d_th = format_thai_numerals(d)
+        date_line = f"วันที่ {d_th}\n"
+        show1_line = "รายการ NEWSLINE\n"
+        show2_line = "รายการ NBT WORLD BRIEF (ภาคค่ำ)\n"
+        blank_line = "\n"
+
+        # Date header: 14pt bold underline Sarabun
+        style_requests.append({
+            "updateTextStyle": {
+                "range": {
+                    "startIndex": cur_offset,
+                    "endIndex": cur_offset + len(date_line),
+                },
+                "textStyle": {
+                    "bold": True,
+                    "underline": True,
+                    "fontSize": {"magnitude": 14, "unit": "PT"},
+                    "weightedFontFamily": {"fontFamily": "Sarabun", "weight": 400},
+                },
+                "fields": "bold,underline,fontSize,weightedFontFamily",
+            }
+        })
+        cur_offset += len(date_line)
+
+        # Show 1 line: 12pt plain Sarabun
+        style_requests.append({
+            "updateTextStyle": {
+                "range": {
+                    "startIndex": cur_offset,
+                    "endIndex": cur_offset + len(show1_line),
+                },
+                "textStyle": {
+                    "bold": False,
+                    "underline": False,
+                    "fontSize": {"magnitude": 12, "unit": "PT"},
+                    "weightedFontFamily": {"fontFamily": "Sarabun", "weight": 400},
+                },
+                "fields": "bold,underline,fontSize,weightedFontFamily",
+            }
+        })
+        cur_offset += len(show1_line)
+
+        # Show 2 line: 12pt plain Sarabun
+        style_requests.append({
+            "updateTextStyle": {
+                "range": {
+                    "startIndex": cur_offset,
+                    "endIndex": cur_offset + len(show2_line),
+                },
+                "textStyle": {
+                    "bold": False,
+                    "underline": False,
+                    "fontSize": {"magnitude": 12, "unit": "PT"},
+                    "weightedFontFamily": {"fontFamily": "Sarabun", "weight": 400},
+                },
+                "fields": "bold,underline,fontSize,weightedFontFamily",
+            }
+        })
+        cur_offset += len(show2_line)
+
+        cur_offset += len(blank_line)
+        full_text += date_line + show1_line + show2_line + blank_line
+
+    requests.append({
+        "insertText": {
+            "location": {"index": 208},
+            "text": full_text,
+        }
+    })
+    requests.extend(style_requests)
+
+    # 3. Header replacements via replaceAllText
+    requests.append({
+        "replaceAllText": {
+            "containsText": {"text": "งวดที่ X", "matchCase": True},
+            "replaceText": f"งวดที่ {period_th}",
+        }
+    })
+    requests.append({
+        "replaceAllText": {
+            "containsText": {"text": "ปีงบประมาณ XXXX", "matchCase": True},
+            "replaceText": f"ปีงบประมาณ {fy_th}",
+        }
+    })
+    requests.append({
+        "replaceAllText": {
+            "containsText": {"text": "ตั้งแต่วันที่ ๑ ตุลาคม - ๒๐ ตุลาคม ๒๕๖๘", "matchCase": True},
+            "replaceText": f"ตั้งแต่วันที่ {target_range_th}",
+        }
+    })
+
+    return requests
+
+
+def fill_main_report_doc(doc_id: str, period: int, fy_be: int) -> dict:
+    """Fill copied main report doc via Docs API batchUpdate."""
+    clean_id = doc_id.split("/d/")[-1].split("/")[0].split("?")[0].strip()
+    requests = build_main_report_fill_requests(period, fy_be)
+    return _api("POST", f"https://docs.googleapis.com/v1/documents/{clean_id}:batchUpdate", body={"requests": requests})
+
+
+def build_docgen_plan(fy_be: int, period: int | None = None) -> list[dict]:
+    """Generate plan for 36 docs (12 months × 3 templates) or 3 docs for a single period."""
     periods = []
-    for info in MONTHS_FY_ORDER:
+    items = MONTHS_FY_ORDER
+    if period is not None:
+        try:
+            p_num = int(period)
+        except Exception:
+            raise ValueError(f"invalid period: '{period}'")
+        items = [info for info in MONTHS_FY_ORDER if info["period"] == p_num]
+        if not items:
+            raise ValueError(f"period must be 1-12, got: {period}")
+
+    for info in items:
         p = info["period"]
         p_str = f"{p:02d}"
         cal_be = fy_be + info["year_offset"]
@@ -1702,16 +1928,27 @@ def build_docgen_plan(fy_be: int) -> list[dict]:
     return periods
 
 
-def preview_docgen(fy_be: int | str) -> dict:
-    """Preview 36 planned documents and check which ones already exist in target FY folder."""
+def preview_docgen(fy_be: int | str, period: int | None = None) -> dict:
+    """Preview planned documents and check which ones already exist in target FY folder."""
     try:
         fy = int(str(fy_be).strip())
     except Exception:
         _fatal(f"invalid fiscal year: '{fy_be}'")
         raise
 
+    p_num = None
+    if period is not None and str(period).strip():
+        try:
+            p_num = int(str(period).strip())
+        except Exception:
+            _fatal(f"invalid period: '{period}'")
+            raise
+        if p_num < 1 or p_num > 12:
+            _fatal(f"period must be 1-12, got: {p_num}")
+            raise ValueError(f"period must be 1-12, got: {p_num}")
+
     folder_id, folder_name, folder_created = find_or_create_fy_folder(DEST_ROOT_FOLDER, fy, dry=True)
-    plan_periods = build_docgen_plan(fy)
+    plan_periods = build_docgen_plan(fy, period=p_num)
 
     existing_files_map = {}
     if folder_id:
@@ -1742,6 +1979,7 @@ def preview_docgen(fy_be: int | str) -> dict:
     return {
         "dry_run": True,
         "fy_be": fy,
+        "period": p_num,
         "folder": {
             "id": folder_id,
             "name": folder_name,
@@ -1754,8 +1992,9 @@ def preview_docgen(fy_be: int | str) -> dict:
     }
 
 
-def generate_bulk_docs(fy_be: int | str, dry_run: bool = False) -> dict:
-    """Duplicate 3 templates × 12 months = 36 docs for fiscal year into target FY folder.
+def generate_bulk_docs(fy_be: int | str, period: int | None = None, dry_run: bool = False) -> dict:
+    """Duplicate templates for fiscal year into target FY folder and fill QR + main report.
+    If period (1-12) given, generates only that period's 3 docs.
     Idempotent: skips docs that already exist by name.
     """
     try:
@@ -1764,14 +2003,25 @@ def generate_bulk_docs(fy_be: int | str, dry_run: bool = False) -> dict:
         _fatal(f"invalid fiscal year: '{fy_be}'")
         raise
 
+    p_num = None
+    if period is not None and str(period).strip():
+        try:
+            p_num = int(str(period).strip())
+        except Exception:
+            _fatal(f"invalid period: '{period}'")
+            raise
+        if p_num < 1 or p_num > 12:
+            _fatal(f"period must be 1-12, got: {p_num}")
+            raise ValueError(f"period must be 1-12, got: {p_num}")
+
     if dry_run:
-        return preview_docgen(fy)
+        return preview_docgen(fy, period=p_num)
 
     folder_id, folder_name, folder_created = find_or_create_fy_folder(DEST_ROOT_FOLDER, fy, dry=False)
     if not folder_id:
         _fatal(f"Failed to find or create folder for FY {fy}")
 
-    plan_periods = build_docgen_plan(fy)
+    plan_periods = build_docgen_plan(fy, period=p_num)
     existing_files = find_existing_files(folder_id)
     existing_map = {f.get("name", "").strip(): f for f in existing_files if not f.get("name", "").startswith("###")}
 
@@ -1792,6 +2042,13 @@ def generate_bulk_docs(fy_be: int | str, dry_run: bool = False) -> dict:
                 })
             else:
                 new_id, new_name, new_link = copy_file(d["template_id"], d_name, folder_id)
+                # Fill content based on doc type
+                if d["type"] == "cover":
+                    fill_qr_doc(new_id, p["period_num"], fy)
+                elif d["type"] == "log":
+                    fill_main_report_doc(new_id, p["period_num"], fy)
+                # rundown is copy-only (no fill)
+
                 created.append({
                     "name": new_name,
                     "id": new_id,
@@ -1804,13 +2061,14 @@ def generate_bulk_docs(fy_be: int | str, dry_run: bool = False) -> dict:
         "success": True,
         "dry_run": False,
         "fy_be": fy,
+        "period": p_num,
         "folder": {
             "id": folder_id,
             "name": folder_name,
         },
         "created": created,
         "skipped": skipped,
-        "total_planned": 36,
+        "total_planned": sum(len(p["docs"]) for p in plan_periods),
         "created_count": len(created),
         "skipped_count": len(skipped),
     }
@@ -2412,13 +2670,14 @@ def main(argv=None):
         return
 
     if argv and argv[0] == "docgen":
-        p = argparse.ArgumentParser(description="NEWSLINE Document Generator (bulk 36 docs for FY)")
+        p = argparse.ArgumentParser(description="NEWSLINE Document Generator (bulk 36 docs for FY or single period)")
         p.add_argument("command", nargs="?", choices=["generate", "preview"], default="generate")
         p.add_argument("--fy-be", required=True, help="Fiscal year BE (e.g. 2569)")
+        p.add_argument("--period", type=int, default=None, help="Optional period no. (1-12) to generate single period")
         p.add_argument("--dry-run", action="store_true", help="Dry run preview mode")
         args = p.parse_args(argv[1:])
         dry = args.dry_run or args.command == "preview"
-        res = generate_bulk_docs(args.fy_be, dry_run=dry)
+        res = generate_bulk_docs(args.fy_be, period=args.period, dry_run=dry)
         print(json.dumps(res, ensure_ascii=False))
         return
 

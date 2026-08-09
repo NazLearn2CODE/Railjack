@@ -461,11 +461,15 @@ def _newsline_docgen_argv(body: dict) -> list[str]:
     fy_be = body.get("fy_be")
     if fy_be is None or not str(fy_be).strip():
         raise HTTPException(400, "fy_be required")
-    return [
+    argv = [
         PY, str(NEWSLINE_REPORTS),
         "docgen",
         "--fy-be", str(fy_be).strip(),
     ]
+    period = body.get("period")
+    if period is not None and str(period).strip():
+        argv += ["--period", str(period).strip()]
+    return argv
 
 
 @router.post("/api/newsroom/newsline-docgen/preview")

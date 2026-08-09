@@ -2610,6 +2610,132 @@ def test_newsline_rundown_routes(monkeypatch):
 # ---------------------------------------------------------------- newsline docgen tests (Sub-tab 3)
 
 
+def test_period_date_range():
+    import datetime
+    import pytest
+    from app import newsline_reports as nl_rep
+
+    # 4 verify cases for FY 2569
+    # P1 (Oct 2568): 2025-10-01 .. 2025-10-20, cal_be=2568
+    s1, e1, be1 = nl_rep.period_date_range(1, 2569)
+    assert s1 == datetime.date(2025, 10, 1)
+    assert e1 == datetime.date(2025, 10, 20)
+    assert be1 == 2568
+
+    # P2 (Nov 2568): 2025-10-21 .. 2025-11-20, cal_be=2568
+    s2, e2, be2 = nl_rep.period_date_range(2, 2569)
+    assert s2 == datetime.date(2025, 10, 21)
+    assert e2 == datetime.date(2025, 11, 20)
+    assert be2 == 2568
+
+    # P11 (Aug 2569): 2026-07-21 .. 2026-08-20, cal_be=2569
+    s11, e11, be11 = nl_rep.period_date_range(11, 2569)
+    assert s11 == datetime.date(2026, 7, 21)
+    assert e11 == datetime.date(2026, 8, 20)
+    assert be11 == 2569
+
+    # P12 (Sep 2569): 2026-08-21 .. 2026-09-30, cal_be=2569
+    s12, e12, be12 = nl_rep.period_date_range(12, 2569)
+    assert s12 == datetime.date(2026, 8, 21)
+    assert e12 == datetime.date(2026, 9, 30)
+    assert be12 == 2569
+
+    # Jan-period prev-year wrap: P4 (Jan 2569): 2025-12-21 .. 2026-01-20, cal_be=2569
+    s4, e4, be4 = nl_rep.period_date_range(4, 2569)
+    assert s4 == datetime.date(2025, 12, 21)
+    assert e4 == datetime.date(2026, 1, 20)
+    assert be4 == 2569
+
+    # Invalid periods
+    with pytest.raises(ValueError):
+        nl_rep.period_date_range(0, 2569)
+    with pytest.raises(ValueError):
+        nl_rep.period_date_range(13, 2569)
+
+
+def test_period_11_weekdays_enumeration():
+    import datetime
+    from app import newsline_reports as nl_rep
+
+    s11, e11, _ = nl_rep.period_date_range(11, 2569)
+    weekdays = nl_rep.weekdays_in_range(s11, e11)
+    assert len(weekdays) == 23
+    assert weekdays[0] == datetime.date(2026, 7, 21)
+    assert weekdays[-1] == datetime.date(2026, 8, 20)
+
+
+def test_qr_fill_requests():
+    from app import newsline_reports as nl_rep
+
+    # Period 11 FY 2569
+    reqs_11 = nl_rep.build_qr_fill_requests(11, 2569)
+    assert len(reqs_11) == 2
+    assert reqs_11[0]["replaceAllText"]["containsText"]["text"] == "....5......"
+    assert reqs_11[0]["replaceAllText"]["replaceText"] == "....11......"
+    assert reqs_11[1]["replaceAllText"]["containsText"]["text"] == "21 กุมภาพันธ์ 2569 \u2013 20 มีนาคม 2569"
+    assert reqs_11[1]["replaceAllText"]["replaceText"] == "21 กรกฎาคม 2569 \u2013 20 สิงหาคม 2569"
+
+    # Period 1 FY 2569
+    reqs_1 = nl_rep.build_qr_fill_requests(1, 2569)
+    assert reqs_1[0]["replaceAllText"]["replaceText"] == "....1......"
+    assert reqs_1[1]["replaceAllText"]["replaceText"] == "1 ตุลาคม 2568 \u2013 20 ตุลาคม 2568"
+
+    # Period 4 FY 2569 (cross-year range)
+    reqs_4 = nl_rep.build_qr_fill_requests(4, 2569)
+    assert reqs_4[0]["replaceAllText"]["replaceText"] == "....4......"
+    assert reqs_4[1]["replaceAllText"]["replaceText"] == "21 ธันวาคม 2568 \u2013 20 มกราคม 2569"
+
+
+def test_main_report_fill_requests():
+    from app import newsline_reports as nl_rep
+
+    reqs_11 = nl_rep.build_main_report_fill_requests(11, 2569)
+
+    # 1. deleteContentRange at 208..418
+    assert reqs_11[0]["deleteContentRange"]["range"] == {"startIndex": 208, "endIndex": 418}
+
+    # 2. insertText at 208
+    assert reqs_11[1]["insertText"]["location"]["index"] == 208
+    inserted = reqs_11[1]["insertText"]["text"]
+    assert "วันที่ ๒๑ กรกฎาคม ๒๕๖๙\nรายการ NEWSLINE\nรายการ NBT WORLD BRIEF (ภาคค่ำ)\n\n" in inserted
+    assert "วันที่ ๒๐ สิงหาคม ๒๕๖๙\nรายการ NEWSLINE\nรายการ NBT WORLD BRIEF (ภาคค่ำ)\n\n" in inserted
+
+    # 3. Find/replace header items
+    find_replaces = {
+        r["replaceAllText"]["containsText"]["text"]: r["replaceAllText"]["replaceText"]
+        for r in reqs_11 if "replaceAllText" in r
+    }
+    assert find_replaces.get("งวดที่ X") == "งวดที่ ๑๑"
+    assert find_replaces.get("ปีงบประมาณ XXXX") == "ปีงบประมาณ ๒๕๖๙"
+    assert find_replaces.get("ตั้งแต่วันที่ ๑ ตุลาคม - ๒๐ ตุลาคม ๒๕๖๘") == "ตั้งแต่วันที่ ๒๑ กรกฎาคม - ๒๐ สิงหาคม ๒๕๖๙"
+
+    # Style requests present
+    style_reqs = [r for r in reqs_11 if "updateTextStyle" in r]
+    assert len(style_reqs) == 23 * 3  # date + show1 + show2 per weekday
+
+
+def test_fill_docs_mocked(monkeypatch):
+    from app import newsline_reports as nl_rep
+
+    api_calls = []
+    def mock_api(method, url, body=None, params=None, headers=None, raw_response=False):
+        api_calls.append({"method": method, "url": url, "body": body})
+        return {"replies": []}
+
+    monkeypatch.setattr(nl_rep, "_api", mock_api)
+
+    nl_rep.fill_qr_doc("doc_qr_123", 11, 2569)
+    assert len(api_calls) == 1
+    assert api_calls[0]["method"] == "POST"
+    assert "documents/doc_qr_123:batchUpdate" in api_calls[0]["url"]
+    assert len(api_calls[0]["body"]["requests"]) == 2
+
+    nl_rep.fill_main_report_doc("https://docs.google.com/document/d/doc_log_456/edit", 11, 2569)
+    assert len(api_calls) == 2
+    assert api_calls[1]["method"] == "POST"
+    assert "documents/doc_log_456:batchUpdate" in api_calls[1]["url"]
+
+
 def test_build_docgen_plan():
     from app import newsline_reports as nl_rep
 
@@ -2639,6 +2765,12 @@ def test_build_docgen_plan():
     total_docs = sum(len(p["docs"]) for p in plan)
     assert total_docs == 36
 
+    # Single period plan
+    plan_p12 = nl_rep.build_docgen_plan(2569, period=12)
+    assert len(plan_p12) == 1
+    assert plan_p12[0]["period"] == "12"
+    assert len(plan_p12[0]["docs"]) == 3
+
 
 def test_docgen_preview_and_generate_mocked(monkeypatch):
     from app import newsline_reports as nl_rep
@@ -2659,18 +2791,41 @@ def test_docgen_preview_and_generate_mocked(monkeypatch):
         return f"new_{len(copied)}", name, f"https://doc/new_{len(copied)}"
     monkeypatch.setattr(nl_rep, "copy_file", mock_copy)
 
-    # 1. Preview
+    filled = []
+    monkeypatch.setattr(nl_rep, "fill_qr_doc", lambda doc_id, period, fy: filled.append(("qr", doc_id, period, fy)))
+    monkeypatch.setattr(nl_rep, "fill_main_report_doc", lambda doc_id, period, fy: filled.append(("main", doc_id, period, fy)))
+
+    # 1. Preview all 12 periods
     prev = nl_rep.preview_docgen(2569)
     assert prev["total_planned"] == 36
     assert prev["existing_count"] == 2
     assert prev["to_create_count"] == 34
 
-    # 2. Generate
+    # 2. Preview single period 11
+    prev_p11 = nl_rep.preview_docgen(2569, period=11)
+    assert prev_p11["total_planned"] == 3
+    assert prev_p11["existing_count"] == 2
+    assert prev_p11["to_create_count"] == 1
+
+    # 3. Generate single period 11 (only 1 doc created, 2 skipped; QR filled)
+    res_p11 = nl_rep.generate_bulk_docs(2569, period=11, dry_run=False)
+    assert res_p11["total_planned"] == 3
+    assert res_p11["created_count"] == 1
+    assert res_p11["skipped_count"] == 2
+    assert len(copied) == 1
+    assert len(filled) == 1
+    assert filled[0] == ("qr", "new_1", 11, 2569)
+
+    # 4. Generate all 12 periods
+    copied.clear()
+    filled.clear()
     res = nl_rep.generate_bulk_docs(2569, dry_run=False)
     assert res["total_planned"] == 36
     assert res["created_count"] == 34
     assert res["skipped_count"] == 2
     assert len(copied) == 34
+    # 12 cover + 11 log (1 log exists) = 23 fill calls; rundowns are copy-only
+    assert len(filled) == 23
     skipped_names = [s["name"] for s in res["skipped"]]
     assert "11 รันดาวน์ สิงหาคม 2569" in skipped_names
     assert "11 รายงานผลการปฏิบัติงาน สิงหาคม 2569.docx" in skipped_names
@@ -2688,14 +2843,24 @@ def test_newsline_docgen_routes(monkeypatch):
     assert argv[2:5] == ["docgen", "--fy-be", "2569"]
     assert argv[-1] == "preview"
 
+    # Preview with period
+    r_prev_p = c_prev.post(
+        "/api/newsroom/newsline-docgen/preview",
+        json={"fy_be": 2569, "period": 11},
+    )
+    assert r_prev_p.status_code == 200
+    argv_p = calls_prev[1]
+    assert argv_p[2:7] == ["docgen", "--fy-be", "2569", "--period", "11"]
+    assert argv_p[-1] == "preview"
+
     c_gen, calls_gen = _client(monkeypatch, out=b'{"created": []}')
     r_gen = c_gen.post(
         "/api/newsroom/newsline-docgen/generate",
-        json={"fy_be": "2569"},
+        json={"fy_be": "2569", "period": 12},
     )
     assert r_gen.status_code == 200
     argv_gen = calls_gen[0]
-    assert argv_gen[2:5] == ["docgen", "--fy-be", "2569"]
+    assert argv_gen[2:7] == ["docgen", "--fy-be", "2569", "--period", "12"]
     assert argv_gen[-1] == "generate"
 
     # Missing fy_be -> 400
