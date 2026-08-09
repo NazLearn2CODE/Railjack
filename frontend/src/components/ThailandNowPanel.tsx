@@ -2517,6 +2517,10 @@ interface ToPublishResp {
 interface AnalyzeCardResp {
   card_id: string;
   title: string;
+  location?: string;
+  dates_raw?: string;
+  start_date?: string;
+  end_date?: string;
   doc_text: string;
   seo_model: string;
   seo: {
@@ -2525,6 +2529,8 @@ interface AnalyzeCardResp {
     hashtags: string;
     ai_a: string;
     ai_b: string[];
+    focus_keyphrase?: string;
+    meta_description?: string;
   };
 }
 
@@ -2532,6 +2538,11 @@ interface PublishFromCardResp {
   wp_id: number;
   link: string;
   status: string;
+  title?: string;
+  location?: string;
+  dates_raw?: string;
+  start_date?: string;
+  end_date?: string;
   seo_model: string;
   images_uploaded: number;
   seo: {
@@ -2760,6 +2771,57 @@ function WpOpTab() {
           {publishErr && (
             <div className="mt-1">
               <ErrLine msg={publishErr} />
+            </div>
+          )}
+
+          {/* WordPress Event Inputs */}
+          {((analysis.location || publishResult?.location) || (analysis.dates_raw || publishResult?.dates_raw)) && (
+            <div className="flex flex-col gap-2 p-2 border border-edge bg-void rounded">
+              <div className="label">WORDPRESS EVENT INPUTS</div>
+
+              {/* Event Place */}
+              {(publishResult?.location || analysis.location) && (
+                <div className="row-in flex items-center justify-between gap-2 p-2">
+                  <div className="flex flex-col gap-0.5 overflow-hidden">
+                    <span className="mono text-xs" style={{ color: "var(--color-signal)" }}>
+                      EVENT PLACE
+                    </span>
+                    <span className="mono font-bold" style={{ color: "var(--color-phosphor)" }}>
+                      {publishResult?.location || analysis.location}
+                    </span>
+                  </div>
+                  <CopyButton text={publishResult?.location || analysis.location || ""} />
+                </div>
+              )}
+
+              {/* Start & End Date */}
+              {((publishResult?.start_date || analysis.start_date) || (publishResult?.dates_raw || analysis.dates_raw)) && (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                  <div className="row-in flex items-center justify-between gap-2 p-2">
+                    <div className="flex flex-col gap-0.5 overflow-hidden">
+                      <span className="mono text-xs" style={{ color: "var(--color-signal)" }}>
+                        START DATE {publishResult?.dates_raw || analysis.dates_raw ? `(${publishResult?.dates_raw || analysis.dates_raw})` : ""}
+                      </span>
+                      <span className="mono font-bold" style={{ color: "var(--color-phosphor)" }}>
+                        {publishResult?.start_date || analysis.start_date || "—"}
+                      </span>
+                    </div>
+                    <CopyButton text={publishResult?.start_date || analysis.start_date || ""} />
+                  </div>
+
+                  <div className="row-in flex items-center justify-between gap-2 p-2">
+                    <div className="flex flex-col gap-0.5 overflow-hidden">
+                      <span className="mono text-xs" style={{ color: "var(--color-signal)" }}>
+                        END DATE
+                      </span>
+                      <span className="mono font-bold" style={{ color: "var(--color-phosphor)" }}>
+                        {publishResult?.end_date || analysis.end_date || "—"}
+                      </span>
+                    </div>
+                    <CopyButton text={publishResult?.end_date || analysis.end_date || ""} />
+                  </div>
+                </div>
+              )}
             </div>
           )}
 

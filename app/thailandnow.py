@@ -24,6 +24,7 @@ import urllib.parse
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+import html
 from html.parser import HTMLParser
 from pathlib import Path
 from uuid import uuid4
@@ -2232,6 +2233,20 @@ async def _drive_read_doc_html(token: str, doc_id: str) -> str:
         return r.text
 
 
+async def _drive_read_doc_json(token: str, doc_id: str) -> dict:
+    """Fetch structured Google Doc AST via Docs API v1 (https://docs.googleapis.com/v1/documents/{doc_id}).
+    Returns dict AST or empty dict on error."""
+    hdr = {"Authorization": f"Bearer {token}"}
+    async with httpx.AsyncClient(timeout=30) as c:
+        try:
+            r = await c.get(f"https://docs.googleapis.com/v1/documents/{doc_id}", headers=hdr)
+            if r.status_code == 200:
+                return r.json()
+        except Exception:
+            pass
+    return {}
+
+
 def _archive_tokenize(text: str) -> set[str]:
     """Lowercase alnum tokens ≥2 chars. Strips [], quotes — only alnum runs survive."""
     return {t for t in re.findall(r"[a-z0-9]+", text.lower()) if len(t) >= 2}
@@ -3504,6 +3519,295 @@ def _clean_gutenberg_attributes(html_text: str) -> str:
     return re.sub(r"<([a-zA-Z0-9]+)\b([^>]*)>", _clean_tag, s)
 
 
+MONTHS_MAP = {
+    "january": 1, "february": 2, "march": 3, "april": 4, "may": 5, "june": 6,
+    "july": 7, "august": 8, "september": 9, "october": 10, "november": 11, "december": 12,
+    "jan": 1, "feb": 2, "mar": 3, "apr": 4, "jun": 6, "jul": 7, "aug": 8, "sep": 9, "sept": 9, "oct": 10, "nov": 11, "dec": 12
+}
+
+
+def _parse_event_dates(date_str: str, default_year: int | None = None) -> tuple[str, str]:
+    """Parse human event date strings (e.g. '7 - 9 August, 2026', 'August 7 to 9, 2026') into (YYYY-MM-DD, YYYY-MM-DD)."""
+    if not date_str:
+        return "", ""
+    s = date_str.strip()
+    year = default_year or datetime.now().year
+    m_year = re.search(r"\b(20\d{2})\b", s)
+    if m_year:
+        year = int(m_year.group(1))
+
+    s_clean = re.sub(r"(\d+)(?:st|nd|rd|th)\b", r"\1", s, flags=re.I)
+
+    # Pattern 1: '7 - 9 August, 2026' or '7 to 9 August 2026'
+    m1 = re.search(r"(\d{1,2})\s*(?:-|–|—|to|through)\s*(\d{1,2})\s+([a-zA-Z]+)", s_clean, re.I)
+    if m1:
+        d1, d2, m_name = int(m1.group(1)), int(m1.group(2)), m1.group(3).lower()
+        if m_name in MONTHS_MAP:
+            mo = MONTHS_MAP[m_name]
+            return f"{year:04d}-{mo:02d}-{d1:02d}", f"{year:04d}-{mo:02d}-{d2:02d}"
+
+    # Pattern 2: 'August 7 - 9, 2026' or 'August 7 to 9, 2026'
+    m2 = re.search(r"([a-zA-Z]+)\s+(\d{1,2})\s*(?:-|–|—|to|through)\s*(\d{1,2})", s_clean, re.I)
+    if m2:
+        m_name, d1, d2 = m2.group(1).lower(), int(m2.group(2)), int(m2.group(3))
+        if m_name in MONTHS_MAP:
+            mo = MONTHS_MAP[m_name]
+            return f"{year:04d}-{mo:02d}-{d1:02d}", f"{year:04d}-{mo:02d}-{d2:02d}"
+
+    # Pattern 3: 'July 30 - August 2, 2026'
+    m3 = re.search(r"([a-zA-Z]+)\s+(\d{1,2})\s*(?:-|–|—|to|through)\s*([a-zA-Z]+)\s+(\d{1,2})", s_clean, re.I)
+    if m3:
+        m1_name, d1, m2_name, d2 = m3.group(1).lower(), int(m3.group(2)), m3.group(3).lower(), int(m3.group(4))
+        if m1_name in MONTHS_MAP and m2_name in MONTHS_MAP:
+            mo1, mo2 = MONTHS_MAP[m1_name], MONTHS_MAP[m2_name]
+            return f"{year:04d}-{mo1:02d}-{d1:02d}", f"{year:04d}-{mo2:02d}-{d2:02d}"
+
+    # Pattern 4: Single date 'August 7, 2026' or '7 August 2026'
+    m4 = re.search(r"(\d{1,2})\s+([a-zA-Z]+)", s_clean, re.I)
+    if m4:
+        d1, m_name = int(m4.group(1)), m4.group(2).lower()
+        if m_name in MONTHS_MAP:
+            mo = MONTHS_MAP[m_name]
+            dt = f"{year:04d}-{mo:02d}-{d1:02d}"
+            return dt, dt
+
+    m5 = re.search(r"([a-zA-Z]+)\s+(\d{1,2})", s_clean, re.I)
+    if m5:
+        m_name, d1 = m5.group(1).lower(), int(m5.group(2))
+        if m_name in MONTHS_MAP:
+            mo = MONTHS_MAP[m_name]
+            dt = f"{year:04d}-{mo:02d}-{d1:02d}"
+            return dt, dt
+
+    return "", ""
+
+
+def _slugify_anchor(text: str) -> str:
+    s = re.sub(r"[^a-zA-Z0-9\s-]", "", text).strip().lower()
+    return re.sub(r"[-\s]+", "-", s)
+
+
+def _render_doc_paragraph_html(para: dict) -> str:
+    parts = []
+    for pe in para.get("elements", []):
+        tr = pe.get("textRun")
+        if not tr:
+            continue
+        content = tr.get("content", "")
+        if not content:
+            continue
+        t_style = tr.get("textStyle", {})
+        has_trailing_nl = content.endswith("\n")
+        inner = content[:-1] if has_trailing_nl else content
+        if inner:
+            inner_esc = html.escape(inner)
+            if t_style.get("bold"):
+                inner_esc = f"<strong>{inner_esc}</strong>"
+            if t_style.get("italic"):
+                inner_esc = f"<em>{inner_esc}</em>"
+            link = t_style.get("link", {}).get("url")
+            if link:
+                inner_esc = f'<a href="{link}">{inner_esc}</a>'
+            parts.append(inner_esc)
+    return "".join(parts).strip()
+
+
+def _extract_google_doc_data(
+    doc_json: dict,
+    fallback_text: str = "",
+    doc_html: str = "",
+    card_name: str = "",
+    default_year: int | None = None,
+    append_year: bool = False,
+) -> dict:
+    year = default_year or datetime.now().year
+    card_title = re.sub(r"^(Article|Event)\s*\|\s*", "", card_name, flags=re.IGNORECASE).strip() or card_name
+
+    if not doc_json or not isinstance(doc_json, dict) or "body" not in doc_json:
+        doc_title = _extract_doc_title(doc_html, fallback_text)
+        title = doc_title or card_title
+        if append_year and not re.search(r"\b20\d{2}\s*$", title):
+            title = f"{title} {year}"
+        return {
+            "title": title,
+            "location": "",
+            "dates_raw": "",
+            "start_date": "",
+            "end_date": "",
+            "clean_body_text": fallback_text,
+            "body_content": [],
+            "inline_objects": {},
+            "content_start_idx": 0,
+        }
+
+    body_content = doc_json.get("body", {}).get("content", [])
+    inline_objects = doc_json.get("inlineObjects", {})
+
+    # 1. Find H1 / Title
+    h1_idx = -1
+    doc_title = ""
+    for i, el in enumerate(body_content):
+        para = el.get("paragraph")
+        if not para:
+            continue
+        style = (para.get("paragraphStyle") or {}).get("namedStyleType", "")
+        if style in ("HEADING_1", "TITLE"):
+            h1_idx = i
+            parts = [pe.get("textRun", {}).get("content", "") for pe in para.get("elements", [])]
+            doc_title = "".join(parts).strip()
+            break
+
+    title = doc_title or card_title
+    if append_year and not re.search(r"\b20\d{2}\s*$", title):
+        title = f"{title} {year}"
+
+    # 2. Extract Location and Dates from paragraphs following H1
+    location = ""
+    dates_raw = ""
+    idx = (h1_idx + 1) if h1_idx >= 0 else 0
+
+    if h1_idx >= 0:
+        while idx < len(body_content):
+            para = body_content[idx].get("paragraph")
+            if para:
+                t = "".join(pe.get("textRun", {}).get("content", "") for pe in para.get("elements", [])).strip()
+                if t:
+                    location = t
+                    idx += 1
+                    break
+            idx += 1
+
+        while idx < len(body_content):
+            para = body_content[idx].get("paragraph")
+            if para:
+                t = "".join(pe.get("textRun", {}).get("content", "") for pe in para.get("elements", [])).strip()
+                if t:
+                    dates_raw = t
+                    idx += 1
+                    break
+            idx += 1
+
+    content_start_idx = idx
+    start_date, end_date = _parse_event_dates(dates_raw, default_year=year)
+
+    body_paras = []
+    for el in body_content[content_start_idx:]:
+        para = el.get("paragraph")
+        if para:
+            t = "".join(pe.get("textRun", {}).get("content", "") for pe in para.get("elements", [])).strip()
+            if t and not re.match(r"^\[[a-z0-9]+\]", t):
+                body_paras.append(t)
+    clean_body_text = "\n\n".join(body_paras)
+
+    return {
+        "title": title,
+        "location": location,
+        "dates_raw": dates_raw,
+        "start_date": start_date,
+        "end_date": end_date,
+        "clean_body_text": clean_body_text,
+        "body_content": body_content,
+        "inline_objects": inline_objects,
+        "content_start_idx": content_start_idx,
+    }
+
+
+def _build_gutenberg_from_doc_ast(
+    body_content: list[dict],
+    img_map: dict[str, dict],
+    takeaways: list[str],
+    content_start_idx: int = 0,
+) -> str:
+    takeaway_items = "".join(
+        f"<!-- wp:list-item -->\n<li>{html.escape(t)}</li>\n<!-- /wp:list-item -->\n\n" for t in takeaways
+    ).strip()
+
+    group_block = (
+        f'<!-- wp:paragraph -->\n<p></p>\n<!-- /wp:paragraph -->\n\n'
+        f'<!-- wp:group {{"style":{{"color":{{"background":"#efefef"}}}},"layout":{{"type":"constrained"}}}} -->\n'
+        f'<div class="wp-block-group has-background" style="background-color:#efefef"><!-- wp:heading {{"anchor":"h-key-takeaways"}} -->\n'
+        f'<h2 id="h-key-takeaways" class="wp-block-heading">Key Takeaways</h2>\n'
+        f'<!-- /wp:heading -->\n\n'
+        f'<!-- wp:list -->\n'
+        f'<ul class="wp-block-list">\n{takeaway_items}\n</ul>\n'
+        f'<!-- /wp:list --></div>\n'
+        f'<!-- /wp:group -->\n\n'
+        f'<!-- wp:paragraph -->\n<p></p>\n<!-- /wp:paragraph -->'
+    )
+
+    blocks: list[str] = []
+    group_inserted = False
+    idx = content_start_idx
+
+    while idx < len(body_content):
+        el = body_content[idx]
+        idx += 1
+        para = el.get("paragraph")
+        if not para:
+            continue
+
+        style = (para.get("paragraphStyle") or {}).get("namedStyleType", "")
+        elements = para.get("elements", [])
+
+        # Check for image
+        img_id = None
+        for pe in elements:
+            io = pe.get("inlineObjectElement")
+            if io:
+                img_id = io.get("inlineObjectId")
+                break
+
+        if img_id:
+            if not group_inserted:
+                blocks.append(group_block)
+                group_inserted = True
+            media = img_map.get(img_id)
+            if media:
+                wp_media_id = media.get("id", 0)
+                src = media.get("source_url", "")
+                alt = media.get("alt", "")
+                caption = media.get("caption", "")
+                cap_html = f'<figcaption class="wp-element-caption">{html.escape(caption)}</figcaption>' if caption else ""
+                img_block = (
+                    f'<!-- wp:image {{"id":{wp_media_id},"sizeSlug":"large","linkDestination":"none"}} -->\n'
+                    f'<figure class="wp-block-image size-large"><img src="{src}" alt="{html.escape(alt)}" class="wp-image-{wp_media_id}"/>{cap_html}</figure>\n'
+                    f'<!-- /wp:image -->'
+                )
+                blocks.append(img_block)
+                blocks.append('<!-- wp:paragraph -->\n<p></p>\n<!-- /wp:paragraph -->')
+            continue
+
+        p_text = _render_doc_paragraph_html(para)
+        if not p_text:
+            continue
+        if re.match(r"^\[[a-z0-9]+\]", p_text):
+            continue
+
+        if style == "HEADING_2":
+            if not group_inserted:
+                blocks.append(group_block)
+                group_inserted = True
+            h_text = "".join(pe.get("textRun", {}).get("content", "") for pe in elements).strip()
+            anchor = f"h-{_slugify_anchor(h_text)}"
+            h_block = (
+                f'<!-- wp:heading {{"anchor":"{anchor}"}} -->\n'
+                f'<h2 id="{anchor}" class="wp-block-heading"><strong>{html.escape(h_text)}</strong></h2>\n'
+                f'<!-- /wp:heading -->'
+            )
+            blocks.append(h_block)
+        else:
+            para_block = f'<!-- wp:paragraph -->\n<p>{p_text}</p>\n<!-- /wp:paragraph -->'
+            blocks.append(para_block)
+
+    if not group_inserted:
+        if blocks:
+            blocks.insert(1, group_block)
+        else:
+            blocks.append(group_block)
+
+    return "\n\n".join(blocks)
+
+
 def _convert_google_html_to_gutenberg(doc_html: str, img_map: dict[str, dict] | None = None) -> str:
     if not doc_html:
         return ""
@@ -3539,13 +3843,8 @@ def _convert_google_html_to_gutenberg(doc_html: str, img_map: dict[str, dict] | 
         return ""
 
     content = re.sub(r"<img\b[^>]*>", _replace_img, content, flags=re.IGNORECASE)
-
-    # Clean leftover attributes
     content = _clean_gutenberg_attributes(content)
-
-    # Clean empty paragraphs
     content = re.sub(r'<p class="wp-block-paragraph">\s*(?:&nbsp;)?\s*</p>', '', content, flags=re.IGNORECASE)
-
     return content.strip()
 
 
@@ -3661,11 +3960,21 @@ async def analyze_card(payload: dict = Body(default={})) -> dict:
     if not card_id:
         raise HTTPException(400, "card_id required")
 
-    card = await _trello("GET", f"/cards/{card_id}", {"fields": "name,desc"})
+    card = await _trello("GET", f"/cards/{card_id}", {"fields": "name,desc,due"})
     if not isinstance(card, dict) or not card.get("name"):
         raise HTTPException(404, f"Trello card {card_id} not found")
     card_name = card.get("name", "")
     card_desc = card.get("desc", "")
+
+    due_raw = card.get("due")
+    year = datetime.now().year
+    if due_raw:
+        try:
+            year = datetime.fromisoformat(str(due_raw).replace("Z", "+00:00")).year
+        except Exception:
+            m = re.match(r"^(\d{4})", str(due_raw).strip())
+            if m:
+                year = int(m.group(1))
 
     attachments = await _trello("GET", f"/cards/{card_id}/attachments", {"fields": "name,url"})
     doc_id = None
@@ -3686,17 +3995,35 @@ async def analyze_card(payload: dict = Body(default={})) -> dict:
         raise HTTPException(404, f"No Google Doc attachment or link found on card {card_id}")
 
     token = await _google_token()
-    doc_text = await _drive_read_doc(token, doc_id)
+    doc_json = await _drive_read_doc_json(token, doc_id)
+    doc_text = await _drive_read_doc(token, doc_id) if not doc_json else ""
+    doc_html = await _drive_read_doc_html(token, doc_id) if not doc_json else ""
 
-    title = re.sub(r"^(Article|Event)\s*\|\s*", "", card_name, flags=re.IGNORECASE).strip() or card_name
+    parsed = _extract_google_doc_data(
+        doc_json,
+        fallback_text=doc_text,
+        doc_html=doc_html,
+        card_name=card_name,
+        default_year=year,
+        append_year=False,
+    )
+    title = parsed["title"]
+    clean_body = parsed["clean_body_text"] or doc_text
     category = "Events"
 
-    seo, seo_model = await _generate_event_seo(title, doc_text, category)
+    seo, seo_model = await _generate_event_seo(title, clean_body, category)
+    best_kp, best_meta = _seo_best(clean_body, seo["keyphrases"], seo["metas"], title=title)
+    seo["focus_keyphrase"] = best_kp
+    seo["meta_description"] = best_meta
 
     return {
         "card_id": card_id,
         "title": title,
-        "doc_text": doc_text,
+        "location": parsed["location"],
+        "dates_raw": parsed["dates_raw"],
+        "start_date": parsed["start_date"],
+        "end_date": parsed["end_date"],
+        "doc_text": clean_body,
         "seo": seo,
         "seo_model": seo_model,
     }
@@ -3743,83 +4070,124 @@ async def publish_event_from_card(payload: dict = Body(default={})) -> dict:
         raise HTTPException(404, f"No Google Doc attachment or link found on card {card_id}")
 
     token = await _google_token()
-    doc_text = await _drive_read_doc(token, doc_id)
-    doc_html = await _drive_read_doc_html(token, doc_id)
+    doc_json = await _drive_read_doc_json(token, doc_id)
+    doc_text = await _drive_read_doc(token, doc_id) if not doc_json else ""
+    doc_html = await _drive_read_doc_html(token, doc_id) if not doc_json else ""
 
-    doc_title = _extract_doc_title(doc_html, doc_text)
-    card_title = re.sub(r"^(Article|Event)\s*\|\s*", "", card_name, flags=re.IGNORECASE).strip() or card_name
-    title = doc_title or card_title  # writer's headline, not the card name
-    if not re.search(r"\b20\d{2}\s*$", title):
-        title = f"{title} {year}"
+    parsed = _extract_google_doc_data(
+        doc_json,
+        fallback_text=doc_text,
+        doc_html=doc_html,
+        card_name=card_name,
+        default_year=year,
+        append_year=True,
+    )
+    title = parsed["title"]
+    clean_body = parsed["clean_body_text"] or doc_text
     category = "Events"
 
-    img_urls = re.findall(r'<img\b[^>]*?\bsrc=["\']([^"\']+)["\']', doc_html, re.IGNORECASE)
     img_map: dict[str, dict] = {}
     images_uploaded = 0
 
-    async with httpx.AsyncClient(timeout=20, follow_redirects=True) as c:
-        for idx, src in enumerate(img_urls):
-            if src in img_map:
-                continue
-            try:
-                img_bytes: bytes | None = None
-                ext = "jpg"
-                if src.startswith("data:"):
-                    # Google Doc export embeds images as base64 data URIs — decode directly.
-                    mext = re.match(r"data:image/([a-zA-Z0-9.+-]+)", src)
-                    ext = (mext.group(1).lower().split("+")[0] if mext else "png")
-                    ext = "jpg" if ext in ("jpeg", "jpe") else (ext.split(".")[0] or "png")
-                    b64 = src.split(",", 1)[1] if "," in src else ""
-                    img_bytes = base64.b64decode(b64) if b64 else None
-                elif src.startswith("http"):
-                    r_img = await c.get(src)
-                    if r_img.status_code != 200:
+    # 1. Upload inline images from Google Docs AST if available
+    inline_objs = parsed.get("inline_objects") or {}
+    if inline_objs:
+        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as c:
+            for idx, (k, v) in enumerate(inline_objs.items()):
+                emb = (v.get("inlineObjectProperties") or {}).get("embeddedObject") or {}
+                uri = (emb.get("imageProperties") or {}).get("contentUri")
+                if not uri:
+                    continue
+                try:
+                    r_img = await c.get(uri)
+                    if r_img.status_code == 200:
+                        c_type = r_img.headers.get("content-type", "image/png")
+                        ext = "png" if "png" in c_type else ("webp" if "webp" in c_type else "jpg")
+                        alt = await _agy_describe_image(r_img.content, ext=ext)
+                        media = await _wp_upload_media_bytes(
+                            r_img.content,
+                            filename=f"event-{card_id}-{idx+1}.{ext}",
+                            content_type=f"image/{ext}",
+                            alt_text=alt,
+                        )
+                        if media and media.get("id"):
+                            img_map[k] = media
+                            images_uploaded += 1
+                except Exception:
+                    pass
+    elif doc_html:
+        # Fallback to HTML export images
+        img_urls = re.findall(r'<img\b[^>]*?\bsrc=["\']([^"\']+)["\']', doc_html, re.IGNORECASE)
+        async with httpx.AsyncClient(timeout=20, follow_redirects=True) as c:
+            for idx, src in enumerate(img_urls):
+                if src in img_map:
+                    continue
+                try:
+                    img_bytes: bytes | None = None
+                    ext = "jpg"
+                    if src.startswith("data:"):
+                        mext = re.match(r"data:image/([a-zA-Z0-9.+-]+)", src)
+                        ext = (mext.group(1).lower().split("+")[0] if mext else "png")
+                        ext = "jpg" if ext in ("jpeg", "jpe") else (ext.split(".")[0] or "png")
+                        b64 = src.split(",", 1)[1] if "," in src else ""
+                        img_bytes = base64.b64decode(b64) if b64 else None
+                    elif src.startswith("http"):
+                        r_img = await c.get(src)
+                        if r_img.status_code != 200:
+                            continue
+                        c_type = r_img.headers.get("content-type", "image/jpeg")
+                        ext = "png" if "png" in c_type else ("webp" if "webp" in c_type else "jpg")
+                        img_bytes = r_img.content
+                    else:
                         continue
-                    c_type = r_img.headers.get("content-type", "image/jpeg")
-                    ext = "png" if "png" in c_type else ("webp" if "webp" in c_type else "jpg")
-                    img_bytes = r_img.content
-                else:
-                    continue
-                if not img_bytes:
-                    continue
-                alt = await _agy_describe_image(img_bytes, ext=ext)
-                media = await _wp_upload_media_bytes(
-                    img_bytes,
-                    filename=f"event-{card_id}-{idx+1}.{ext}",
-                    content_type=f"image/{ext}",
-                    alt_text=alt,
-                )
-                if media and media.get("id"):
-                    img_map[src] = media
-                    images_uploaded += 1
-            except Exception:
-                pass
+                    if not img_bytes:
+                        continue
+                    alt = await _agy_describe_image(img_bytes, ext=ext)
+                    media = await _wp_upload_media_bytes(
+                        img_bytes,
+                        filename=f"event-{card_id}-{idx+1}.{ext}",
+                        content_type=f"image/{ext}",
+                        alt_text=alt,
+                    )
+                    if media and media.get("id"):
+                        img_map[src] = media
+                        images_uploaded += 1
+                except Exception:
+                    pass
 
-    # Drop the title heading from the body so the post doesn't repeat its own title (matches published-house style, e.g. post 20427).
-    _body_html = doc_html
-    if doc_title:
-        _tm = re.search(r"<h[12][^>]*>(.*?)</h[12]>", doc_html, re.S | re.I)
-        if _tm and re.sub(r"<[^>]+>", "", _tm.group(1)).strip() == doc_title:
-            _body_html = doc_html[:_tm.start()] + doc_html[_tm.end():]
+    seo_data, seo_model = await _generate_event_seo(title, clean_body, category)
+    takeaways = seo_data.get("ai_b") or []
 
-    if len((doc_html or "").strip()) < 500 or not re.search(r"<(?:p|h[1-6])\b", doc_html or "", re.I):
-        gutenberg_body = _convert_text_to_gutenberg(doc_text)
+    if doc_json and parsed.get("body_content"):
+        content = _build_gutenberg_from_doc_ast(
+            parsed["body_content"], img_map, takeaways, parsed["content_start_idx"]
+        )
     else:
-        gutenberg_body = _convert_google_html_to_gutenberg(_body_html, img_map)
-    seo_data, seo_model = await _generate_event_seo(title, doc_text, category)
-    best_kp, best_meta = _seo_best(gutenberg_body, seo_data["keyphrases"], seo_data["metas"], title=title)
+        # Fallback when no AST available
+        doc_title = _extract_doc_title(doc_html, doc_text)
+        _body_html = doc_html
+        if doc_title:
+            _tm = re.search(r"<h[12][^>]*>(.*?)</h[12]>", doc_html, re.S | re.I)
+            if _tm and re.sub(r"<[^>]+>", "", _tm.group(1)).strip() == doc_title:
+                _body_html = doc_html[:_tm.start()] + doc_html[_tm.end():]
 
-    takeaways_html = "\n".join(f"<li>{b}</li>" for b in seo_data["ai_b"])
-    takeaways_block = (
-        f'<h2 class="wp-block-heading">Key Takeaways</h2>\n<ul class="wp-block-list">\n{takeaways_html}\n</ul>'
-    )
-    # Seat Key Takeaways near the top — right after the lead paragraph (published-house style, e.g. post 20427).
-    _first_p = re.search(r"</p>", gutenberg_body)
-    if _first_p:
-        at = _first_p.end()
-        content = gutenberg_body[:at] + "\n\n" + takeaways_block + "\n\n" + gutenberg_body[at:]
-    else:
-        content = takeaways_block + "\n\n" + gutenberg_body
+        if len((doc_html or "").strip()) < 500 or not re.search(r"<(?:p|h[1-6])\b", doc_html or "", re.I):
+            gutenberg_body = _convert_text_to_gutenberg(doc_text)
+        else:
+            gutenberg_body = _convert_google_html_to_gutenberg(_body_html, img_map)
+
+        takeaways_html = "\n".join(f"<li>{b}</li>" for b in takeaways)
+        takeaways_block = (
+            f'<h2 class="wp-block-heading">Key Takeaways</h2>\n<ul class="wp-block-list">\n{takeaways_html}\n</ul>'
+        )
+        _first_p = re.search(r"</p>", gutenberg_body)
+        if _first_p:
+            at = _first_p.end()
+            content = gutenberg_body[:at] + "\n\n" + takeaways_block + "\n\n" + gutenberg_body[at:]
+        else:
+            content = takeaways_block + "\n\n" + gutenberg_body
+
+    best_kp, best_meta = _seo_best(content, seo_data["keyphrases"], seo_data["metas"], title=title)
 
     slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
     wp_body = {
@@ -3836,12 +4204,17 @@ async def publish_event_from_card(payload: dict = Body(default={})) -> dict:
     post_id = res["id"]
     permalink = res.get("link", "")
     _o = urllib.parse.urlparse(permalink)
-    link = f"{_o.scheme}://{_o.netloc}/wp-admin/post.php?post={post_id}&action=edit" if _o.netloc else permalink  # editor link (permalink is blank until published)
+    link = f"{_o.scheme}://{_o.netloc}/wp-admin/post.php?post={post_id}&action=edit" if _o.netloc else permalink
 
     return {
         "wp_id": post_id,
         "link": link,
         "status": "draft",
+        "title": title,
+        "location": parsed["location"],
+        "dates_raw": parsed["dates_raw"],
+        "start_date": parsed["start_date"],
+        "end_date": parsed["end_date"],
         "seo_model": seo_model,
         "images_uploaded": images_uploaded,
         "seo": {

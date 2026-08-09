@@ -483,3 +483,73 @@ async def test_publish_event_from_card_year_already_in_title_no_double_append(mo
     assert res["wp_id"] == 1003
     assert captured["body"]["title"] == "Songkran Water Festival 2026"
     assert not captured["body"]["title"].endswith("2026 2026")
+
+
+def test_parse_event_dates():
+    from app.thailandnow import _parse_event_dates
+
+    # 1. '7 - 9 August, 2026'
+    assert _parse_event_dates("7 - 9 August, 2026") == ("2026-08-07", "2026-08-09")
+    # 2. '7 to 9 August 2026'
+    assert _parse_event_dates("7 to 9 August 2026") == ("2026-08-07", "2026-08-09")
+    # 3. 'August 7 - 9, 2026'
+    assert _parse_event_dates("August 7 - 9, 2026") == ("2026-08-07", "2026-08-09")
+    # 4. 'July 30 - August 2, 2026'
+    assert _parse_event_dates("July 30 - August 2, 2026") == ("2026-07-30", "2026-08-02")
+    # 5. Single date 'August 7, 2026'
+    assert _parse_event_dates("August 7, 2026") == ("2026-08-07", "2026-08-07")
+    # 6. '7th - 9th August 2026'
+    assert _parse_event_dates("7th - 9th August 2026") == ("2026-08-07", "2026-08-09")
+
+
+def test_extract_google_doc_data_and_build_gutenberg():
+    from app.thailandnow import _extract_google_doc_data, _build_gutenberg_from_doc_ast
+
+    doc_ast = {
+        "body": {
+            "content": [
+                # Social media guide to be discarded
+                {"paragraph": {"paragraphStyle": {"namedStyleType": "NORMAL_TEXT"}, "elements": [{"textRun": {"content": "Facebook Post\n"}}]}},
+                {"paragraph": {"paragraphStyle": {"namedStyleType": "NORMAL_TEXT"}, "elements": [{"textRun": {"content": "Instagram Post\n"}}]}},
+                # Title
+                {"paragraph": {"paragraphStyle": {"namedStyleType": "HEADING_1"}, "elements": [{"textRun": {"content": "9th Sun-Dried Squid Festival\n"}}]}},
+                # Location
+                {"paragraph": {"paragraphStyle": {"namedStyleType": "NORMAL_TEXT"}, "elements": [{"textRun": {"content": "Pak Nam Pran, Prachuap Khiri Khan\n"}}]}},
+                # Date Range
+                {"paragraph": {"paragraphStyle": {"namedStyleType": "NORMAL_TEXT"}, "elements": [{"textRun": {"content": "7 - 9 August, 2026\n"}}]}},
+                # Intro paragraph 1
+                {"paragraph": {"paragraphStyle": {"namedStyleType": "NORMAL_TEXT"}, "elements": [{"textRun": {"content": "Intro paragraph 1 content.\n"}}]}},
+                # Intro paragraph 2
+                {"paragraph": {"paragraphStyle": {"namedStyleType": "NORMAL_TEXT"}, "elements": [{"textRun": {"content": "Intro paragraph 2 content.\n"}}]}},
+                # Heading 2
+                {"paragraph": {"paragraphStyle": {"namedStyleType": "HEADING_2"}, "elements": [{"textRun": {"content": "Squid Fishing & Food Stalls\n"}}]}},
+                # Body paragraph
+                {"paragraph": {"paragraphStyle": {"namedStyleType": "NORMAL_TEXT"}, "elements": [{"textRun": {"content": "Detail about food stalls.\n"}}]}},
+            ]
+        },
+        "inlineObjects": {}
+    }
+
+    parsed = _extract_google_doc_data(doc_ast, card_name="Event | AUG #02", default_year=2026, append_year=True)
+    assert parsed["title"] == "9th Sun-Dried Squid Festival 2026"
+    assert parsed["location"] == "Pak Nam Pran, Prachuap Khiri Khan"
+    assert parsed["dates_raw"] == "7 - 9 August, 2026"
+    assert parsed["start_date"] == "2026-08-07"
+    assert parsed["end_date"] == "2026-08-09"
+
+    takeaways = ["Fresh seafood galore", "Live cultural shows"]
+    gutenberg = _build_gutenberg_from_doc_ast(parsed["body_content"], {}, takeaways, parsed["content_start_idx"])
+
+    # Verify structure:
+    # 1. Group block for Key Takeaways
+    assert '<!-- wp:group {"style":{"color":{"background":"#efefef"}},"layout":{"type":"constrained"}} -->' in gutenberg
+    assert '<h2 id="h-key-takeaways" class="wp-block-heading">Key Takeaways</h2>' in gutenberg
+    assert "<!-- wp:list -->" in gutenberg
+    assert "<li>Fresh seafood galore</li>" in gutenberg
+    # 2. Subheading 2
+    assert '<!-- wp:heading {"anchor":"h-squid-fishing-food-stalls"} -->' in gutenberg
+    assert '<h2 id="h-squid-fishing-food-stalls" class="wp-block-heading"><strong>Squid Fishing &amp; Food Stalls</strong></h2>' in gutenberg
+    # 3. Intro paragraphs
+    assert "<p>Intro paragraph 1 content.</p>" in gutenberg
+    assert "<p>Intro paragraph 2 content.</p>" in gutenberg
+
