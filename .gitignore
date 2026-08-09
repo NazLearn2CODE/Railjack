@@ -33,3 +33,6 @@ scripts/screenshots/
 
 # OS
 .DS_Store
+
+# stray local spec, not Railjack
+KANBAN-SEARCH-SPEC.md
