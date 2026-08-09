@@ -1974,3 +1974,250 @@ def test_nl_reports_preview_and_generate_routes(monkeypatch):
     assert c.post("/api/newsroom/newsline-reports/preview", json={"period": 5, "end": "2026-08-31"}).status_code == 400
     assert c.post("/api/newsroom/newsline-reports/preview", json={"period": 5, "start": "2026-08-01"}).status_code == 400
 
+
+# ---------------------------------------------------------------- newsline rundown tests (Sub-tab 1)
+
+
+def test_extract_doc_id():
+    from app import newsline_reports as nl_rep
+
+    raw_id = "12vNoZ9DJxZysBkSC86uOu1V6J8mq6nwt-HtnrWV1Ru4"
+    assert nl_rep.extract_doc_id(raw_id) == raw_id
+    assert nl_rep.extract_doc_id(f"https://docs.google.com/document/d/{raw_id}/edit") == raw_id
+    assert nl_rep.extract_doc_id(f"https://docs.google.com/document/d/{raw_id}/edit?usp=sharing") == raw_id
+    assert nl_rep.extract_doc_id(f"https://drive.google.com/open?id={raw_id}") == raw_id
+    assert nl_rep.extract_doc_id("   " + raw_id + "  ") == raw_id
+    assert nl_rep.extract_doc_id("") == ""
+
+
+def test_extract_nl_rundown_from_doc_mocked():
+    from app import newsline_reports as nl_rep
+
+    # Realistic mock of daily doc with tabs (Tab 3: NL RUNDOWN)
+    mock_doc = {
+        "title": "NL & NWB 050826",
+        "tabs": [
+            {"tabProperties": {"title": "NBTWB AM RUNDOWN", "tabId": "t.1", "index": 0}},
+            {"tabProperties": {"title": "NBTWB MID RUNDOWN", "tabId": "t.2", "index": 1}},
+            {"tabProperties": {"title": "NBTWB EVE RUNDOWN", "tabId": "t.3", "index": 2}},
+            {
+                "tabProperties": {"title": "NL RUNDOWN", "tabId": "t.0", "index": 3},
+                "documentTab": {
+                    "body": {
+                        "content": [
+                            {"paragraph": {"elements": [{"textRun": {"content": "NEWSLINE 05.AUGUST.2026 -- ANCHOR: \n"}}]}},
+                            {"table": {"tableRows": [{"tableCells": [{"content": [{"paragraph": {"elements": [{"textRun": {"content": "***JINGLE NEWSLINE***"}}]}}]}]}]}},
+                            {"paragraph": {"elements": [{"textRun": {"content": "1. Thailand and Myanmar to Sign River Cleanup Pact\n"}}]}},
+                            {"paragraph": {"elements": [{"textRun": {"content": "ครม. เห็นชอบร่างแถลงการณ์ร่วมไทย - เมียนมา\n"}}]}},
+                            {"paragraph": {"elements": [{"textRun": {"content": "2. [นาซ] Real-Time Banking System Launched\n"}}]}},
+                            {"paragraph": {"elements": [{"textRun": {"content": "\"ดีอี\" ยกระดับปราบปรามบัญชีม้า\n"}}]}},
+                            {"paragraph": {"elements": [{"textRun": {"content": "3. [SB] Informa Markets Mega Event\n"}}]}},
+                            {"paragraph": {"elements": [{"textRun": {"content": "อินฟอร์มา มาร์เก็ตส์ จัดมหกรรม 2026\n"}}]}},
+                            {"paragraph": {"elements": [{"textRun": {"content": "SB: Sanchai Noombunnam\n"}}]}},
+                            {"paragraph": {"elements": [{"textRun": {"content": "      Country General Manager\n"}}]}},
+                            {"paragraph": {"elements": [{"textRun": {"content": "4. Qatar Says US Iran Diplomacy Advances\n"}}]}},
+                            {"table": {"tableRows": [{"tableCells": [{"content": [{"paragraph": {"elements": [{"textRun": {"content": "***END CREDIT***"}}]}}]}]}]}},
+                            {"paragraph": {"elements": [{"pageBreak": {}}]}},
+                            {"paragraph": {"elements": [{"textRun": {"content": "SWDK. Full script content...\n"}}]}},
+                        ]
+                    }
+                }
+            }
+        ]
+    }
+
+    res = nl_rep.extract_nl_rundown_from_doc("12vNoZ9DJxZysBkSC86uOu1V6J8mq6nwt-HtnrWV1Ru4", doc_data=mock_doc)
+    assert res["date"] == "2026-08-05"
+    assert res["header_date"] == "05.AUGUST.2026"
+    assert res["header"] == "NEWSLINE 05.AUGUST.2026 -- ANCHOR: "
+    assert res["headline_count"] == 4
+    assert res["headlines"][0] == "1. ครม. เห็นชอบร่างแถลงการณ์ร่วมไทย - เมียนมา"
+    assert res["headlines"][1] == "2. \"ดีอี\" ยกระดับปราบปรามบัญชีม้า"
+    assert res["headlines"][2] == "3. อินฟอร์มา มาร์เก็ตส์ จัดมหกรรม 2026"
+    # International story (no Thai headline) -> English headline stripped of tags
+    assert res["headlines"][3] == "4. Qatar Says US Iran Diplomacy Advances"
+
+
+def test_monthly_doc_parsing_and_formatting():
+    from datetime import date
+    from app import newsline_reports as nl_rep
+
+    sample_monthly_text = """
+NEWSLINE 03.AUGUST.2026 -- ANCHOR: 
+
+1. นายกฯ กำชับคุมเข้มชายแดนใต้
+2. รมว.กต.โต้ ทอม แอนดรูว์ส
+
+NEWSLINE 05.AUGUST.2026 -- ANCHOR: 
+
+1. ครม. เห็นชอบร่างแถลงการณ์
+2. มท.3 ลงพื้นที่ชายแดน
+"""
+
+    blocks = nl_rep.parse_monthly_doc_text(sample_monthly_text)
+    assert len(blocks) == 2
+    assert blocks[0]["date"] == date(2026, 8, 3)
+    assert blocks[0]["headlines"] == ["1. นายกฯ กำชับคุมเข้มชายแดนใต้", "2. รมว.กต.โต้ ทอม แอนดรูว์ส"]
+    assert blocks[1]["date"] == date(2026, 8, 5)
+
+    # Insert date 2026-08-04 (should be placed between 03 and 05)
+    new_block_04 = {
+        "date": date(2026, 8, 4),
+        "header": "NEWSLINE 04.AUGUST.2026 -- ANCHOR: ",
+        "headlines": ["1. พสกนิกรเข้าสักการะพระศพฯ"],
+    }
+    blocks.append(new_block_04)
+    formatted = nl_rep.format_monthly_doc_text(blocks)
+
+    # Check sort order in formatted text
+    idx_03 = formatted.find("03.AUGUST.2026")
+    idx_04 = formatted.find("04.AUGUST.2026")
+    idx_05 = formatted.find("05.AUGUST.2026")
+    assert 0 <= idx_03 < idx_04 < idx_05
+
+    # Replace date 2026-08-05 (idempotency)
+    re_parsed = nl_rep.parse_monthly_doc_text(formatted)
+    assert len(re_parsed) == 3
+    for b in re_parsed:
+        if b["date"] == date(2026, 8, 5):
+            b["headlines"] = ["1. UPDATED HEADLINE 1", "2. UPDATED HEADLINE 2"]
+    re_formatted = nl_rep.format_monthly_doc_text(re_parsed)
+    assert "UPDATED HEADLINE 1" in re_formatted
+    assert "ครม. เห็นชอบร่างแถลงการณ์" not in re_formatted
+
+
+def test_newsline_rundown_routes(monkeypatch):
+    c, calls = _client(monkeypatch, out=b'{"daily_docs": []}')
+    r_docs = c.get("/api/newsroom/newsline-rundown/daily-docs")
+    assert r_docs.status_code == 200
+    assert calls[0] == ["python3", calls[0][1], "daily-docs"]
+
+    c_prev, calls_prev = _client(monkeypatch, out=b'{"dry_run": true, "headlines": []}')
+    r_prev = c_prev.post(
+        "/api/newsroom/newsline-rundown/preview",
+        json={"doc_id": "12vNoZ9DJxZysBkSC86uOu1V6J8mq6nwt-HtnrWV1Ru4"},
+    )
+    assert r_prev.status_code == 200
+    argv = calls_prev[0]
+    assert argv[0] == "python3"
+    assert argv[2:5] == ["rundown", "--doc-id", "12vNoZ9DJxZysBkSC86uOu1V6J8mq6nwt-HtnrWV1Ru4"]
+    assert argv[-1] == "preview"
+
+    c_fill, calls_fill = _client(monkeypatch, out=b'{"success": true}')
+    r_fill = c_fill.post(
+        "/api/newsroom/newsline-rundown/fill",
+        json={
+            "doc_id": "12vNoZ9DJxZysBkSC86uOu1V6J8mq6nwt-HtnrWV1Ru4",
+            "monthly_doc_id": "1h0J63P4i2qI_wCGmXfxQ4Tirw05AgVO9quM_7d-IUAA",
+        },
+    )
+    assert r_fill.status_code == 200
+    argv_fill = calls_fill[0]
+    assert argv_fill[2:7] == [
+        "rundown",
+        "--doc-id", "12vNoZ9DJxZysBkSC86uOu1V6J8mq6nwt-HtnrWV1Ru4",
+        "--monthly-doc-id", "1h0J63P4i2qI_wCGmXfxQ4Tirw05AgVO9quM_7d-IUAA",
+    ]
+    assert argv_fill[-1] == "fill"
+
+    # Missing doc_id -> 400
+    assert c.post("/api/newsroom/newsline-rundown/preview", json={}).status_code == 400
+    assert c.post("/api/newsroom/newsline-rundown/fill", json={"doc_id": ""}).status_code == 400
+
+
+# ---------------------------------------------------------------- newsline docgen tests (Sub-tab 3)
+
+
+def test_build_docgen_plan():
+    from app import newsline_reports as nl_rep
+
+    plan = nl_rep.build_docgen_plan(2569)
+    assert len(plan) == 12
+
+    # Period 01: Oct 2568
+    p1 = plan[0]
+    assert p1["period"] == "01"
+    assert p1["month_thai"] == "ตุลาคม"
+    assert p1["cal_be_year"] == 2568
+    assert len(p1["docs"]) == 3
+    assert p1["docs"][0]["name"] == "01 ใบรายงานผลการปฏิบัติงาน แบบ QR Code ตุลาคม 2568 ณอรรฆย์ โรจนสุวรรณ.docx"
+    assert p1["docs"][1]["name"] == "01 รายงานผลการปฏิบัติงาน ตุลาคม 2568.docx"
+    assert p1["docs"][2]["name"] == "01 รันดาวน์ ตุลาคม 2568"
+
+    # Period 11: Aug 2569
+    p11 = plan[10]
+    assert p11["period"] == "11"
+    assert p11["month_thai"] == "สิงหาคม"
+    assert p11["cal_be_year"] == 2569
+    assert p11["docs"][0]["name"] == "11 ใบรายงานผลการปฏิบัติงาน แบบ QR Code สิงหาคม 2569 ณอรรฆย์ โรจนสุวรรณ.docx"
+    assert p11["docs"][1]["name"] == "11 รายงานผลการปฏิบัติงาน สิงหาคม 2569.docx"
+    assert p11["docs"][2]["name"] == "11 รันดาวน์ สิงหาคม 2569"
+
+    # Total 36 docs
+    total_docs = sum(len(p["docs"]) for p in plan)
+    assert total_docs == 36
+
+
+def test_docgen_preview_and_generate_mocked(monkeypatch):
+    from app import newsline_reports as nl_rep
+
+    # Mock Drive operations
+    monkeypatch.setattr(nl_rep, "find_or_create_fy_folder", lambda root, fy, dry=False: ("folder_123", f"งบประมาณ {fy}", False))
+
+    # Mock folder containing some existing files (e.g. 11 รันดาวน์ สิงหาคม 2569)
+    existing_sample = [
+        {"id": "file_1", "name": "11 รันดาวน์ สิงหาคม 2569", "webViewLink": "https://doc/1"},
+        {"id": "file_2", "name": "11 รายงานผลการปฏิบัติงาน สิงหาคม 2569.docx", "webViewLink": "https://doc/2"},
+    ]
+    monkeypatch.setattr(nl_rep, "find_existing_files", lambda folder_id: existing_sample)
+
+    copied = []
+    def mock_copy(template_id, name, parent_id):
+        copied.append({"template_id": template_id, "name": name, "parent_id": parent_id})
+        return f"new_{len(copied)}", name, f"https://doc/new_{len(copied)}"
+    monkeypatch.setattr(nl_rep, "copy_file", mock_copy)
+
+    # 1. Preview
+    prev = nl_rep.preview_docgen(2569)
+    assert prev["total_planned"] == 36
+    assert prev["existing_count"] == 2
+    assert prev["to_create_count"] == 34
+
+    # 2. Generate
+    res = nl_rep.generate_bulk_docs(2569, dry_run=False)
+    assert res["total_planned"] == 36
+    assert res["created_count"] == 34
+    assert res["skipped_count"] == 2
+    assert len(copied) == 34
+    skipped_names = [s["name"] for s in res["skipped"]]
+    assert "11 รันดาวน์ สิงหาคม 2569" in skipped_names
+    assert "11 รายงานผลการปฏิบัติงาน สิงหาคม 2569.docx" in skipped_names
+
+
+def test_newsline_docgen_routes(monkeypatch):
+    c_prev, calls_prev = _client(monkeypatch, out=b'{"dry_run": true, "periods": []}')
+    r_prev = c_prev.post(
+        "/api/newsroom/newsline-docgen/preview",
+        json={"fy_be": 2569},
+    )
+    assert r_prev.status_code == 200
+    argv = calls_prev[0]
+    assert argv[0] == "python3"
+    assert argv[2:5] == ["docgen", "--fy-be", "2569"]
+    assert argv[-1] == "preview"
+
+    c_gen, calls_gen = _client(monkeypatch, out=b'{"created": []}')
+    r_gen = c_gen.post(
+        "/api/newsroom/newsline-docgen/generate",
+        json={"fy_be": "2569"},
+    )
+    assert r_gen.status_code == 200
+    argv_gen = calls_gen[0]
+    assert argv_gen[2:5] == ["docgen", "--fy-be", "2569"]
+    assert argv_gen[-1] == "generate"
+
+    # Missing fy_be -> 400
+    assert c_gen.post("/api/newsroom/newsline-docgen/preview", json={}).status_code == 400
+    assert c_gen.post("/api/newsroom/newsline-docgen/generate", json={"fy_be": ""}).status_code == 400
+
+

@@ -223,6 +223,89 @@ interface NewslineReportsResponse {
   _fatal?: string;
 }
 
+interface DailyDocItem {
+  id: string;
+  name: string;
+  url?: string;
+  modified?: string;
+}
+
+interface NewslineRundownResponse {
+  dry_run?: boolean;
+  success?: boolean;
+  daily_doc?: {
+    doc_id: string;
+    title: string;
+    date?: string;
+    date_display?: string;
+    header?: string;
+    header_date?: string;
+    headlines?: string[];
+    headline_count?: number;
+  };
+  headlines?: string[];
+  headline_count?: number;
+  target_monthly_doc?: {
+    id: string;
+    name: string;
+    url?: string;
+    action?: string;
+    existing_dates?: string[];
+    total_days?: number;
+  };
+  _fatal?: string;
+}
+
+interface DocgenPeriodDoc {
+  type: "cover" | "log" | "rundown";
+  name: string;
+  template_id: string;
+  exists?: boolean;
+  id?: string;
+  url?: string;
+}
+
+interface DocgenPeriod {
+  period: string;
+  period_num: number;
+  month_num: number;
+  month_thai: string;
+  cal_be_year: number;
+  docs: DocgenPeriodDoc[];
+}
+
+interface NewslineDocgenResponse {
+  dry_run?: boolean;
+  success?: boolean;
+  fy_be?: number;
+  folder?: {
+    id?: string;
+    name?: string;
+    exists?: boolean;
+  };
+  periods?: DocgenPeriod[];
+  total_planned?: number;
+  existing_count?: number;
+  to_create_count?: number;
+  created?: Array<{
+    name: string;
+    id: string;
+    url?: string;
+    type?: string;
+    period?: string;
+  }>;
+  skipped?: Array<{
+    name: string;
+    id: string;
+    url?: string;
+    type?: string;
+    period?: string;
+  }>;
+  created_count?: number;
+  skipped_count?: number;
+  _fatal?: string;
+}
+
 interface NewsDoc {
   id: string;
   name: string;
@@ -496,7 +579,20 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
   const [nlGenLoading, setNlGenLoading] = useState<boolean>(false);
   const [nlGenGenerating, setNlGenGenerating] = useState<boolean>(false);
 
-  // NEWSLINE Reports state (contractor work-report cover + log generator)
+  // NEWSLINE Reports v2 state (3 sub-tabs: ① NL Rundown, ② Monthly Report, ③ NL Docgen)
+  const [reportSubTab, setReportSubTab] = useState<"rundown" | "monthly" | "docgen">("rundown");
+
+  // Sub-tab ①: NEWSLINE Rundown state
+  const [dailyDocId, setDailyDocId] = useState<string>("");
+  const [monthlyDocId, setMonthlyDocId] = useState<string>("");
+  const [recentDailyDocs, setRecentDailyDocs] = useState<DailyDocItem[]>([]);
+  const [loadingDailyDocs, setLoadingDailyDocs] = useState<boolean>(false);
+  const [nlRundownPreview, setNlRundownPreview] = useState<NewslineRundownResponse | null>(null);
+  const [nlRundownResult, setNlRundownResult] = useState<NewslineRundownResponse | null>(null);
+  const [nlRundownLoading, setNlRundownLoading] = useState<boolean>(false);
+  const [nlRundownFilling, setNlRundownFilling] = useState<boolean>(false);
+
+  // Sub-tab ②: Monthly Report state (existing cover + log generator)
   const defaultStartStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-01`;
   const defaultEndStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate()).padStart(2, "0")}`;
   const [repPeriod, setRepPeriod] = useState<string>("5");
@@ -506,6 +602,16 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
   const [repResult, setRepResult] = useState<NewslineReportsResponse | null>(null);
   const [repLoading, setRepLoading] = useState<boolean>(false);
   const [repGenerating, setRepGenerating] = useState<boolean>(false);
+
+  // Sub-tab ③: NL Document Generator state (12 months x 3 templates bulk scaffold)
+  const currentYear = now.getFullYear();
+  const currentMonth = now.getMonth() + 1;
+  const defaultFyBe = currentYear + 543 + (currentMonth >= 10 ? 1 : 0);
+  const [bulkFyBe, setBulkFyBe] = useState<string>(String(defaultFyBe));
+  const [bulkPreview, setBulkPreview] = useState<NewslineDocgenResponse | null>(null);
+  const [bulkResult, setBulkResult] = useState<NewslineDocgenResponse | null>(null);
+  const [bulkLoading, setBulkLoading] = useState<boolean>(false);
+  const [bulkGenerating, setBulkGenerating] = useState<boolean>(false);
 
   // RADIO News Fill state — folder browser (RT-2026 → month → day)
   const RRT_PARENT = "1LSw5NwDhwg7PE9pJUO6jKPcd3yFBCOI9";
@@ -753,6 +859,139 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setRepGenerating(false);
+    }
+  };
+
+  // Sub-tab ①: Rundown handlers
+  const fetchRecentDailyDocs = useCallback(async () => {
+    setLoadingDailyDocs(true);
+    try {
+      const res = await fetch("/api/newsroom/newsline-rundown/daily-docs");
+      if (res.ok) {
+        const data: DailyDocItem[] = await res.json();
+        setRecentDailyDocs(data);
+      }
+    } catch {
+      // ignore
+    } finally {
+      setLoadingDailyDocs(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (tab === "reports" && reportSubTab === "rundown" && recentDailyDocs.length === 0) {
+      void fetchRecentDailyDocs();
+    }
+  }, [tab, reportSubTab, recentDailyDocs.length, fetchRecentDailyDocs]);
+
+  const handleRundownPreview = async () => {
+    if (!dailyDocId.trim()) return;
+    setNlRundownLoading(true);
+    setError(null);
+    setNlRundownPreview(null);
+    setNlRundownResult(null);
+    try {
+      const res = await fetch("/api/newsroom/newsline-rundown/preview", {
+        method: "POST",
+        headers: CT,
+        body: JSON.stringify({
+          doc_id: dailyDocId.trim(),
+          monthly_doc_id: monthlyDocId.trim() || undefined,
+        }),
+      });
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({ detail: res.statusText }));
+        setError(typeof d.detail === "string" ? d.detail : JSON.stringify(d.detail));
+      } else {
+        const data: NewslineRundownResponse = await res.json();
+        setNlRundownPreview(data);
+      }
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setNlRundownLoading(false);
+    }
+  };
+
+  const handleRundownFill = async () => {
+    if (!dailyDocId.trim()) return;
+    setNlRundownFilling(true);
+    setError(null);
+    try {
+      const res = await fetch("/api/newsroom/newsline-rundown/fill", {
+        method: "POST",
+        headers: CT,
+        body: JSON.stringify({
+          doc_id: dailyDocId.trim(),
+          monthly_doc_id: monthlyDocId.trim() || undefined,
+        }),
+      });
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({ detail: res.statusText }));
+        setError(typeof d.detail === "string" ? d.detail : JSON.stringify(d.detail));
+      } else {
+        const data: NewslineRundownResponse = await res.json();
+        setNlRundownResult(data);
+      }
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setNlRundownFilling(false);
+    }
+  };
+
+  // Sub-tab ③: Docgen handlers
+  const handleDocgenPreview = async () => {
+    if (!bulkFyBe.trim()) return;
+    setBulkLoading(true);
+    setError(null);
+    setBulkPreview(null);
+    setBulkResult(null);
+    try {
+      const res = await fetch("/api/newsroom/newsline-docgen/preview", {
+        method: "POST",
+        headers: CT,
+        body: JSON.stringify({
+          fy_be: bulkFyBe.trim(),
+        }),
+      });
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({ detail: res.statusText }));
+        setError(typeof d.detail === "string" ? d.detail : JSON.stringify(d.detail));
+      } else {
+        const data: NewslineDocgenResponse = await res.json();
+        setBulkPreview(data);
+      }
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBulkLoading(false);
+    }
+  };
+
+  const handleDocgenGenerate = async () => {
+    if (!bulkFyBe.trim()) return;
+    setBulkGenerating(true);
+    setError(null);
+    try {
+      const res = await fetch("/api/newsroom/newsline-docgen/generate", {
+        method: "POST",
+        headers: CT,
+        body: JSON.stringify({
+          fy_be: bulkFyBe.trim(),
+        }),
+      });
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({ detail: res.statusText }));
+        setError(typeof d.detail === "string" ? d.detail : JSON.stringify(d.detail));
+      } else {
+        const data: NewslineDocgenResponse = await res.json();
+        setBulkResult(data);
+      }
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBulkGenerating(false);
     }
   };
 
@@ -2559,219 +2798,662 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
 
       {tab === "reports" && (
         <div className="hud hud--bracket reveal reveal-1 flex min-h-0 flex-1 flex-col gap-3 p-3">
-          <span className="label">NEWSLINE REPORTS</span>
-
-          {/* Form controls */}
-          <div className="flex flex-wrap items-center gap-3">
-            <label className="flex items-center gap-1.5 mono text-xs">
-              <span className="label">Period (งวดที่)</span>
-              <input
-                type="text"
-                className="input mono px-2 py-1 text-xs"
-                style={{ width: 80 }}
-                placeholder="e.g. 5"
-                value={repPeriod}
-                onChange={(e) => {
-                  setRepPeriod(e.target.value);
-                  setRepPreview(null);
-                  setRepResult(null);
-                }}
-              />
-            </label>
-
-            <label className="flex items-center gap-1.5 mono text-xs">
-              <span className="label">Start</span>
-              <input
-                type="date"
-                className="input mono px-2 py-1 text-xs"
-                value={repStart}
-                onChange={(e) => {
-                  setRepStart(e.target.value);
-                  setRepPreview(null);
-                  setRepResult(null);
-                }}
-              />
-            </label>
-
-            <label className="flex items-center gap-1.5 mono text-xs">
-              <span className="label">End</span>
-              <input
-                type="date"
-                className="input mono px-2 py-1 text-xs"
-                value={repEnd}
-                onChange={(e) => {
-                  setRepEnd(e.target.value);
-                  setRepPreview(null);
-                  setRepResult(null);
-                }}
-              />
-            </label>
-
-            <div className="ml-auto flex gap-2">
-              <button
-                className="btn btn--compact"
-                onClick={() => void handleReportsPreview()}
-                disabled={repLoading || repGenerating || !repPeriod.trim() || !repStart || !repEnd}
-              >
-                {repLoading ? "PREVIEWING…" : "PREVIEW"}
-              </button>
-              <button
-                className="btn btn--compact btn--signal"
-                onClick={() => void handleReportsGenerate()}
-                disabled={!repPreview || repLoading || repGenerating}
-                title={!repPreview ? "Run PREVIEW first" : "Generate report docs in Google Drive"}
-              >
-                {repGenerating ? "GENERATING…" : "GENERATE"}
-              </button>
+          {/* Sub-tabs header */}
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-edge pb-2">
+            <div className="flex items-center gap-2">
+              <span className="label" style={{ color: "var(--color-signal)" }}>NEWSLINE REPORTS:</span>
+              <div className="flex items-center gap-1">
+                <button
+                  className={`btn btn--compact ${reportSubTab === "rundown" ? "btn--signal" : ""}`}
+                  onClick={() => setReportSubTab("rundown")}
+                >
+                  ① NL RUNDOWN
+                </button>
+                <button
+                  className={`btn btn--compact ${reportSubTab === "monthly" ? "btn--signal" : ""}`}
+                  onClick={() => setReportSubTab("monthly")}
+                >
+                  ② MONTHLY REPORT
+                </button>
+                <button
+                  className={`btn btn--compact ${reportSubTab === "docgen" ? "btn--signal" : ""}`}
+                  onClick={() => setReportSubTab("docgen")}
+                >
+                  ③ NL DOC GENERATOR
+                </button>
+              </div>
             </div>
           </div>
 
-          {/* Target Folder & Summary banner */}
-          {(repPreview || repResult) && (
-            <div className="flex flex-col gap-1.5 border border-edge px-3 py-2 text-xs mono" style={{ background: "var(--color-void)" }}>
-              {(repResult?.folder || repPreview?.folder) && (() => {
-                const f = repResult?.folder || repPreview?.folder!;
+          {/* Sub-tab ①: NEWSLINE RUNDOWN */}
+          {reportSubTab === "rundown" && (
+            <div className="flex min-h-0 flex-1 flex-col gap-3">
+              {/* Form controls */}
+              <div className="flex flex-wrap items-center gap-3">
+                <label className="flex flex-1 min-w-[280px] items-center gap-1.5 mono text-xs">
+                  <span className="label shrink-0">Daily Doc</span>
+                  <input
+                    type="text"
+                    className="input mono px-2 py-1 text-xs flex-1"
+                    placeholder="Daily Doc ID or Google Doc URL (e.g. NL & NWB 050826)"
+                    value={dailyDocId}
+                    onChange={(e) => {
+                      setDailyDocId(e.target.value);
+                      setNlRundownPreview(null);
+                      setNlRundownResult(null);
+                    }}
+                  />
+                </label>
+
+                {recentDailyDocs.length > 0 && (
+                  <select
+                    className="input mono px-2 py-1 text-xs"
+                    style={{ maxWidth: 220 }}
+                    value=""
+                    onChange={(e) => {
+                      if (e.target.value) {
+                        setDailyDocId(e.target.value);
+                        setNlRundownPreview(null);
+                        setNlRundownResult(null);
+                      }
+                    }}
+                  >
+                    <option value="">— Pick Recent Daily Doc —</option>
+                    {recentDailyDocs.map((d) => (
+                      <option key={d.id} value={d.id}>
+                        {d.name}
+                      </option>
+                    ))}
+                  </select>
+                )}
+
+                <button
+                  className="btn btn--compact"
+                  onClick={() => void fetchRecentDailyDocs()}
+                  disabled={loadingDailyDocs}
+                  title="Refresh recent daily docs from Drive"
+                >
+                  {loadingDailyDocs ? "LOADING…" : "↻ REFRESH"}
+                </button>
+
+                <label className="flex flex-1 min-w-[280px] items-center gap-1.5 mono text-xs">
+                  <span className="label shrink-0">Monthly Target (Optional)</span>
+                  <input
+                    type="text"
+                    className="input mono px-2 py-1 text-xs flex-1"
+                    placeholder="Default: Current month รันดาวน์ in FY folder"
+                    value={monthlyDocId}
+                    onChange={(e) => {
+                      setMonthlyDocId(e.target.value);
+                      setNlRundownPreview(null);
+                      setNlRundownResult(null);
+                    }}
+                  />
+                </label>
+
+                <div className="ml-auto flex gap-2">
+                  <button
+                    className="btn btn--compact"
+                    onClick={() => void handleRundownPreview()}
+                    disabled={nlRundownLoading || nlRundownFilling || !dailyDocId.trim()}
+                  >
+                    {nlRundownLoading ? "PREVIEWING…" : "PREVIEW"}
+                  </button>
+                  <button
+                    className="btn btn--compact btn--signal"
+                    onClick={() => void handleRundownFill()}
+                    disabled={!nlRundownPreview || nlRundownLoading || nlRundownFilling}
+                    title={!nlRundownPreview ? "Run PREVIEW first" : "Write/replace day's block into monthly doc"}
+                  >
+                    {nlRundownFilling ? "FILLING…" : "FILL (WRITE)"}
+                  </button>
+                </div>
+              </div>
+
+              {/* Rundown banners */}
+              {(nlRundownPreview || nlRundownResult) && (() => {
+                const data = nlRundownResult || nlRundownPreview!;
+                const isResult = Boolean(nlRundownResult);
                 return (
-                  <div className="flex items-center gap-2">
-                    <span className="label" style={{ color: "var(--color-signal)" }}>TARGET FOLDER:</span>
-                    <span style={{ color: "var(--color-phosphor)" }}>{f.name}</span>
-                    {f.id && <span style={{ color: "var(--color-muted)" }}>({f.id})</span>}
-                    {f.created && <span className="label" style={{ color: "var(--color-go)" }}>NEW</span>}
-                  </div>
-                );
-              })()}
-              {(() => {
-                const p = repResult || repPreview!;
-                return (
-                  <div className="flex flex-wrap items-center gap-3 text-xs">
-                    <span className="label">SUMMARY:</span>
-                    <span style={{ color: "var(--color-phosphor-dim)" }}>
-                      FY {p.fy_be} · งวดที่ {p.period} · {p.start_display} – {p.end_display} · {p.weekday_count} weekdays
-                    </span>
-                    {p.idempotent && (
-                      <span className="label" style={{ color: "var(--color-hazard)" }}>
-                        (EXISTING DOCS MATCHED)
-                      </span>
+                  <div className="flex flex-col gap-1.5 border border-edge px-3 py-2 text-xs mono" style={{ background: "var(--color-void)" }}>
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex items-center gap-2">
+                        <span className="label" style={{ color: "var(--color-signal)" }}>DAILY SOURCE:</span>
+                        <span style={{ color: "var(--color-phosphor)" }}>{data.daily_doc?.title}</span>
+                        {data.daily_doc?.date_display && (
+                          <span style={{ color: "var(--color-phosphor-dim)" }}>({data.daily_doc.date_display})</span>
+                        )}
+                        <span className="label" style={{ color: "var(--color-go)" }}>
+                          {data.headline_count} HEADLINES
+                        </span>
+                      </div>
+                      {data.daily_doc?.header && (
+                        <span className="label" style={{ color: "var(--color-muted)" }}>
+                          {data.daily_doc.header.trim()}
+                        </span>
+                      )}
+                    </div>
+
+                    {data.target_monthly_doc && (
+                      <div className="flex flex-wrap items-center justify-between gap-2 border-t border-edge-soft pt-1.5">
+                        <div className="flex items-center gap-2">
+                          <span className="label" style={{ color: "var(--color-signal)" }}>TARGET MONTHLY DOC:</span>
+                          <span style={{ color: "var(--color-phosphor)" }}>{data.target_monthly_doc.name}</span>
+                          {data.target_monthly_doc.url && (
+                            <a
+                              href={data.target_monthly_doc.url}
+                              target="_blank"
+                              rel="noreferrer"
+                              style={{ color: "var(--color-signal)" }}
+                            >
+                              open ↗
+                            </a>
+                          )}
+                          <span
+                            className="label"
+                            style={{
+                              color:
+                                data.target_monthly_doc.action === "replace" || data.target_monthly_doc.action === "replaced"
+                                  ? "var(--color-hazard)"
+                                  : "var(--color-go)",
+                            }}
+                          >
+                            {isResult
+                              ? data.target_monthly_doc.action === "replaced"
+                                ? "✓ REPLACED EXISTING DAY"
+                                : "✓ INSERTED NEW DAY"
+                              : data.target_monthly_doc.action === "replace"
+                              ? "REPLACE (Day exists in doc)"
+                              : "INSERT (New day in doc)"}
+                          </span>
+                        </div>
+                        {data.target_monthly_doc.total_days !== undefined && (
+                          <span className="label" style={{ color: "var(--color-muted)" }}>
+                            TOTAL DAYS IN DOC: {data.target_monthly_doc.total_days}
+                          </span>
+                        )}
+                        {data.target_monthly_doc.existing_dates && (
+                          <span className="label" style={{ color: "var(--color-muted)" }}>
+                            EXISTING DAYS: {data.target_monthly_doc.existing_dates.join(", ")}
+                          </span>
+                        )}
+                      </div>
                     )}
                   </div>
                 );
               })()}
+
+              {/* Rundown content list */}
+              <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-auto border border-edge p-2" style={{ background: "var(--color-void)" }}>
+                {nlRundownResult ? (
+                  <div className="flex flex-col gap-2">
+                    <span className="label mb-1 block" style={{ color: "var(--color-go)" }}>
+                      ✓ RUNDOWN WRITTEN TO MONTHLY COMPILATION DOC ({nlRundownResult.headline_count} HEADLINES)
+                    </span>
+                    <div className="flex flex-col gap-1">
+                      {nlRundownResult.headlines?.map((h, idx) => (
+                        <div key={idx} className="mono flex items-start gap-2 border-b border-edge-soft py-1 text-xs" style={{ color: "var(--color-phosphor)" }}>
+                          <span className="pip pip--go mt-1" />
+                          <span className="flex-1">{h}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : nlRundownPreview ? (
+                  <div className="flex flex-col gap-2">
+                    <span className="label mb-1 block" style={{ color: "var(--color-signal)" }}>
+                      EXTRACTED NL HEADLINES ({nlRundownPreview.headline_count} HEADLINES)
+                    </span>
+                    <div className="flex flex-col gap-1">
+                      {nlRundownPreview.headlines?.map((h, idx) => (
+                        <div key={idx} className="mono flex items-start gap-2 border-b border-edge-soft py-1 text-xs" style={{ color: "var(--color-phosphor-dim)" }}>
+                          <span className="pip pip--signal mt-1" />
+                          <span className="flex-1">{h}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : (
+                  <div className="flex flex-1 flex-col items-center justify-center gap-2">
+                    <span className="label">— Select or paste daily doc ID, then click PREVIEW —</span>
+                  </div>
+                )}
+              </div>
             </div>
           )}
 
-          {/* Output / Files & Weekday rows list */}
-          <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-auto border border-edge p-2" style={{ background: "var(--color-void)" }}>
-            {repResult ? (
-              <div className="flex flex-col gap-3">
-                <div>
-                  <span className="label mb-1 block" style={{ color: "var(--color-go)" }}>
-                    {repResult.idempotent ? "EXISTING DOCUMENTS REUSED" : "CREATED DOCUMENTS (2)"}
-                  </span>
-                  <div className="flex flex-col gap-1">
-                    {repResult.cover && (
-                      <div className="mono flex items-center gap-2 border-b border-edge-soft py-1 text-xs">
-                        <span className="pip pip--go" />
-                        <span className="label" style={{ color: "var(--color-signal)" }}>[COVER]</span>
-                        <span className="flex-1 truncate" style={{ color: "var(--color-phosphor)" }}>
-                          {repResult.cover.name}
-                        </span>
-                        {repResult.cover.url && (
-                          <a
-                            href={repResult.cover.url}
-                            target="_blank"
-                            rel="noreferrer"
-                            style={{ color: "var(--color-signal)" }}
-                          >
-                            open ↗
-                          </a>
-                        )}
-                      </div>
-                    )}
-                    {repResult.log && (
-                      <div className="mono flex items-center gap-2 border-b border-edge-soft py-1 text-xs">
-                        <span className="pip pip--go" />
-                        <span className="label" style={{ color: "var(--color-signal)" }}>[LOG]</span>
-                        <span className="flex-1 truncate" style={{ color: "var(--color-phosphor)" }}>
-                          {repResult.log.name}
-                        </span>
-                        {repResult.log.url && (
-                          <a
-                            href={repResult.log.url}
-                            target="_blank"
-                            rel="noreferrer"
-                            style={{ color: "var(--color-signal)" }}
-                          >
-                            open ↗
-                          </a>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                </div>
+          {/* Sub-tab ②: MONTHLY REPORT (Existing) */}
+          {reportSubTab === "monthly" && (
+            <div className="flex min-h-0 flex-1 flex-col gap-3">
+              {/* Form controls */}
+              <div className="flex flex-wrap items-center gap-3">
+                <label className="flex items-center gap-1.5 mono text-xs">
+                  <span className="label">Period (งวดที่)</span>
+                  <input
+                    type="text"
+                    className="input mono px-2 py-1 text-xs"
+                    style={{ width: 80 }}
+                    placeholder="e.g. 5"
+                    value={repPeriod}
+                    onChange={(e) => {
+                      setRepPeriod(e.target.value);
+                      setRepPreview(null);
+                      setRepResult(null);
+                    }}
+                  />
+                </label>
 
-                {repResult.rows && repResult.rows.length > 0 && (
-                  <div className="border-t border-edge-soft pt-2">
-                    <span className="label mb-1 block" style={{ color: "var(--color-phosphor-dim)" }}>
-                      ENUMERATED WEEKDAYS ({repResult.rows.length})
-                    </span>
-                    <div className="flex flex-col gap-0.5" style={{ maxHeight: 200, overflowY: "auto" }}>
-                      {repResult.rows.map((row, idx) => (
-                        <div key={idx} className="mono text-xs py-0.5" style={{ color: "var(--color-phosphor-dim)" }}>
-                          <span style={{ color: "var(--color-muted)", marginRight: 6 }}>{idx + 1}.</span>
-                          {row}
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
+                <label className="flex items-center gap-1.5 mono text-xs">
+                  <span className="label">Start</span>
+                  <input
+                    type="date"
+                    className="input mono px-2 py-1 text-xs"
+                    value={repStart}
+                    onChange={(e) => {
+                      setRepStart(e.target.value);
+                      setRepPreview(null);
+                      setRepResult(null);
+                    }}
+                  />
+                </label>
+
+                <label className="flex items-center gap-1.5 mono text-xs">
+                  <span className="label">End</span>
+                  <input
+                    type="date"
+                    className="input mono px-2 py-1 text-xs"
+                    value={repEnd}
+                    onChange={(e) => {
+                      setRepEnd(e.target.value);
+                      setRepPreview(null);
+                      setRepResult(null);
+                    }}
+                  />
+                </label>
+
+                <div className="ml-auto flex gap-2">
+                  <button
+                    className="btn btn--compact"
+                    onClick={() => void handleReportsPreview()}
+                    disabled={repLoading || repGenerating || !repPeriod.trim() || !repStart || !repEnd}
+                  >
+                    {repLoading ? "PREVIEWING…" : "PREVIEW"}
+                  </button>
+                  <button
+                    className="btn btn--compact btn--signal"
+                    onClick={() => void handleReportsGenerate()}
+                    disabled={!repPreview || repLoading || repGenerating}
+                    title={!repPreview ? "Run PREVIEW first" : "Generate report docs in Google Drive"}
+                  >
+                    {repGenerating ? "GENERATING…" : "GENERATE"}
+                  </button>
+                </div>
               </div>
-            ) : repPreview ? (
-              <div className="flex flex-col gap-3">
-                <div>
-                  <span className="label mb-1 block" style={{ color: "var(--color-signal)" }}>
-                    PLANNED DOCUMENTS (2)
-                  </span>
-                  <div className="flex flex-col gap-1">
-                    <div className="mono flex items-center gap-2 border-b border-edge-soft py-1 text-xs">
-                      <span className="pip pip--signal" />
-                      <span className="label" style={{ color: "var(--color-signal)" }}>[COVER]</span>
-                      <span className="flex-1 truncate" style={{ color: "var(--color-phosphor-dim)" }}>
-                        {repPreview.cover_filename}
-                      </span>
-                    </div>
-                    <div className="mono flex items-center gap-2 border-b border-edge-soft py-1 text-xs">
-                      <span className="pip pip--signal" />
-                      <span className="label" style={{ color: "var(--color-signal)" }}>[LOG]</span>
-                      <span className="flex-1 truncate" style={{ color: "var(--color-phosphor-dim)" }}>
-                        {repPreview.log_filename}
-                      </span>
-                    </div>
-                  </div>
-                </div>
 
-                {repPreview.rows && repPreview.rows.length > 0 && (
-                  <div className="border-t border-edge-soft pt-2">
-                    <span className="label mb-1 block" style={{ color: "var(--color-signal)" }}>
-                      PLAN TO ENUMERATE ({repPreview.weekday_count} WEEKDAYS — THAI NUMERALS)
-                    </span>
-                    <div className="flex flex-col gap-0.5" style={{ maxHeight: 250, overflowY: "auto" }}>
-                      {repPreview.rows.map((row, idx) => (
-                        <div key={idx} className="mono text-xs py-0.5 flex items-center gap-2" style={{ color: "var(--color-phosphor-dim)" }}>
+              {/* Target Folder & Summary banner */}
+              {(repPreview || repResult) && (
+                <div className="flex flex-col gap-1.5 border border-edge px-3 py-2 text-xs mono" style={{ background: "var(--color-void)" }}>
+                  {(repResult?.folder || repPreview?.folder) && (() => {
+                    const f = repResult?.folder || repPreview?.folder!;
+                    return (
+                      <div className="flex items-center gap-2">
+                        <span className="label" style={{ color: "var(--color-signal)" }}>TARGET FOLDER:</span>
+                        <span style={{ color: "var(--color-phosphor)" }}>{f.name}</span>
+                        {f.id && <span style={{ color: "var(--color-muted)" }}>({f.id})</span>}
+                        {f.created && <span className="label" style={{ color: "var(--color-go)" }}>NEW</span>}
+                      </div>
+                    );
+                  })()}
+                  {(() => {
+                    const p = repResult || repPreview!;
+                    return (
+                      <div className="flex flex-wrap items-center gap-3 text-xs">
+                        <span className="label">SUMMARY:</span>
+                        <span style={{ color: "var(--color-phosphor-dim)" }}>
+                          FY {p.fy_be} · งวดที่ {p.period} · {p.start_display} – {p.end_display} · {p.weekday_count} weekdays
+                        </span>
+                        {p.idempotent && (
+                          <span className="label" style={{ color: "var(--color-hazard)" }}>
+                            (EXISTING DOCS MATCHED)
+                          </span>
+                        )}
+                      </div>
+                    );
+                  })()}
+                </div>
+              )}
+
+              {/* Output / Files & Weekday rows list */}
+              <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-auto border border-edge p-2" style={{ background: "var(--color-void)" }}>
+                {repResult ? (
+                  <div className="flex flex-col gap-3">
+                    <div>
+                      <span className="label mb-1 block" style={{ color: "var(--color-go)" }}>
+                        {repResult.idempotent ? "EXISTING DOCUMENTS REUSED" : "CREATED DOCUMENTS (2)"}
+                      </span>
+                      <div className="flex flex-col gap-1">
+                        {repResult.cover && (
+                          <div className="mono flex items-center gap-2 border-b border-edge-soft py-1 text-xs">
+                            <span className="pip pip--go" />
+                            <span className="label" style={{ color: "var(--color-signal)" }}>[COVER]</span>
+                            <span className="flex-1 truncate" style={{ color: "var(--color-phosphor)" }}>
+                              {repResult.cover.name}
+                            </span>
+                            {repResult.cover.url && (
+                              <a
+                                href={repResult.cover.url}
+                                target="_blank"
+                                rel="noreferrer"
+                                style={{ color: "var(--color-signal)" }}
+                              >
+                                open ↗
+                              </a>
+                            )}
+                          </div>
+                        )}
+                        {repResult.log && (
+                          <div className="mono flex items-center gap-2 border-b border-edge-soft py-1 text-xs">
+                            <span className="pip pip--go" />
+                            <span className="label" style={{ color: "var(--color-signal)" }}>[LOG]</span>
+                            <span className="flex-1 truncate" style={{ color: "var(--color-phosphor)" }}>
+                              {repResult.log.name}
+                            </span>
+                            {repResult.log.url && (
+                              <a
+                                href={repResult.log.url}
+                                target="_blank"
+                                rel="noreferrer"
+                                style={{ color: "var(--color-signal)" }}
+                              >
+                                open ↗
+                              </a>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+
+                    {repResult.rows && repResult.rows.length > 0 && (
+                      <div className="border-t border-edge-soft pt-2">
+                        <span className="label mb-1 block" style={{ color: "var(--color-phosphor-dim)" }}>
+                          ENUMERATED WEEKDAYS ({repResult.rows.length})
+                        </span>
+                        <div className="flex flex-col gap-0.5" style={{ maxHeight: 200, overflowY: "auto" }}>
+                          {repResult.rows.map((row, idx) => (
+                            <div key={idx} className="mono text-xs py-0.5" style={{ color: "var(--color-phosphor-dim)" }}>
+                              <span style={{ color: "var(--color-muted)", marginRight: 6 }}>{idx + 1}.</span>
+                              {row}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                ) : repPreview ? (
+                  <div className="flex flex-col gap-3">
+                    <div>
+                      <span className="label mb-1 block" style={{ color: "var(--color-signal)" }}>
+                        PLANNED DOCUMENTS (2)
+                      </span>
+                      <div className="flex flex-col gap-1">
+                        <div className="mono flex items-center gap-2 border-b border-edge-soft py-1 text-xs">
                           <span className="pip pip--signal" />
-                          <span style={{ color: "var(--color-muted)", minWidth: 20 }}>{idx + 1}.</span>
-                          <span>{row}</span>
+                          <span className="label" style={{ color: "var(--color-signal)" }}>[COVER]</span>
+                          <span className="flex-1 truncate" style={{ color: "var(--color-phosphor-dim)" }}>
+                            {repPreview.cover_filename}
+                          </span>
+                        </div>
+                        <div className="mono flex items-center gap-2 border-b border-edge-soft py-1 text-xs">
+                          <span className="pip pip--signal" />
+                          <span className="label" style={{ color: "var(--color-signal)" }}>[LOG]</span>
+                          <span className="flex-1 truncate" style={{ color: "var(--color-phosphor-dim)" }}>
+                            {repPreview.log_filename}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+
+                    {repPreview.rows && repPreview.rows.length > 0 && (
+                      <div className="border-t border-edge-soft pt-2">
+                        <span className="label mb-1 block" style={{ color: "var(--color-signal)" }}>
+                          PLAN TO ENUMERATE ({repPreview.weekday_count} WEEKDAYS — THAI NUMERALS)
+                        </span>
+                        <div className="flex flex-col gap-0.5" style={{ maxHeight: 250, overflowY: "auto" }}>
+                          {repPreview.rows.map((row, idx) => (
+                            <div key={idx} className="mono text-xs py-0.5 flex items-center gap-2" style={{ color: "var(--color-phosphor-dim)" }}>
+                              <span className="pip pip--signal" />
+                              <span style={{ color: "var(--color-muted)", minWidth: 20 }}>{idx + 1}.</span>
+                              <span>{row}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <div className="flex flex-1 items-center justify-center">
+                    <span className="label">— Enter period & date range, then click PREVIEW —</span>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* Sub-tab ③: NL DOCUMENT GENERATOR */}
+          {reportSubTab === "docgen" && (
+            <div className="flex min-h-0 flex-1 flex-col gap-3">
+              {/* Form controls */}
+              <div className="flex flex-wrap items-center gap-3">
+                <label className="flex items-center gap-1.5 mono text-xs">
+                  <span className="label">Fiscal Year (BE / พ.ศ.)</span>
+                  <input
+                    type="text"
+                    className="input mono px-2 py-1 text-xs"
+                    style={{ width: 100 }}
+                    placeholder="e.g. 2569"
+                    value={bulkFyBe}
+                    onChange={(e) => {
+                      setBulkFyBe(e.target.value);
+                      setBulkPreview(null);
+                      setBulkResult(null);
+                    }}
+                  />
+                </label>
+
+                <span className="text-xs mono" style={{ color: "var(--color-muted)" }}>
+                  Thai FY (Oct 1 – Sep 30) · Generates 12 months × 3 templates = 36 docs
+                </span>
+
+                <div className="ml-auto flex gap-2">
+                  <button
+                    className="btn btn--compact"
+                    onClick={() => void handleDocgenPreview()}
+                    disabled={bulkLoading || bulkGenerating || !bulkFyBe.trim()}
+                  >
+                    {bulkLoading ? "PREVIEWING…" : "PREVIEW (36 DOCS)"}
+                  </button>
+                  <button
+                    className="btn btn--compact btn--signal"
+                    onClick={() => void handleDocgenGenerate()}
+                    disabled={!bulkPreview || bulkLoading || bulkGenerating}
+                    title={!bulkPreview ? "Run PREVIEW first" : "Duplicate templates in Google Drive"}
+                  >
+                    {bulkGenerating ? "GENERATING…" : "GENERATE"}
+                  </button>
+                </div>
+              </div>
+
+              {/* Target Folder & Summary banner */}
+              {(bulkPreview || bulkResult) && (() => {
+                const data = bulkResult || bulkPreview!;
+                const isResult = Boolean(bulkResult);
+                return (
+                  <div className="flex flex-col gap-1.5 border border-edge px-3 py-2 text-xs mono" style={{ background: "var(--color-void)" }}>
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex items-center gap-2">
+                        <span className="label" style={{ color: "var(--color-signal)" }}>TARGET FOLDER:</span>
+                        <span style={{ color: "var(--color-phosphor)" }}>
+                          {data.folder?.name || `งบประมาณ ${data.fy_be}`}
+                        </span>
+                        {data.folder?.id && (
+                          <span style={{ color: "var(--color-muted)" }}>({data.folder.id})</span>
+                        )}
+                        {data.folder?.exists && (
+                          <span className="label" style={{ color: "var(--color-go)" }}>EXISTS</span>
+                        )}
+                      </div>
+                      <div className="flex items-center gap-2">
+                        {isResult ? (
+                          <>
+                            <span className="label" style={{ color: "var(--color-go)" }}>
+                              CREATED: {bulkResult?.created_count}
+                            </span>
+                            <span className="label" style={{ color: "var(--color-hazard)" }}>
+                              SKIPPED (EXISTING): {bulkResult?.skipped_count}
+                            </span>
+                          </>
+                        ) : (
+                          <>
+                            <span className="label" style={{ color: "var(--color-go)" }}>
+                              {bulkPreview?.existing_count} ALREADY EXIST
+                            </span>
+                            <span className="label" style={{ color: "var(--color-signal)" }}>
+                              {bulkPreview?.to_create_count} TO CREATE
+                            </span>
+                          </>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })()}
+
+              {/* Bulk docgen output */}
+              <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-auto border border-edge p-2" style={{ background: "var(--color-void)" }}>
+                {bulkResult ? (
+                  <div className="flex flex-col gap-3">
+                    {bulkResult.created && bulkResult.created.length > 0 && (
+                      <div>
+                        <span className="label mb-1 block" style={{ color: "var(--color-go)" }}>
+                          CREATED DOCUMENTS ({bulkResult.created.length})
+                        </span>
+                        <div className="flex flex-col gap-1">
+                          {bulkResult.created.map((doc, idx) => (
+                            <div key={idx} className="mono flex items-center gap-2 border-b border-edge-soft py-1 text-xs">
+                              <span className="pip pip--go" />
+                              <span className="label" style={{ color: "var(--color-signal)" }}>
+                                [{doc.type?.toUpperCase() || "DOC"}]
+                              </span>
+                              <span className="flex-1 truncate" style={{ color: "var(--color-phosphor)" }}>
+                                {doc.name}
+                              </span>
+                              {doc.url && (
+                                <a
+                                  href={doc.url}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  style={{ color: "var(--color-signal)" }}
+                                >
+                                  open ↗
+                                </a>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {bulkResult.skipped && bulkResult.skipped.length > 0 && (
+                      <div className="border-t border-edge-soft pt-2">
+                        <span className="label mb-1 block" style={{ color: "var(--color-hazard)" }}>
+                          SKIPPED (EXISTING) DOCUMENTS ({bulkResult.skipped.length})
+                        </span>
+                        <div className="flex flex-col gap-1">
+                          {bulkResult.skipped.map((doc, idx) => (
+                            <div key={idx} className="mono flex items-center gap-2 border-b border-edge-soft py-1 text-xs">
+                              <span className="pip pip--hazard" />
+                              <span className="label" style={{ color: "var(--color-muted)" }}>
+                                [{doc.type?.toUpperCase() || "DOC"}]
+                              </span>
+                              <span className="flex-1 truncate" style={{ color: "var(--color-phosphor-dim)" }}>
+                                {doc.name}
+                              </span>
+                              {doc.url && (
+                                <a
+                                  href={doc.url}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  style={{ color: "var(--color-signal)" }}
+                                >
+                                  open ↗
+                                </a>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                ) : bulkPreview ? (
+                  <div className="flex flex-col gap-3">
+                    <span className="label mb-1 block" style={{ color: "var(--color-signal)" }}>
+                      PLANNED 36 DOCUMENTS ACROSS 12 FISCAL MONTHS
+                    </span>
+                    <div className="flex flex-col gap-2">
+                      {bulkPreview.periods?.map((p) => (
+                        <div key={p.period} className="border border-edge-soft p-2" style={{ background: "var(--color-panel-2)" }}>
+                          <div className="flex items-center justify-between gap-2 border-b border-edge-soft pb-1 mb-1">
+                            <span className="mono font-semibold text-xs" style={{ color: "var(--color-phosphor)" }}>
+                              งวดที่ {p.period_num} · {p.month_thai} {p.cal_be_year}
+                            </span>
+                            <span className="label text-xs" style={{ color: "var(--color-muted)" }}>
+                              PERIOD {p.period}
+                            </span>
+                          </div>
+                          <div className="flex flex-col gap-1">
+                            {p.docs.map((d, dIdx) => (
+                              <div key={dIdx} className="mono flex items-center gap-2 text-xs py-0.5">
+                                <span className={`pip ${d.exists ? "pip--go" : "pip--signal"}`} />
+                                <span className="label" style={{ color: "var(--color-signal)", minWidth: 60 }}>
+                                  [{d.type.toUpperCase()}]
+                                </span>
+                                <span className="flex-1 truncate" style={{ color: d.exists ? "var(--color-phosphor-dim)" : "var(--color-phosphor)" }}>
+                                  {d.name}
+                                </span>
+                                {d.exists ? (
+                                  <span className="label shrink-0" style={{ color: "var(--color-go)" }}>
+                                    EXISTS
+                                  </span>
+                                ) : (
+                                  <span className="label shrink-0" style={{ color: "var(--color-signal)" }}>
+                                    + TO CREATE
+                                  </span>
+                                )}
+                                {d.url && (
+                                  <a
+                                    href={d.url}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    style={{ color: "var(--color-signal)" }}
+                                  >
+                                    open ↗
+                                  </a>
+                                )}
+                              </div>
+                            ))}
+                          </div>
                         </div>
                       ))}
                     </div>
                   </div>
+                ) : (
+                  <div className="flex flex-1 flex-col items-center justify-center gap-2">
+                    <span className="label">— Enter Fiscal Year (BE) and click PREVIEW (36 DOCS) —</span>
+                  </div>
                 )}
               </div>
-            ) : (
-              <div className="flex flex-1 items-center justify-center">
-                <span className="label">— Enter period & date range, then click PREVIEW —</span>
-              </div>
-            )}
-          </div>
+            </div>
+          )}
         </div>
       )}
 

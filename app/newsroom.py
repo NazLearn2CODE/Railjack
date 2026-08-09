@@ -306,7 +306,7 @@ async def api_newsline_generate(body: dict = Body(...)):
     return await _script(_newsline_argv(body) + ["generate"], timeout=300)
 
 
-# ---------------------------------------------------------------- newsline reports
+# ---------------------------------------------------------------- newsline reports (Sub-tab 2: Monthly Report)
 # Monthly NBT contractor work-report docs generator: Cover doc + Log doc per (period, date-range).
 # `newsline_reports.py` is the contract — this panel builds argv and surfaces `_fatal` (→ 400).
 
@@ -340,6 +340,73 @@ async def api_newsline_reports_preview(body: dict = Body(...)):
 async def api_newsline_reports_generate(body: dict = Body(...)):
     """Real run — duplicates cover + log templates, fills contents, saves to FY folder. Idempotent."""
     return await _script(_newsline_reports_argv(body) + ["generate"], timeout=180)
+
+
+# ---------------------------------------------------------------- newsline rundown (Sub-tab 1: Daily NL Rundown)
+# Extracts daily NEWSLINE headlines from 'NL & NWB DDMMYY' Google Doc (NL RUNDOWN tab)
+# and writes/replaces that day's block into monthly compilation doc 'รันดาวน์ MM/YYYY'.
+
+
+def _newsline_rundown_argv(body: dict) -> list[str]:
+    doc_id = body.get("doc_id")
+    if doc_id is None or not str(doc_id).strip():
+        raise HTTPException(400, "doc_id required")
+    argv = [
+        PY, str(NEWSLINE_REPORTS),
+        "rundown",
+        "--doc-id", str(doc_id).strip(),
+    ]
+    monthly_id = body.get("monthly_doc_id")
+    if monthly_id and str(monthly_id).strip():
+        argv += ["--monthly-doc-id", str(monthly_id).strip()]
+    return argv
+
+
+@router.get("/api/newsroom/newsline-rundown/daily-docs")
+async def api_newsline_rundown_daily_docs():
+    """List recent daily NL & NWB docs from Google Drive for the doc-picker."""
+    return await _script([PY, str(NEWSLINE_REPORTS), "daily-docs"])
+
+
+@router.post("/api/newsroom/newsline-rundown/preview")
+async def api_newsline_rundown_preview(body: dict = Body(...)):
+    """Extract day's NL rundown and preview target monthly doc update."""
+    return await _script(_newsline_rundown_argv(body) + ["preview"])
+
+
+@router.post("/api/newsroom/newsline-rundown/fill")
+async def api_newsline_rundown_fill(body: dict = Body(...)):
+    """Extract day's NL rundown and insert/replace in target monthly doc. Idempotent."""
+    cmd = ["preview"] if body.get("dry_run") else ["fill"]
+    return await _script(_newsline_rundown_argv(body) + cmd, timeout=120)
+
+
+# ---------------------------------------------------------------- newsline docgen (Sub-tab 3: Bulk Template Scaffold)
+# Duplicates 3 templates x 12 months = 36 docs for the fiscal year into target FY folder.
+
+
+def _newsline_docgen_argv(body: dict) -> list[str]:
+    fy_be = body.get("fy_be")
+    if fy_be is None or not str(fy_be).strip():
+        raise HTTPException(400, "fy_be required")
+    return [
+        PY, str(NEWSLINE_REPORTS),
+        "docgen",
+        "--fy-be", str(fy_be).strip(),
+    ]
+
+
+@router.post("/api/newsroom/newsline-docgen/preview")
+async def api_newsline_docgen_preview(body: dict = Body(...)):
+    """Preview 36 planned docs for the fiscal year."""
+    return await _script(_newsline_docgen_argv(body) + ["preview"])
+
+
+@router.post("/api/newsroom/newsline-docgen/generate")
+async def api_newsline_docgen_generate(body: dict = Body(...)):
+    """Duplicate 3 templates x 12 months for the fiscal year into target FY folder. Idempotent."""
+    cmd = ["preview"] if body.get("dry_run") else ["generate"]
+    return await _script(_newsline_docgen_argv(body) + cmd, timeout=300)
 
 
 # ---------------------------------------------------------------- rewrite
