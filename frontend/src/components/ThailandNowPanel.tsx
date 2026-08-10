@@ -123,6 +123,45 @@ interface ArchiveMsg {
 type ScoutResult = { title: string; url: string; snippet: string; date: string; lang: string; source: string };
 type PitchReply = { pitch: { headline_en: string; headline_th: string; excerpt_en: string }; mode: string };
 
+// FIRESIDE types
+interface FiresideTopic {
+  title: string;
+  angle: string;
+  ep_adjacent: string[];
+  source_urls: string[];
+  if_like_a_try_b: string;
+  visual_style: string;
+  why_fresh: string;
+  revisit_candidate: boolean;
+}
+
+interface FiresideFix {
+  anchor: string;
+  note: string;
+  severity: "must" | "should" | "nit";
+}
+
+interface FiresideNotes {
+  overall?: string;
+  strengths?: string[];
+  fixes?: FiresideFix[];
+  structure_notes?: string;
+  voice_notes?: string;
+  coverage_check?: string;
+}
+
+interface FiresideSourceReport {
+  topics: FiresideTopic[];
+  mode: "notebook" | "web-fallback";
+  notebook_id?: string;
+}
+
+interface FiresideEditNotesResp {
+  notes: FiresideNotes;
+  mode: "direct" | "degraded";
+  error?: string;
+}
+
 // SEO HEALTH report (THAILAND NOW → SEO tab → HEALTH)
 interface HealthSource { from: string; from_id?: number; from_title?: string }
 interface HealthSuggestion { link: string; title: string }
@@ -1649,10 +1688,581 @@ function ArchiveTab() {
 }
 
 
+/* ------------------------------- FIRESIDE PANEL --------------------------- */
+
+function FiresidePanel() {
+  const [firesideSub, setFiresideSub] = usePersistentState<"fireside-source" | "fireside-edit">(
+    "tn.scout.fireside.sub",
+    "fireside-source"
+  );
+
+  // SOURCE TOPICS state
+  const [seed, setSeed]               = usePersistentState<string>("tn.scout.fireside.seed", "");
+  const [category, setCategory]       = usePersistentState<string>("tn.scout.fireside.category", "");
+  const [topics, setTopics]           = usePersistentState<FiresideTopic[]>("tn.scout.fireside.topics", []);
+  const [sourceMode, setSourceMode]   = usePersistentState<"notebook" | "web-fallback" | null>(
+    "tn.scout.fireside.mode",
+    null
+  );
+  const [sourceJobId, setSourceJobId] = usePersistentState<string | null>("tn.scout.fireside.job_id", null);
+  const [searching, setSearching]     = useState(false);
+  const [sourceErr, setSourceErr]     = useState<string | null>(null);
+  const [copiedTopicIdx, setCopiedTopicIdx] = useState<number | null>(null);
+
+  // EDIT NOTES state
+  const [draft, setDraft]             = usePersistentState<string>("tn.scout.fireside.draft", "");
+  const [url, setUrl]                 = usePersistentState<string>("tn.scout.fireside.url", "");
+  const [checkCoverage, setCheckCoverage] = usePersistentState<boolean>("tn.scout.fireside.coverage", false);
+  const [notesResp, setNotesResp]     = usePersistentState<FiresideEditNotesResp | null>(
+    "tn.scout.fireside.notes_data",
+    null
+  );
+  const [loadingNotes, setLoadingNotes] = useState(false);
+  const [editErr, setEditErr]         = usePersistentState<string | null>("tn.scout.fireside.edit_err", null);
+  const [notesCopied, setNotesCopied] = useState(false);
+
+  // Polling for background jobs
+  const { data: jobsData } = usePolling<{ jobs: TnJob[] }>("/api/thailandnow/jobs", 2000);
+
+  // Track active job if one was already running
+  useEffect(() => {
+    if (sourceJobId && jobsData?.jobs) {
+      const job = jobsData.jobs.find((j) => j.id === sourceJobId && j.kind === "fireside-source");
+      if (job && (job.status === "running" || job.status === "queued")) {
+        setSearching(true);
+      }
+    }
+  }, [sourceJobId, jobsData]);
+
+  // Handle completion / failure of fireside-source async job
+  useEffect(() => {
+    if (!sourceJobId || !jobsData?.jobs) return;
+    const job = jobsData.jobs.find((j) => j.id === sourceJobId && j.kind === "fireside-source");
+    if (!job) return;
+
+    if (job.status === "done") {
+      fetchJSON<FiresideSourceReport>(`/api/thailandnow/scout/fireside/source/report/${sourceJobId}`)
+        .then((data) => {
+          setTopics(data.topics || []);
+          setSourceMode(data.mode || "notebook");
+          setSearching(false);
+          setSourceJobId(null);
+        })
+        .catch((e) => {
+          setSourceErr(String(e));
+          setSearching(false);
+          setSourceJobId(null);
+        });
+    } else if (job.status === "error" || job.status === "cancelled") {
+      setSourceErr(job.error || `job ${job.status}`);
+      setSearching(false);
+      setSourceJobId(null);
+    }
+  }, [sourceJobId, jobsData, setTopics, setSourceMode, setSourceJobId]);
+
+  const sourceTopics = useCallback(async () => {
+    setSourceErr(null);
+    const r = await post<{ id: string }>("/api/thailandnow/scout/fireside/source", {
+      seed: seed.trim() || undefined,
+      category: category.trim() || undefined,
+    });
+    if (!r.ok) {
+      setSourceErr(
+        r.error?.includes("already running")
+          ? "A FIRESIDE topic sourcing job is already running…"
+          : r.error || "Failed to start topic sourcing"
+      );
+      return;
+    }
+    setTopics([]);
+    setSourceMode(null);
+    setSourceJobId(r.data!.id);
+    setSearching(true);
+  }, [seed, category, setTopics, setSourceMode, setSourceJobId]);
+
+  const getEditNotes = useCallback(async () => {
+    if (!draft.trim() && !url.trim()) {
+      setEditErr("Please paste a draft script or enter a document URL.");
+      return;
+    }
+    setEditErr(null);
+    setLoadingNotes(true);
+    const r = await post<FiresideEditNotesResp>("/api/thailandnow/scout/fireside/edit-notes", {
+      draft: draft.trim() || undefined,
+      url: url.trim() || undefined,
+      check_coverage: checkCoverage,
+    });
+    setLoadingNotes(false);
+    if (r.ok && r.data) {
+      setNotesResp(r.data);
+      if (r.data.error) {
+        setEditErr(r.data.error);
+      }
+    } else {
+      setEditErr(r.error || "Failed to generate editorial notes.");
+    }
+  }, [draft, url, checkCoverage, setNotesResp, setEditErr]);
+
+  const copyTopic = useCallback((topic: FiresideTopic, idx: number) => {
+    const parts = [
+      `# ${topic.title}`,
+      `**Angle:** ${topic.angle}`,
+      topic.why_fresh ? `**Why Fresh:** ${topic.why_fresh}` : "",
+      topic.if_like_a_try_b ? `**If You Liked A, Try B:** ${topic.if_like_a_try_b}` : "",
+      topic.visual_style ? `**Visual Style:** ${topic.visual_style}` : "",
+      topic.ep_adjacent?.length ? `**Adjacent Episodes:** ${topic.ep_adjacent.join(", ")}` : "",
+      topic.source_urls?.length ? `**Sources:**\n${topic.source_urls.map((u) => `- ${u}`).join("\n")}` : "",
+      topic.revisit_candidate ? `*[Revisit Candidate]*` : "",
+    ].filter(Boolean);
+    navigator.clipboard.writeText(parts.join("\n\n")).catch(() => {});
+    setCopiedTopicIdx(idx);
+    setTimeout(() => setCopiedTopicIdx(null), 2000);
+  }, []);
+
+  const copyNotes = useCallback(() => {
+    if (!notesResp?.notes) return;
+    const n = notesResp.notes;
+    const parts: string[] = [];
+    if (n.overall) parts.push(`## Overall Assessment\n${n.overall}`);
+    if (n.strengths?.length) parts.push(`## Strengths\n${n.strengths.map((s) => `- ${s}`).join("\n")}`);
+    if (n.fixes?.length) {
+      parts.push(
+        `## Line Fixes & Edits\n${n.fixes
+          .map((f) => `### [${f.severity.toUpperCase()}] "${f.anchor}"\n${f.note}`)
+          .join("\n\n")}`
+      );
+    }
+    if (n.structure_notes) parts.push(`## Structure & Pacing\n${n.structure_notes}`);
+    if (n.voice_notes) parts.push(`## Voice Notes (Ben Rujopakarn Tone)\n${n.voice_notes}`);
+    if (n.coverage_check) parts.push(`## Past Episode Coverage Check\n${n.coverage_check}`);
+    navigator.clipboard.writeText(parts.join("\n\n")).catch(() => {});
+    setNotesCopied(true);
+    setTimeout(() => setNotesCopied(false), 2000);
+  }, [notesResp]);
+
+  return (
+    <div className="flex flex-col flex-grow">
+      {/* Sub-mode toggle row */}
+      <div className="flex items-center justify-between mb-3 shrink-0">
+        <div className="flex items-center gap-2">
+          <span className="mono text-xs font-bold" style={{ color: "var(--color-phosphor)" }}>
+            {firesideSub === "fireside-source" ? "SOURCE TOPICS" : "EDIT NOTES"}
+          </span>
+          <span className="mono text-xs" style={{ color: "var(--color-muted)" }}>
+            {firesideSub === "fireside-source"
+              ? "— Ben-anchored Fireside show topic sourcing"
+              : "— Ben Rujopakarn editorial notes & voice check"}
+          </span>
+        </div>
+        <div className="flex items-center gap-1">
+          <button
+            className={`btn btn--compact ${firesideSub === "fireside-source" ? "btn--signal" : ""}`}
+            onClick={() => setFiresideSub("fireside-source")}
+          >
+            SOURCE TOPICS
+          </button>
+          <button
+            className={`btn btn--compact ${firesideSub === "fireside-edit" ? "btn--signal" : ""}`}
+            onClick={() => setFiresideSub("fireside-edit")}
+          >
+            EDIT NOTES
+          </button>
+        </div>
+      </div>
+
+      {firesideSub === "fireside-source" ? (
+        /* =================== SOURCE TOPICS SUB-VIEW =================== */
+        <>
+          {/* Input Controls */}
+          <div className="flex flex-wrap items-center gap-2 shrink-0 mb-3">
+            <input
+              className="input"
+              style={{ flexGrow: 1, minWidth: 220 }}
+              placeholder="seed topic or keyword (optional, e.g. soft power, visa reforms)"
+              value={seed}
+              onChange={(e) => setSeed(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && (e.metaKey || e.ctrlKey || !e.shiftKey)) {
+                  e.preventDefault();
+                  sourceTopics();
+                }
+              }}
+            />
+            <select
+              className="input"
+              value={category}
+              onChange={(e) => setCategory(e.target.value)}
+            >
+              <option value="">All Categories</option>
+              <option value="expat-policy">Expat policy</option>
+              <option value="business-investment">Business &amp; investment</option>
+              <option value="lifestyle">Lifestyle</option>
+              <option value="culture">Culture</option>
+              <option value="infrastructure">Infrastructure</option>
+            </select>
+            <button
+              className="btn btn--compact btn--signal"
+              disabled={searching}
+              onClick={sourceTopics}
+            >
+              {searching ? "SOURCING…" : "SOURCE TOPICS"}
+            </button>
+          </div>
+
+          {/* Results Area */}
+          <div className="scroll-y flex-grow flex flex-col gap-3">
+            {sourceErr && (
+              <div className="mono text-xs" style={{ color: "var(--color-critical)" }}>
+                {sourceErr}
+              </div>
+            )}
+            {searching && (
+              <div className="mono text-xs" style={{ color: "var(--color-signal)" }}>
+                Sourcing Fireside topics from NotebookLM corpus &amp; web references…
+              </div>
+            )}
+            {!searching && topics.length === 0 && !sourceErr && (
+              <div className="mono text-xs" style={{ color: "var(--color-muted)" }}>
+                Enter an optional seed topic or category and click SOURCE TOPICS.
+              </div>
+            )}
+
+            {topics.length > 0 && (
+              <div className="flex items-center justify-between shrink-0">
+                <span className="mono text-xs font-bold" style={{ color: "var(--color-phosphor)" }}>
+                  TOPIC CANDIDATES ({topics.length})
+                </span>
+                {sourceMode && (
+                  <span
+                    className="mono text-xs px-1.5 py-0.5 rounded font-bold"
+                    style={{
+                      background:
+                        sourceMode === "notebook"
+                          ? "color-mix(in srgb, var(--color-go) 15%, var(--color-void))"
+                          : "color-mix(in srgb, var(--color-hazard) 15%, var(--color-void))",
+                      color: sourceMode === "notebook" ? "var(--color-go)" : "var(--color-hazard)",
+                      border: `1px solid ${sourceMode === "notebook" ? "var(--color-go)" : "var(--color-hazard)"}`,
+                    }}
+                  >
+                    {sourceMode === "notebook" ? "NOTEBOOK CORPUS" : "WEB FALLBACK"}
+                  </span>
+                )}
+              </div>
+            )}
+
+            {topics.map((topic, idx) => (
+              <div key={idx} className="border border-edge bg-void p-3 flex flex-col gap-2 rounded">
+                <div className="flex flex-wrap items-start justify-between gap-2">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="font-bold text-sm" style={{ color: "var(--color-signal)" }}>
+                      {topic.title}
+                    </span>
+                    {topic.revisit_candidate && (
+                      <span
+                        className="mono text-xs px-1.5 py-0.5 rounded font-bold"
+                        style={{
+                          background: "color-mix(in srgb, var(--color-hazard) 20%, var(--color-surface))",
+                          color: "var(--color-hazard)",
+                          border: "1px solid var(--color-hazard)",
+                        }}
+                      >
+                        REVISIT CANDIDATE
+                      </span>
+                    )}
+                  </div>
+                  <button className="btn btn--compact" onClick={() => copyTopic(topic, idx)}>
+                    {copiedTopicIdx === idx ? "✓ COPIED" : "COPY TOPIC"}
+                  </button>
+                </div>
+
+                {topic.angle && (
+                  <div className="text-xs" style={{ color: "var(--color-phosphor)" }}>
+                    <span className="mono font-bold" style={{ color: "var(--color-signal)" }}>
+                      ANGLE:{" "}
+                    </span>
+                    {topic.angle}
+                  </div>
+                )}
+
+                {topic.why_fresh && (
+                  <div className="text-xs" style={{ color: "var(--color-phosphor-dim)" }}>
+                    <span className="mono font-bold" style={{ color: "var(--color-muted)" }}>
+                      WHY FRESH:{" "}
+                    </span>
+                    {topic.why_fresh}
+                  </div>
+                )}
+
+                {topic.if_like_a_try_b && (
+                  <div className="text-xs" style={{ color: "var(--color-phosphor-dim)" }}>
+                    <span className="mono font-bold" style={{ color: "var(--color-muted)" }}>
+                      IF LIKE A, TRY B:{" "}
+                    </span>
+                    {topic.if_like_a_try_b}
+                  </div>
+                )}
+
+                {topic.visual_style && (
+                  <div className="text-xs" style={{ color: "var(--color-phosphor-dim)" }}>
+                    <span className="mono font-bold" style={{ color: "var(--color-muted)" }}>
+                      VISUAL STYLE:{" "}
+                    </span>
+                    {topic.visual_style}
+                  </div>
+                )}
+
+                {topic.ep_adjacent && topic.ep_adjacent.length > 0 && (
+                  <div className="flex flex-wrap items-center gap-1 mt-1">
+                    <span className="mono text-xs" style={{ color: "var(--color-muted)" }}>
+                      ADJACENT:
+                    </span>
+                    {topic.ep_adjacent.map((ep, eIdx) => (
+                      <span
+                        key={eIdx}
+                        className="mono text-xs px-1.5 py-0.5 rounded"
+                        style={{
+                          background: "var(--color-surface)",
+                          color: "var(--color-phosphor-dim)",
+                          border: "1px solid var(--color-edge)",
+                        }}
+                      >
+                        {ep}
+                      </span>
+                    ))}
+                  </div>
+                )}
+
+                {topic.source_urls && topic.source_urls.length > 0 && (
+                  <div className="flex flex-wrap items-center gap-2 mt-1">
+                    <span className="mono text-xs" style={{ color: "var(--color-muted)" }}>
+                      SOURCES:
+                    </span>
+                    {topic.source_urls.map((u, uIdx) => (
+                      <a
+                        key={uIdx}
+                        href={u}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="mono text-xs hover:underline truncate max-w-xs"
+                        style={{ color: "var(--color-signal)" }}
+                      >
+                        {bareDomain(u) || u}
+                      </a>
+                    ))}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        </>
+      ) : (
+        /* =================== EDIT NOTES SUB-VIEW =================== */
+        <div className="flex flex-col flex-grow gap-3">
+          {/* Inputs */}
+          <div className="flex flex-col gap-2 shrink-0">
+            <textarea
+              className="input"
+              rows={6}
+              placeholder="Paste episode draft script here..."
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              style={{ width: "100%", resize: "vertical" }}
+            />
+            <div className="flex flex-wrap items-center gap-3">
+              <input
+                className="input"
+                style={{ flexGrow: 1, minWidth: 240 }}
+                placeholder="Or document / draft URL (e.g. Google Docs link or article URL)"
+                value={url}
+                onChange={(e) => setUrl(e.target.value)}
+              />
+              <label
+                className="mono text-xs flex items-center gap-1 cursor-pointer"
+                style={{ color: "var(--color-muted)" }}
+              >
+                <input
+                  type="checkbox"
+                  checked={checkCoverage}
+                  onChange={(e) => setCheckCoverage(e.target.checked)}
+                />
+                Check past episode coverage
+              </label>
+              <button
+                className="btn btn--signal"
+                disabled={loadingNotes || (!draft.trim() && !url.trim())}
+                onClick={getEditNotes}
+              >
+                {loadingNotes ? "ANALYZING DRAFT…" : "GET EDIT NOTES"}
+              </button>
+            </div>
+          </div>
+
+          {/* Error / Status */}
+          {editErr && (
+            <div className="mono text-xs" style={{ color: "var(--color-critical)" }}>
+              {editErr}
+            </div>
+          )}
+          {loadingNotes && (
+            <div className="mono text-xs" style={{ color: "var(--color-signal)" }}>
+              Analyzing draft script in Ben Rujopakarn's editorial voice…
+            </div>
+          )}
+
+          {/* Notes Content */}
+          <div className="scroll-y flex-grow flex flex-col gap-3">
+            {!loadingNotes && !notesResp && !editErr && (
+              <div className="mono text-xs" style={{ color: "var(--color-muted)" }}>
+                Paste a script draft above or provide a URL to get Ben-anchored editorial notes, line fixes, and pacing feedback.
+              </div>
+            )}
+
+            {notesResp && (
+              <div className="border border-edge bg-void p-3 flex flex-col gap-3 rounded">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <span className="mono text-xs font-bold" style={{ color: "var(--color-phosphor)" }}>
+                      EDITORIAL NOTES
+                    </span>
+                    <span
+                      className="mono text-xs px-1.5 py-0.5 rounded font-bold"
+                      style={{
+                        background:
+                          notesResp.mode === "direct"
+                            ? "color-mix(in srgb, var(--color-go) 15%, var(--color-void))"
+                            : "color-mix(in srgb, var(--color-hazard) 15%, var(--color-void))",
+                        color: notesResp.mode === "direct" ? "var(--color-go)" : "var(--color-hazard)",
+                        border: `1px solid ${
+                          notesResp.mode === "direct" ? "var(--color-go)" : "var(--color-hazard)"
+                        }`,
+                      }}
+                    >
+                      {notesResp.mode === "direct" ? "DIRECT (BEN VOICE)" : "DEGRADED MODE"}
+                    </span>
+                  </div>
+                  <button className="btn btn--compact" onClick={copyNotes}>
+                    {notesCopied ? "✓ COPIED" : "COPY NOTES"}
+                  </button>
+                </div>
+
+                {notesResp.error && (
+                  <div className="mono text-xs" style={{ color: "var(--color-critical)" }}>
+                    {notesResp.error}
+                  </div>
+                )}
+
+                {notesResp.notes?.overall && (
+                  <div className="p-2 border border-edge bg-surface rounded flex flex-col gap-1">
+                    <span className="mono text-xs font-bold" style={{ color: "var(--color-signal)" }}>
+                      OVERALL ASSESSMENT
+                    </span>
+                    <div className="text-xs" style={{ color: "var(--color-phosphor)", whiteSpace: "pre-wrap" }}>
+                      {notesResp.notes.overall}
+                    </div>
+                  </div>
+                )}
+
+                {notesResp.notes?.strengths && notesResp.notes.strengths.length > 0 && (
+                  <div className="p-2 border border-edge bg-surface rounded flex flex-col gap-1">
+                    <span className="mono text-xs font-bold" style={{ color: "var(--color-go)" }}>
+                      STRENGTHS
+                    </span>
+                    <ul className="list-disc list-inside text-xs flex flex-col gap-1" style={{ color: "var(--color-phosphor)" }}>
+                      {notesResp.notes.strengths.map((str, sIdx) => (
+                        <li key={sIdx}>{str}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+
+                {notesResp.notes?.fixes && notesResp.notes.fixes.length > 0 && (
+                  <div className="p-2 border border-edge bg-surface rounded flex flex-col gap-2">
+                    <span className="mono text-xs font-bold" style={{ color: "var(--color-hazard)" }}>
+                      LINE FIXES &amp; EDITS ({notesResp.notes.fixes.length})
+                    </span>
+                    <div className="flex flex-col gap-2">
+                      {notesResp.notes.fixes.map((fix, fIdx) => {
+                        const sevColor =
+                          fix.severity === "must"
+                            ? "var(--color-critical)"
+                            : fix.severity === "should"
+                            ? "var(--color-hazard)"
+                            : "var(--color-muted)";
+                        return (
+                          <div
+                            key={fIdx}
+                            className="p-2 border border-edge bg-void rounded flex flex-col gap-1 text-xs"
+                          >
+                            <div className="flex items-center justify-between gap-2">
+                              <span
+                                className="mono text-xs uppercase px-1 py-0.5 rounded font-bold"
+                                style={{ border: `1px solid ${sevColor}`, color: sevColor }}
+                              >
+                                {fix.severity}
+                              </span>
+                              {fix.anchor && (
+                                <span
+                                  className="mono text-xs italic truncate flex-grow"
+                                  style={{ color: "var(--color-muted)" }}
+                                >
+                                  "{fix.anchor}"
+                                </span>
+                              )}
+                            </div>
+                            <div style={{ color: "var(--color-phosphor)" }}>{fix.note}</div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+
+                {notesResp.notes?.structure_notes && (
+                  <div className="p-2 border border-edge bg-surface rounded flex flex-col gap-1">
+                    <span className="mono text-xs font-bold" style={{ color: "var(--color-signal)" }}>
+                      STRUCTURE &amp; PACING
+                    </span>
+                    <div className="text-xs" style={{ color: "var(--color-phosphor)", whiteSpace: "pre-wrap" }}>
+                      {notesResp.notes.structure_notes}
+                    </div>
+                  </div>
+                )}
+
+                {notesResp.notes?.voice_notes && (
+                  <div className="p-2 border border-edge bg-surface rounded flex flex-col gap-1">
+                    <span className="mono text-xs font-bold" style={{ color: "var(--color-phosphor-dim)" }}>
+                      VOICE &amp; BEN RUJOPAKARN TONE
+                    </span>
+                    <div className="text-xs" style={{ color: "var(--color-phosphor)", whiteSpace: "pre-wrap" }}>
+                      {notesResp.notes.voice_notes}
+                    </div>
+                  </div>
+                )}
+
+                {notesResp.notes?.coverage_check && (
+                  <div className="p-2 border border-edge bg-surface rounded flex flex-col gap-1">
+                    <span className="mono text-xs font-bold" style={{ color: "var(--color-signal)" }}>
+                      PAST EPISODE COVERAGE
+                    </span>
+                    <div className="text-xs" style={{ color: "var(--color-phosphor)", whiteSpace: "pre-wrap" }}>
+                      {notesResp.notes.coverage_check}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+
 /* ------------------------------- STORY SCOUT ------------------------------ */
 
 function StoryScoutTab() {
-  const [scoutMode, setScoutMode] = usePersistentState<"pitch" | "image">("tn.scout.mode", "pitch");
+  const [scoutMode, setScoutMode] = usePersistentState<"pitch" | "image" | "fireside">("tn.scout.mode", "pitch");
   const [query, setQuery]         = usePersistentState("tn.scout.query", "");
   const [category, setCategory]   = usePersistentState("tn.scout.category", "");
   const [days, setDays]           = usePersistentState("tn.scout.days", 7);
@@ -1821,6 +2431,12 @@ function StoryScoutTab() {
           >
             IMAGE MODE
           </button>
+          <button
+            className={`btn btn--compact ${scoutMode === "fireside" ? "btn--signal" : ""}`}
+            onClick={() => setScoutMode("fireside")}
+          >
+            FIRESIDE MODE
+          </button>
         </div>
       </div>
 
@@ -1967,7 +2583,7 @@ function StoryScoutTab() {
             })}
           </div>
         </>
-      ) : (
+      ) : scoutMode === "image" ? (
         /* IMAGE MODE Panel */
         <div className="flex flex-col flex-grow">
           {/* Input Row */}
@@ -2053,22 +2669,25 @@ function StoryScoutTab() {
                           <a href={im.url} target="_blank" rel="noreferrer" className="block">
                             <img src={im.url} alt={im.alt || "Article visual"} style={{ width: "100%", height: 80, objectFit: "cover" }} />
                           </a>
+                          <div className="mono text-xs truncate px-0.5" style={{ color: "var(--color-muted)" }}>
+                            {im.alt || bareDomain(im.url)}
+                          </div>
                         </div>
                       ))}
                     </div>
                   )}
                 </div>
 
-                {/* TIER 2 — Stock Photos (>=1080p) */}
+                {/* TIER 2 — Stock Imagery */}
                 <div className="border border-edge bg-void p-3 flex flex-col gap-2">
                   <div className="flex items-center justify-between">
                     <span className="mono text-xs font-bold" style={{ color: "var(--color-phosphor)" }}>
-                      TIER 2 — STOCK PHOTOS (≥1080p) ({scoutImgData.tier2?.length ?? 0})
+                      TIER 2 — HIGH-RES STOCK ({scoutImgData.tier2?.length ?? 0})
                     </span>
-                    <span className="mono text-xs" style={{ color: "var(--color-muted)" }}>Pexels / Pixabay · no attribution required</span>
+                    <span className="mono text-xs" style={{ color: "var(--color-muted)" }}>Pexels / Pixabay · ≥1080p</span>
                   </div>
                   {(!scoutImgData.tier2 || scoutImgData.tier2.length === 0) ? (
-                    <div className="mono text-xs" style={{ color: "var(--color-muted)" }}>No stock matches found (API keys unset or no results ≥1080p).</div>
+                    <div className="mono text-xs" style={{ color: "var(--color-muted)" }}>No high-res stock matches found.</div>
                   ) : (
                     <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill,minmax(140px,1fr))", gap: 8 }}>
                       {scoutImgData.tier2.map((im: any, idx: number) => (
@@ -2222,6 +2841,9 @@ function StoryScoutTab() {
             )}
           </div>
         </div>
+      ) : (
+        /* FIRESIDE MODE Panel */
+        <FiresidePanel />
       )}
     </section>
   );

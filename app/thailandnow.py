@@ -34,6 +34,7 @@ from fastapi import APIRouter, Body, HTTPException
 from pydantic import BaseModel
 
 from .config import CONFIG
+from .notebooklm import CLI, _cached_notebooks, _run_cli
 from .zai import zai_message
 
 router = APIRouter()
@@ -1589,6 +1590,500 @@ async def scout_terminal_report():
             seen.add(r["url"])
             deduped.append(r)
     return {"results": deduped, "count": len(deduped), "mtime": p.stat().st_mtime}
+
+
+# --- FIRESIDE MODE (Slice 1): Topic Sourcing & Script Edit Notes ---
+
+_FIRESIDE_NB_PREFIX = "The Fireside"
+
+
+def _fireside_nb_id_path() -> Path:
+    """Sidecar holding the dedicated Fireside notebook id."""
+    return Path(os.path.expanduser("~/.config/railjack/fireside_notebook.id"))
+
+
+async def _fireside_nid() -> str | None:
+    """3-layer lookup for the Fireside notebook ID, first hit wins:
+    1. options: opts.get("fireside_notebook_id")
+    2. sidecar: read _fireside_nb_id_path() if present
+    3. discover: scan _cached_notebooks() for title startswith _FIRESIDE_NB_PREFIX
+    """
+    opts = _opts()
+    opt_nid = opts.get("fireside_notebook_id")
+    if opt_nid:
+        return str(opt_nid).strip()
+
+    p = _fireside_nb_id_path()
+    if p.is_file():
+        try:
+            txt = p.read_text(encoding="utf-8").strip()
+            if txt:
+                return txt
+        except Exception:
+            pass
+
+    try:
+        nbs = await _cached_notebooks()
+        for nb in nbs:
+            title = str(nb.get("title") or "")
+            if title.startswith(_FIRESIDE_NB_PREFIX):
+                nid = nb.get("id")
+                if nid:
+                    return str(nid).strip()
+    except Exception:
+        pass
+    return None
+
+
+async def _fireside_ensure() -> str:
+    """Discover the Fireside corpus notebook. Discover only — never create."""
+    nid = await _fireside_nid()
+    if not nid:
+        raise HTTPException(
+            424,
+            "Create a notebook titled 'The Fireside…' in the RESEARCH tab, add the episode sources, "
+            "wait for READY, then retry — or set fireside_notebook_id in options.",
+        )
+    return nid
+
+
+def _filter_fireside_registry(rows: list[dict]) -> tuple[list[str], list[dict]]:
+    """Split registry rows into (done_or_excluded_topic_titles, revisitable_candidates).
+    Drops 'done' and 'excluded' from candidates while collecting their topic names for exclusion.
+    Keeps 'revisitable' rows as candidates.
+    """
+    done_topics: list[str] = []
+    revisitable: list[dict] = []
+    for r in rows:
+        topic = (r.get("topic") or "").strip()
+        status = (r.get("status") or "").strip().lower()
+        if status in ("done", "excluded"):
+            if topic:
+                done_topics.append(topic)
+        elif status == "revisitable":
+            revisitable.append(r)
+    return done_topics, revisitable
+
+
+async def _fireside_registry() -> list[dict]:
+    """Read the Fireside Topic Registry Google Sheet (tab 'Topics').
+    Returns a list of dicts: [{video_id, run, ep, topic, status, co_host, upload_date, angle_notes}, ...].
+    """
+    sheet_id = _opts().get("fireside_registry_sheet_id") or "1JG7xFiCmMgPx4APFB2U9tRj56yVP5Abz36t0bi0BgWs"
+    token = await _google_token()
+    hdr = {"Authorization": f"Bearer {token}"}
+    range_param = urllib.parse.quote("Topics!A:Z")
+    url = f"https://sheets.googleapis.com/v4/spreadsheets/{sheet_id}/values/{range_param}"
+    async with httpx.AsyncClient(timeout=30) as c:
+        r = await c.get(url, headers=hdr)
+        if r.status_code != 200:
+            raise HTTPException(502, f"Google Sheets read failed: {r.text[:200]}")
+        data = r.json()
+        values = data.get("values", [])
+        if not values or len(values) < 2:
+            return []
+
+        def _normalize_header(h: str) -> str:
+            clean = re.sub(r"[^a-z0-9]+", "_", str(h).strip().lower()).strip("_")
+            mapping = {
+                "videoid": "video_id",
+                "video_id": "video_id",
+                "run": "run",
+                "ep": "ep",
+                "topic": "topic",
+                "status": "status",
+                "co_host": "co_host",
+                "cohost": "co_host",
+                "uploaddate": "upload_date",
+                "upload_date": "upload_date",
+                "angle_notes": "angle_notes",
+                "angle": "angle_notes",
+                "notes": "angle_notes",
+            }
+            return mapping.get(clean, clean or "col")
+
+        headers = [_normalize_header(h) for h in values[0]]
+        rows: list[dict] = []
+        for raw_row in values[1:]:
+            if not raw_row or not any(raw_row):
+                continue
+            item = {}
+            for i, col in enumerate(headers):
+                item[col] = str(raw_row[i]).strip() if i < len(raw_row) else ""
+            rows.append(item)
+        return rows
+
+
+def _fireside_source_gem_path() -> Path:
+    """Fireside topic sourcing gem path."""
+    return _resolve_gem("fireside_source_gem_path", "app/gems/fireside-source.md")
+
+
+def _fireside_edit_gem_path() -> Path:
+    """Fireside edit notes gem path."""
+    return _resolve_gem("fireside_edit_gem_path", "app/gems/fireside-edit-notes.md")
+
+
+async def _flow_fireside_source(job: TnJob, seed: str | None, category: str | None) -> None:
+    """SOURCE TOPICS flow: query corpus notebook for fresh episode ideas, with relaxed
+    web fallback on thin answer, followed by LLM shaping to strict JSON schema."""
+    # 1. Topic registry lookup
+    done_topics: list[str] = []
+    revisitable: list[dict] = []
+    try:
+        registry = await _fireside_registry()
+        done_topics, revisitable = _filter_fireside_registry(registry)
+    except Exception as e:
+        job.logs.append(f"registry fetch skipped/failed: {e}")
+
+    # Extract unique, concise topic themes (most recent + core 35) to keep NLM query prompt fast
+    unique_done = []
+    for t in reversed(done_topics):
+        clean = t.split(":")[0].split("—")[0].strip()
+        if clean and clean not in unique_done:
+            unique_done.append(clean)
+    done_list_str = ", ".join(unique_done[:35]) if unique_done else "(none)"
+    revisit_list_str = ", ".join([f"{r.get('ep', '')}: {r.get('topic', '')}" for r in revisitable if r.get("topic")]) or "(none)"
+
+    # 2. Discover notebook (OPTIONAL — web fallback covers the no-notebook case,
+    #    so SOURCE works before the corpus is built / if the notebooklm backend is down)
+    nid = await _fireside_nid()
+    job.notebook = nid or ""
+
+    # 3. Ask corpus notebook (only when a notebook is configured)
+    answer = ""
+    refs: list[dict] = []
+    mapped_urls: list[str] = []
+    mode = "notebook"
+
+    if nid:
+        subject = (seed or category or "Thailand living, visas, travel and expat life").strip()
+        # Ben's methodology: start from a concrete news/event hook, then broaden to 4 angles:
+        # cultural dimension, industry/economic dimension, government policy, ASEAN comparison.
+        # The hook is the excuse to talk about Thailand more broadly.
+        # ALSO: avoid Queen/Mother's-Day topics per Ben's explicit instruction.
+        prompt = (
+            f"Suggest 3-5 FRESH episode topics on '{subject}' for The Fireside YouTube show. "
+            "Follow Ben Rujopakarn's development methodology: each topic MUST start from a "
+            "concrete, real, current NEWS OR EVENT hook (something happening NOW or in the "
+            "coming weeks), then broaden into 3-4 development angles: (1) CULTURAL dimension, "
+            "(2) INDUSTRY/ECONOMIC dimension, (3) GOVERNMENT POLICY dimension, (4) ASEAN/REGIONAL "
+            "COMPARISON. The hook is the excuse to talk about Thailand more broadly. "
+            f"HARD AVOID (do NOT suggest any topic on this list OR its themes): [{done_list_str}]. "
+            "ALSO AVOID: any Queen-related or Mother's Day-related topics. "
+            f"Revisitable update candidates (these COULD be revisited if a strong new hook exists): [{revisit_list_str}]. "
+            "For each topic, provide:\n"
+            "- Title (punchy YouTube-optimized)\n"
+            "- Angle framed as the two questions a foreigner-in-Thailand asks\n"
+            "- A real, verifiable news/event hook (name the specific event, report, or date if known)\n"
+            "- Development angles: cultural / industry-economic / government policy / ASEAN comparison\n"
+            "- Adjacent past episode #s or topics\n"
+            "- 2-4 citable source URLs or references from the corpus\n"
+            "- An 'If You Like A, Try B' pairing with a past episode\n"
+            "- Visual/chapter-card style used for similar episodes\n"
+            "- Why it is fresh and timely\n"
+            "- Whether it is a revisit candidate update (boolean)"
+        )
+
+        source_map: dict[str, str] = {}
+        try:
+            src_data = await _run_cli(["nlm", "source", "list", nid, "--json"], timeout=40)
+            src_list = src_data if isinstance(src_data, list) else (src_data.get("sources", []) if isinstance(src_data, dict) else [])
+            for s in (src_list or []):
+                if isinstance(s, dict):
+                    sid = s.get("id") or s.get("source_id")
+                    surl = s.get("url") or s.get("title") or ""
+                    if sid and surl:
+                        source_map[str(sid)] = str(surl)
+        except Exception as e:
+            job.logs.append(f"source list check: {e}")
+
+        try:
+            ask_res = await _run_cli(["nlm", "notebook", "query", nid, prompt, "--json"], timeout=180)
+            if isinstance(ask_res, dict):
+                answer = str(ask_res.get("answer") or ask_res.get("text") or "").strip()
+                citations = ask_res.get("citations") or ask_res.get("references") or {}
+                # nlm returns citations as {num: source_id}; legacy shape was a list of dicts
+                if isinstance(citations, dict):
+                    cite_sids = [str(v) for v in citations.values()]
+                elif isinstance(citations, list):
+                    cite_sids = [str(r.get("source_id") or r.get("id") or "") for r in citations if isinstance(r, dict)]
+                else:
+                    cite_sids = []
+                refs = cite_sids
+                for sid in cite_sids:
+                    if sid in source_map and source_map[sid]:
+                        mapped_urls.append(source_map[sid])
+        except Exception as e:
+            job.logs.append(f"corpus ask error: {e}")
+    else:
+        job.logs.append("no Fireside corpus notebook — using web fallback")
+
+    # 4. ASK-THIN GUARD: if answer empty or (no refs and no mapped urls) -> relaxed web fallback
+    if not answer or (not refs and not mapped_urls):
+        job.logs.append("corpus answer thin or empty; triggering relaxed web fallback")
+        q_clean = (seed or category or "Thailand foreigner living").strip()
+        queries = [
+            f"{q_clean}",
+            f"Thailand {q_clean} news",
+            f"ประเทศไทย {q_clean}",
+            f"{q_clean} site:thairath.co.th OR site:khaosod.co.th OR site:matichon.co.th OR site:prachachat.net",
+        ]
+        ddg_urls: list[str] = []
+        for q in queries:
+            try:
+                md = await _jina_read(f"https://duckduckgo.com/html/?q={urllib.parse.quote(q)}")
+                for ev in _parse_ddg(md):
+                    ddg_urls.append(ev["url"])
+            except Exception:
+                pass
+
+        brave_results = await asyncio.gather(*[_brave_urls(q) for q in queries])
+        brave_urls = [u for batch in brave_results for u in batch]
+        gnews_urls = await _gnews_urls(f"{q_clean} news")
+
+        urls = _scout_dedup([*ddg_urls, *brave_urls, *gnews_urls], by_domain=True, limit=20)
+
+        async def _fx(u: str):
+            try:
+                md = await _jina_read(u)
+                return _extract_news(md, u)
+            except Exception:
+                return None
+
+        extracted = await asyncio.gather(*[_fx(u) for u in urls])
+        web_results = [r for r in extracted if r]  # keep undated (no date filter)
+        web_results = await _scout_rerank(web_results)
+
+        answer = "\n\n".join([
+            f"Title: {r.get('title')}\nURL: {r.get('url')}\nSnippet: {r.get('snippet') or r.get('excerpt')}"
+            for r in web_results[:10]
+        ])
+        mapped_urls = [r.get("url") for r in web_results if r.get("url")]
+        mode = "web-fallback"
+
+    # 5a. WEB-VERIFY HOOKS + collect real source URLs (Critical: corpus can fabricate specific dates/events)
+    # For each topic the corpus proposed, verify the hook via live web search.
+    # This runs on BOTH the notebook path and the web-fallback path.
+    if answer:
+        job.logs.append("running hook web-verification pass...")
+        # Extract candidate topic hooks for verification (parse from corpus answer text)
+        hook_queries: list[str] = []
+        # Simple heuristic: extract lines starting with "hook", "event", or title-like capitalized lines
+        for line in answer.split("\n"):
+            l = line.strip().lstrip("-*•").strip()
+            llow = l.lower()
+            if (llow.startswith("hook") or llow.startswith("event") or llow.startswith("news")) and len(l) > 20:
+                hook_queries.append(l[:120])
+            elif len(l) > 20 and l[0].isupper() and not l.startswith("For") and not l.startswith("The topic"):
+                hook_queries.append(l[:100])
+        hook_queries = hook_queries[:6]  # cap to avoid burn
+
+        # Also add subject as baseline
+        hook_queries.append(f"{(seed or category or subject)} Thailand 2025 2026")
+
+        web_verify_urls: list[str] = []
+        async def _vfx(q: str) -> list[str]:
+            out: list[str] = []
+            try:
+                brs = await _brave_urls(q)
+                out.extend(brs[:3])
+            except Exception:
+                pass
+            try:
+                gns = await _gnews_urls(q)
+                out.extend(gns[:2])
+            except Exception:
+                pass
+            return out
+
+        verify_batches = await asyncio.gather(*[_vfx(q) for q in hook_queries])
+        for batch in verify_batches:
+            web_verify_urls.extend(batch)
+
+        # Dedup and add verified URLs to mapped_urls pool (they are real, current)
+        web_verify_deduped = _scout_dedup([u for u in web_verify_urls if u and "youtube.com" not in u], by_domain=False, limit=20)
+        for u in web_verify_deduped:
+            if u not in mapped_urls:
+                mapped_urls.append(u)
+
+        job.logs.append(f"web-verify found {len(web_verify_deduped)} real source URLs")
+
+    # 5b. Corpus episode-tie: always query corpus for adjacent past episodes, even on web-fallback path
+    if nid:
+        subject_for_tie = (seed or category or "general Thailand topic").strip()
+        try:
+            tie_res = await _run_cli(
+                ["nlm", "notebook", "query", nid,
+                 f"Which past Fireside episode(s) are most topically adjacent to '{subject_for_tie}'? "
+                 f"Give the EP# and episode title for each match. If none, say 'no close past episode'.",
+                 "--json"], timeout=120
+            )
+            if isinstance(tie_res, dict):
+                tie_answer = str(tie_res.get("answer") or "").strip()
+                if tie_answer:
+                    # Append tie context into the user prompt for the shaping step
+                    answer = answer + f"\n\n[EPISODE TIES FROM CORPUS]\n{tie_answer}"
+                    job.logs.append(f"episode tie query: {tie_answer[:120]}")
+        except Exception as e:
+            job.logs.append(f"episode tie query failed: {e}")
+
+    # 5c. Shape pass
+    system = _load_gem(_fireside_source_gem_path())
+    opts = _opts()
+    model = (opts.get("fireside_llm") or opts.get("scout_llm") or {}).get("model") or "glm-5"
+    # glm-5 returns prose (not JSON) when fed the full corpus answer + 20 URLs — cap the
+    # context and force a JSON directive in the USER prompt (last thing the model sees).
+    answer_trimmed = (answer or "")[:2500]
+    urls_trimmed = (mapped_urls or [])[:12]
+    user_prompt = (
+        "Respond with ONLY a valid JSON object: {\"topics\":[...]} with 3-5 topic objects "
+        "matching the schema in the system prompt. NO prose, NO markdown, NO code fences. "
+        "Begin your response with { and end with }.\n\n"
+        f"Seed: {seed or ''}\nCategory: {category or ''}\n\n"
+        f"Findings (corpus + web + episode ties):\n{answer_trimmed}\n\n"
+        f"Available source URLs:\n" + "\n".join(urls_trimmed)
+    )
+
+    try:
+        raw = await zai_message(user_prompt, max_tokens=8192, system=system, model=model, timeout=180)
+        parsed = _parse_json_lenient(raw)
+        if isinstance(parsed, dict) and "topics" in parsed:
+            raw_topics = parsed["topics"]
+        elif isinstance(parsed, list):
+            raw_topics = parsed
+        elif isinstance(parsed, dict) and ("title" in parsed or "hook" in parsed):
+            # glm-5 sometimes returns a single flat topic object instead of {"topics":[…]} — recover it
+            raw_topics = [parsed]
+            job.logs.append("shaping: model returned a single topic (not wrapped) — recovered")
+        else:
+            raw_topics = []
+            job.logs.append(f"shaping: no topics recovered — parsed={type(parsed).__name__}; keys={list(parsed.keys())[:10] if isinstance(parsed, dict) else (str(parsed)[:80] if not isinstance(parsed,(list,dict)) else 'list/other')}; raw_len={len(str(raw))}")
+    except Exception as e:
+        job.logs.append(f"shaping pass failed: {e}")
+        raw_topics = []
+
+    topics = []
+    for t in (raw_topics if isinstance(raw_topics, list) else []):
+        if not isinstance(t, dict):
+            continue
+        ep_adj = t.get("ep_adjacent") or t.get("adjacent") or t.get("episode_tie")
+        ep_adj_list = [str(x).strip() for x in ep_adj if x] if isinstance(ep_adj, list) else ([str(ep_adj).strip()] if ep_adj else [])
+        src_urls = t.get("source_urls") or t.get("sources") or []
+        src_urls_list = [str(x).strip() for x in src_urls if x] if isinstance(src_urls, list) else ([str(src_urls).strip()] if src_urls else [])
+        topics.append({
+            "title": str(t.get("title") or t.get("episode_title") or "").strip(),
+            "angle": str(t.get("angle") or t.get("angle framing") or t.get("angle_framing") or "").strip(),
+            "hook": str(t.get("hook") or "").strip(),
+            "development_angles": t.get("development_angles") if isinstance(t.get("development_angles"), dict) else {},
+            "ep_adjacent": ep_adj_list,
+            "source_urls": src_urls_list,
+            "if_like_a_try_b": str(t.get("if_like_a_try_b") or "").strip(),
+            "visual_style": str(t.get("visual_style") or "").strip(),
+            "why_fresh": str(t.get("why_fresh") or "").strip(),
+            "revisit_candidate": bool(t.get("revisit_candidate", False)),
+            "hook_unverified": bool(t.get("hook_unverified", False)),
+        })
+
+    # 6. Set job result
+    job.result = {
+        "topics": topics,
+        "mode": mode,
+        "notebook_id": nid,
+    }
+
+
+@router.post("/api/thailandnow/scout/fireside/source")
+async def scout_fireside_source(payload: dict = Body(default={})):
+    """STORY SCOUT — The Fireside topic sourcing (single-flight async job)."""
+    body = payload or {}
+    seed = body.get("seed")
+    category = body.get("category")
+    if any(j.kind == "fireside-source" and j.status in _TN_RUNNING for j in _TN_JOBS.values()):
+        raise HTTPException(409, "a FIRESIDE topic sourcing job is already running")
+    label = f"fireside-source: {(seed or category or 'general')[:40]}"
+    return _tn_spawn(
+        "fireside-source",
+        label,
+        lambda j: _flow_fireside_source(j, seed, category),
+    )
+
+
+@router.get("/api/thailandnow/scout/fireside/source/report/{jid}")
+async def scout_fireside_source_report(jid: str):
+    """Fetch results of a completed FIRESIDE topic sourcing job."""
+    job = _TN_JOBS.get(jid)
+    if not job or job.kind != "fireside-source":
+        raise HTTPException(404, "no such FIRESIDE topic sourcing job")
+    if job.status != "done":
+        raise HTTPException(409, f"job is {job.status}; not ready")
+    return job.result
+
+
+async def _fireside_edit(
+    draft: str | None = None,
+    url: str | None = None,
+    check_coverage: bool = False,
+) -> dict:
+    """Generate editorial notes for a draft episode script in Ben Rujopakarn's voice."""
+    if draft and str(draft).strip():
+        text = str(draft).strip()
+    elif url and str(url).strip():
+        try:
+            text = (await _jina_read(str(url).strip())).strip()
+        except Exception:
+            text = ""
+        if not text or len(text) < 50:
+            return {"notes": {}, "mode": "degraded", "error": "paste the draft — couldn't read the URL"}
+    else:
+        raise HTTPException(400, "provide draft text or a document url")
+
+    gem_path = _fireside_edit_gem_path()
+    system = _load_gem(gem_path)
+    opts = _opts()
+    model = (opts.get("fireside_llm") or opts.get("scout_llm") or {}).get("model") or "glm-5"
+
+    try:
+        raw = await zai_message(text, max_tokens=8192, system=system, model=model, timeout=180)
+        notes = _parse_json_lenient(raw) or {}
+        mode = "direct"
+    except Exception:
+        notes, mode = {}, "degraded"
+
+    if check_coverage and mode == "direct":
+        try:
+            nid = await _fireside_nid()
+            if nid:
+                cov_prompt = (
+                    "Has this episode topic / angle been covered in past episodes? Which episode numbers (EP#) or runs? "
+                    f"Draft excerpt / summary:\n\n{text[:3000]}"
+                )
+                cov_res = await _run_cli([CLI, "ask", cov_prompt, "--json", "--notebook", nid], timeout=60)
+                cov_answer = cov_res.get("answer") or cov_res.get("text") or ""
+                if isinstance(notes, dict):
+                    notes["coverage_check"] = str(cov_answer).strip()
+            else:
+                if isinstance(notes, dict):
+                    notes.setdefault("coverage_check", "")
+        except Exception:
+            if isinstance(notes, dict):
+                notes.setdefault("coverage_check", "")
+    else:
+        if isinstance(notes, dict):
+            notes.setdefault("coverage_check", "")
+
+    return {"notes": notes, "mode": mode}
+
+
+@router.post("/api/thailandnow/scout/fireside/edit-notes")
+async def scout_fireside_edit_notes(payload: dict = Body(default={})):
+    """STORY SCOUT — The Fireside editorial notes on a draft script."""
+    body = payload or {}
+    draft = body.get("draft")
+    url = body.get("url")
+    check_coverage = bool(body.get("check_coverage", False))
+    return await _fireside_edit(draft=draft, url=url, check_coverage=check_coverage)
+
 
 
 _EVENTS_HANDOFF = Path("/tmp/railjack-events/latest.json")

@@ -106,19 +106,20 @@ def nblm_opts(monkeypatch, tmp_path):
 
 
 def test_state_auth_argv_and_cached(nblm_opts, monkeypatch):
-    proc = _SyncProc(out=b'{"authenticated":true,"account":"naz@x.com"}')
+    # nlm auth probe uses "notebook list" — a list response means authed
+    proc = _SyncProc(out=b'[{"id":"n1","title":"T"}]')
     calls = _patch_exec(monkeypatch, proc)
     out = asyncio.run(notebooklm.state())
-    assert calls[0] == [notebooklm.CLI, "auth", "check", "--json"]
-    assert out == {"available": True, "reason": None, "authed": True, "account": "naz@x.com"}
+    assert calls[0] == [notebooklm.CLI, "notebook", "list", "--json"]
+    assert out == {"available": True, "reason": None, "authed": True, "account": None}
     calls.clear()  # cached 60s → second call must not hit the CLI
     assert asyncio.run(notebooklm.state())["authed"] is True
     assert calls == []
 
 
 def test_state_auth_status_ok_schema(nblm_opts, monkeypatch):
-    # CLI 0.3.3 reports {"status": "ok", ...} — no top-level authenticated/account key.
-    _patch_exec(monkeypatch, _SyncProc(out=b'{"status":"ok","checks":{"sid_cookie":true}}'))
+    # nlm notebook list returns a list; a dict response is also considered authed.
+    _patch_exec(monkeypatch, _SyncProc(out=b'{"notebooks":[]}'))
     out = asyncio.run(notebooklm.state())
     assert out["authed"] is True and out["account"] is None
 
@@ -156,14 +157,14 @@ def test_state_availability_recomputed_per_request(monkeypatch):
 
 
 def test_resolve_cli_prefers_which(monkeypatch):
-    monkeypatch.setattr(notebooklm.shutil, "which", lambda n: "/usr/bin/notebooklm")
-    assert notebooklm._resolve_cli() == "/usr/bin/notebooklm"
+    monkeypatch.setattr(notebooklm.shutil, "which", lambda n: "/usr/bin/nlm" if n == "nlm" else None)
+    assert notebooklm._resolve_cli() == "/usr/bin/nlm"
 
 
 def test_resolve_cli_falls_back_to_well_known_dir(monkeypatch, tmp_path):
     # systemd boot PATH misses ~/.local/bin — which() fails, fallback must hit
     monkeypatch.setattr(notebooklm.shutil, "which", lambda n: None)
-    cli = tmp_path / "notebooklm"
+    cli = tmp_path / "nlm"
     cli.write_text("#!/bin/sh\n")
     cli.chmod(0o755)
     monkeypatch.setattr(notebooklm, "_FALLBACK_CLI_DIRS", [tmp_path])
@@ -172,7 +173,7 @@ def test_resolve_cli_falls_back_to_well_known_dir(monkeypatch, tmp_path):
 
 def test_resolve_cli_ignores_non_executable_and_missing(monkeypatch, tmp_path):
     monkeypatch.setattr(notebooklm.shutil, "which", lambda n: None)
-    plain = tmp_path / "notebooklm"
+    plain = tmp_path / "nlm"
     plain.write_text("data")
     plain.chmod(0o644)  # exists but not executable → not the CLI
     empty = tmp_path / "empty"
@@ -185,7 +186,7 @@ def test_availability_refreshes_cli_argv0(monkeypatch, tmp_path):
     monkeypatch.setattr(notebooklm, "CLI", notebooklm.CLI)  # auto-restore after test
     monkeypatch.setattr(notebooklm, "_OPTS", {"output_dir": str(tmp_path)})
     monkeypatch.setattr(notebooklm.shutil, "which", lambda n: None)
-    cli = tmp_path / "notebooklm"
+    cli = tmp_path / "nlm"
     cli.write_text("#!/bin/sh\n")
     cli.chmod(0o755)
     monkeypatch.setattr(notebooklm, "_FALLBACK_CLI_DIRS", [tmp_path])
@@ -200,7 +201,7 @@ def test_availability_reason_cli_missing(monkeypatch, tmp_path):
     monkeypatch.setattr(notebooklm, "_FALLBACK_CLI_DIRS", [empty])
     monkeypatch.setattr(notebooklm, "_OPTS", {"output_dir": str(tmp_path)})
     ok, reason = notebooklm._availability()
-    assert ok is False and "not found" in reason and ".local/bin" in reason
+    assert ok is False and "not found" in reason and ".local/bin" in reason and "nlm" in reason
 
 
 def test_availability_reason_not_registered(monkeypatch):
@@ -214,10 +215,10 @@ def test_probe_bypasses_auth_cache(nblm_opts, monkeypatch):
     # poison the auth cache with "not authed" far in the future; probe must
     # drop it and hit the CLI fresh
     notebooklm._AUTH_CACHE = (time.monotonic() + 9999, (False, None))
-    calls = _patch_exec(monkeypatch, _SyncProc(out=b'{"status":"ok","account":"naz@x.com"}'))
+    calls = _patch_exec(monkeypatch, _SyncProc(out=b'[{"id":"n1","title":"T"}]'))
     out = asyncio.run(notebooklm.probe())
-    assert calls[0] == [notebooklm.CLI, "auth", "check", "--json"]
-    assert out == {"available": True, "reason": None, "authed": True, "account": "naz@x.com"}
+    assert calls[0] == [notebooklm.CLI, "notebook", "list", "--json"]
+    assert out == {"available": True, "reason": None, "authed": True, "account": None}
 
 
 def test_probe_unavailable_reports_reason(monkeypatch):
@@ -236,20 +237,23 @@ def test_probe_auth_failure_plain_words(nblm_opts, monkeypatch):
     _patch_exec(monkeypatch, _SyncProc(err=b"no token", rc=1))
     out = asyncio.run(notebooklm.probe())
     assert out["available"] is True and out["authed"] is False
-    assert "notebooklm login" in out["reason"]
+    assert "nlm login" in out["reason"]
 
 
 def test_notebooks_argv_and_alpha_sort(nblm_opts, monkeypatch):
-    raw = {"notebooks": [{"id": "b", "title": "Zebra"},
-                         {"id": "a", "title": "apple"},
-                         {"id": "c", "title": "Banana"}]}
+    # nlm notebook list returns a list directly (not {notebooks: …})
+    raw = [{"id": "b", "title": "Zebra"},
+           {"id": "a", "title": "apple"},
+           {"id": "c", "title": "Banana"}]
     calls = _patch_exec(monkeypatch, _SyncProc(out=json.dumps(raw).encode()))
     out = asyncio.run(notebooklm.notebooks())
-    assert calls[0] == [notebooklm.CLI, "list", "--json"]
+    assert calls[0] == [notebooklm.CLI, "notebook", "list", "--json"]
     assert [n["title"] for n in out["notebooks"]] == ["apple", "Banana", "Zebra"]
 
 
 def test_notebooks_502_on_cli_error(nblm_opts, monkeypatch):
+    # Also clears auth cache so the error propagates fresh
+    notebooklm._AUTH_CACHE = None
     _patch_exec(monkeypatch, _SyncProc(err=b"auth expired", rc=1))
     with pytest.raises(HTTPException) as ex:
         asyncio.run(notebooklm.notebooks())
@@ -257,34 +261,36 @@ def test_notebooks_502_on_cli_error(nblm_opts, monkeypatch):
 
 
 def test_create_notebook_argv_and_cache_invalidate(nblm_opts, monkeypatch):
-    calls = _patch_exec(monkeypatch, _SyncProc(out=b'{"id":"n1","title":"New"}'))
+    # nlm notebook create returns {notebook_id, title, url}; we normalize to add 'id'
+    calls = _patch_exec(monkeypatch, _SyncProc(out=b'{"notebook_id":"n1","title":"New","url":"http://x"}'))
     out = asyncio.run(notebooklm.create_notebook(notebooklm.CreateBody(title="New")))
-    assert calls[0] == [notebooklm.CLI, "create", "New", "--json"]
-    assert out == {"id": "n1", "title": "New"}
+    assert calls[0] == [notebooklm.CLI, "notebook", "create", "New", "--json"]
+    assert out["id"] == "n1" and out["title"] == "New"
     assert notebooklm._NB_CACHE is None  # create invalidates the list cache
 
 
 def test_delete_mismatch_returns_400(nblm_opts, monkeypatch):
-    raw = {"notebooks": [{"id": "n1", "title": "Real Title"}]}
+    raw = [{"id": "n1", "title": "Real Title"}]
     calls = _patch_exec(monkeypatch, _SyncProc(out=json.dumps(raw).encode()))
     with pytest.raises(HTTPException) as ex:
         asyncio.run(notebooklm.delete_notebook("n1", notebooklm.DeleteBody(confirm_title="wrong")))
     assert ex.value.status_code == 400
-    assert all("delete" not in c for c in calls)  # only the list call ran
+    assert all("delete" not in " ".join(c) for c in calls)  # only the list call ran
 
 
 def test_delete_match_runs_delete_argv(nblm_opts, monkeypatch):
-    raw = {"notebooks": [{"id": "n1", "title": "Real Title"}]}
+    raw = [{"id": "n1", "title": "Real Title"}]
     calls = _patch_exec(monkeypatch, _SyncProc(out=json.dumps(raw).encode()))
     out = asyncio.run(notebooklm.delete_notebook(
         "n1", notebooklm.DeleteBody(confirm_title="Real Title")))
     assert out == {"deleted": "n1"}
-    assert [notebooklm.CLI, "delete", "-n", "n1", "-y"] in calls
+    # nlm notebook delete uses positional nid, not -n flag
+    assert [notebooklm.CLI, "notebook", "delete", "n1", "-y"] in calls
     assert notebooklm._NB_CACHE is None
 
 
 def test_delete_404_unknown_notebook(nblm_opts, monkeypatch):
-    raw = {"notebooks": [{"id": "other", "title": "X"}]}
+    raw = [{"id": "other", "title": "X"}]
     _patch_exec(monkeypatch, _SyncProc(out=json.dumps(raw).encode()))
     with pytest.raises(HTTPException) as ex:
         asyncio.run(notebooklm.delete_notebook("ghost", notebooklm.DeleteBody(confirm_title="X")))
@@ -292,20 +298,22 @@ def test_delete_404_unknown_notebook(nblm_opts, monkeypatch):
 
 
 def test_sources_list_argv(nblm_opts, monkeypatch):
-    calls = _patch_exec(monkeypatch, _SyncProc(out=b'{"sources":[{"source_id":"s1"}]}'))
+    # nlm source list takes nid as positional (no --notebook), returns list directly
+    calls = _patch_exec(monkeypatch, _SyncProc(out=b'[{"source_id":"s1"}]'))
     out = asyncio.run(notebooklm.sources("n1"))
-    assert calls[0] == [notebooklm.CLI, "source", "list", "--json", "--notebook", "n1"]
+    assert calls[0] == [notebooklm.CLI, "source", "list", "n1", "--json"]
     assert out == {"sources": [{"source_id": "s1"}]}
 
 
 def test_ask_argv_without_and_with_conversation(nblm_opts, monkeypatch):
+    # nlm notebook query nid question --json [-c conversation_id]
     calls = _patch_exec(monkeypatch, _SyncProc(out=b'{"answer":"x"}'))
     asyncio.run(notebooklm.ask("n1", notebooklm.AskBody(question="hi")))
-    assert calls[0] == [notebooklm.CLI, "ask", "hi", "--json", "--notebook", "n1"]
+    assert calls[0] == [notebooklm.CLI, "notebook", "query", "n1", "hi", "--json"]
 
     calls = _patch_exec(monkeypatch, _SyncProc(out=b'{"answer":"y"}'))
     asyncio.run(notebooklm.ask("n1", notebooklm.AskBody(question="again", conversation_id="c1")))
-    assert calls[0] == [notebooklm.CLI, "ask", "again", "--json", "--notebook", "n1", "-c", "c1"]
+    assert calls[0] == [notebooklm.CLI, "notebook", "query", "n1", "again", "--json", "-c", "c1"]
 
 
 def test_ask_502_on_cli_error(nblm_opts, monkeypatch):
@@ -316,9 +324,10 @@ def test_ask_502_on_cli_error(nblm_opts, monkeypatch):
 
 
 def test_artifacts_list_argv(nblm_opts, monkeypatch):
-    calls = _patch_exec(monkeypatch, _SyncProc(out=b'{"artifacts":[{"id":"a1"}]}'))
+    # nlm studio status nid --json
+    calls = _patch_exec(monkeypatch, _SyncProc(out=b'[{"id":"a1"}]'))
     out = asyncio.run(notebooklm.artifacts("n1"))
-    assert calls[0] == [notebooklm.CLI, "artifact", "list", "--json", "--notebook", "n1"]
+    assert calls[0] == [notebooklm.CLI, "studio", "status", "n1", "--json"]
     assert out == {"artifacts": [{"id": "a1"}]}
 
 
@@ -326,26 +335,24 @@ def test_artifacts_list_argv(nblm_opts, monkeypatch):
 
 
 def test_source_flow_url_argv(nblm_opts, monkeypatch):
-    # real CLI 0.3.3 wraps the source: {"source": {"id": ...}}
+    # nlm source add nid --url target --json --wait (single step, no separate wait)
     calls = _patch_exec_seq(monkeypatch, [
         _StepProc(out_lines=[b'{"source":{"id":"s1","title":"t","status":"ready"}}']),
-        _StepProc(out_lines=[b"done"]),
     ])
     job = notebooklm.Job(id="x", kind="source", label="s")
     asyncio.run(notebooklm._flow_source(job, "n1", "https://x.com/a"))
-    assert calls[0] == [notebooklm.CLI, "source", "add", "https://x.com/a", "--json", "--notebook", "n1"]
-    assert calls[1] == [notebooklm.CLI, "source", "wait", "s1", "-n", "n1", "--timeout", "120"]
-    assert job.progress == 50
+    assert calls[0] == [notebooklm.CLI, "source", "add", "n1", "--url", "https://x.com/a", "--json", "--wait"]
+    assert job.progress == 100
 
 
 def test_source_flow_path_uses_resolved_target(nblm_opts, monkeypatch):
     f = nblm_opts["browse"] / "doc.pdf"
     f.write_bytes(b"hi")
     calls = _patch_exec_seq(monkeypatch, [
-        _StepProc(out_lines=[b'{"source_id":"s9"}']), _StepProc()])
+        _StepProc(out_lines=[b'{"source_id":"s9"}'])])
     job = notebooklm.Job(id="x", kind="source", label="s")
     asyncio.run(notebooklm._flow_source(job, "n1", str(f)))
-    assert calls[0] == [notebooklm.CLI, "source", "add", str(f), "--json", "--notebook", "n1"]
+    assert calls[0] == [notebooklm.CLI, "source", "add", "n1", "--file", str(f), "--json", "--wait"]
 
 
 def test_source_add_path_outside_browse_400(nblm_opts, monkeypatch):
@@ -368,14 +375,13 @@ def test_source_add_path_inside_spawns(nblm_opts, monkeypatch):
 
 
 def test_research_flow_argv(nblm_opts, monkeypatch):
-    calls = _patch_exec_seq(monkeypatch, [_StepProc(out_lines=[b"queued"]), _StepProc(out_lines=[b"ok"])])
+    # nlm research start query --mode mode -n nid --auto-import (single step)
+    calls = _patch_exec_seq(monkeypatch, [_StepProc(out_lines=[b"ok"])])
     job = notebooklm.Job(id="r", kind="research", label="r")
     asyncio.run(notebooklm._flow_research(job, "n1", "quantum computing", "deep"))
-    assert calls[0] == [notebooklm.CLI, "source", "add-research", "quantum computing",
-                         "--mode", "deep", "--no-wait", "--notebook", "n1"]
-    assert calls[1] == [notebooklm.CLI, "research", "wait", "-n", "n1",
-                         "--import-all", "--timeout", "300"]
-    assert job.progress == 20
+    assert calls[0] == [notebooklm.CLI, "research", "start", "quantum computing",
+                         "--mode", "deep", "-n", "n1", "--auto-import"]
+    assert job.progress == 100
 
 
 def test_generate_flow_argv_and_dest(nblm_opts, monkeypatch):

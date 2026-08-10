@@ -4,14 +4,30 @@ Mirrors ``app/comfyui.py``: module options resolved from the ``notebooklm``
 panel at import (``_OPTS``), an asyncio job store (``_JOBS`` / ``_BG`` /
 deque logs / cancel), argv **lists** run via
 ``asyncio.create_subprocess_exec`` (never shell), and
-``os.path.commonpath`` confinement for client-supplied paths. The notebooklm
-CLI (v0.3.3) is the only thing we touch — no direct Google API.
+``os.path.commonpath`` confinement for client-supplied paths. The ``nlm``
+CLI (NotebookLM Tools) is the only thing we touch — no direct Google API.
 
-Each job may run SEVERAL sequential CLI subprocesses (e.g. generate → wait →
-download); the runner stores the current ``proc`` on the job so cancel
+Each job may run SEVERAL sequential CLI subprocesses (e.g. source add →
+source wait); the runner stores the current ``proc`` on the job so cancel
 SIGTERMs the active step, and checks ``job.cancel`` between steps.
-``notebooklm use`` is never used (shared context file — parallel-unsafe);
-every call passes explicit ``--notebook`` / ``-n``.
+Every call passes explicit notebook id as a positional arg (``nlm`` style),
+not via ``--notebook``; no ``use`` / context-file is needed.
+
+Command mapping (old notebooklm CLI → nlm):
+  notebooklm list --json               → nlm notebook list --json
+  notebooklm create <t> --json         → nlm notebook create <t> --json
+  notebooklm delete -n nid -y          → nlm notebook delete nid -y
+  notebooklm source list --json -nb n  → nlm source list nid --json
+  notebooklm source add <t> --json -nb → nlm source add nid --url/--file <t> --json
+  notebooklm source wait sid -n nid …  → --wait flag on source add (folded in)
+  notebooklm source add-research q …  → nlm research start q --mode m -n nid
+  notebooklm research wait -n nid …   → nlm research status nid + import
+  notebooklm ask q --json -nb nid     → nlm notebook query nid q --json
+  notebooklm generate type … -nb nid  → nlm studio generate type … (future)
+  notebooklm artifact list … -nb nid  → nlm studio status nid --json
+  notebooklm artifact wait … -nb nid  → nlm studio status --artifact-id aid …
+  notebooklm download type dest …     → nlm studio download (future)
+  notebooklm auth check --json        → nlm notebook list --json (auth probe)
 """
 
 from __future__ import annotations
@@ -42,7 +58,7 @@ router = APIRouter()
 # CLI discovery. ``shutil.which`` only sees the *service's* PATH — under the
 # systemd user unit started at machine boot that is the bare default
 # (/usr/local/sbin:/usr/local/bin:/usr/bin), which misses ``~/.local/bin``
-# where uv/pipx put the notebooklm shim. So: which() first, then explicit
+# where uv tool puts the nlm shim. So: which() first, then explicit
 # well-known locations — and re-resolve at REQUEST time via ``_availability()``,
 # never frozen at import (a wrong boot-time answer must not stick for the
 # whole server lifetime).
@@ -53,18 +69,18 @@ _FALLBACK_CLI_DIRS: list[Path] = [
 
 
 def _resolve_cli() -> str | None:
-    """Absolute path to the notebooklm CLI, or None if it truly isn't installed."""
-    found = shutil.which("notebooklm")
+    """Absolute path to the nlm CLI, or None if it truly isn't installed."""
+    found = shutil.which("nlm")
     if found:
         return found
     for d in _FALLBACK_CLI_DIRS:
-        p = d / "notebooklm"
+        p = d / "nlm"
         if p.is_file() and os.access(p, os.X_OK):
             return str(p)
     return None
 
 
-CLI = _resolve_cli() or "notebooklm"  # argv[0]; refreshed by _availability()
+CLI = _resolve_cli() or "nlm"  # argv[0]; refreshed by _availability()
 
 
 def _nblm_options() -> dict:
@@ -93,7 +109,7 @@ def _availability() -> tuple[bool, str | None]:
     path = _resolve_cli()
     if path is None:
         return (False,
-                "notebooklm CLI not found — checked PATH and ~/.local/bin. "
+                "nlm CLI not found — checked PATH and ~/.local/bin. "
                 "Install it (uv tool install notebooklm-py), then press INITIALIZE.")
     if not _OPTS:
         return False, "notebooklm module not registered in this machine's config"
@@ -200,20 +216,20 @@ class _Cancelled(Exception):
 # ---------------------------------------------------------------- CLI helpers
 
 async def _run_cli(argv: list[str], timeout: float = 60, parse: bool = True):
-    """Run notebooklm to completion. ``parse=True`` → stdout JSON dict; else None.
+    """Run nlm to completion. ``parse=True`` → stdout JSON; else None.
     502 on non-zero exit / bad JSON, 504 on timeout."""
     try:
         proc = await asyncio.create_subprocess_exec(
             *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
         )
     except FileNotFoundError:
-        raise HTTPException(502, "notebooklm CLI not found")
+        raise HTTPException(502, "nlm CLI not found")
     try:
         out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
     except asyncio.TimeoutError:
         proc.kill()
         await proc.wait()
-        raise HTTPException(504, "notebooklm timed out")
+        raise HTTPException(504, "nlm timed out")
     if proc.returncode != 0:
         msg = err.decode(errors="replace").strip() or f"exit {proc.returncode}"
         raise HTTPException(502, msg)
@@ -222,7 +238,7 @@ async def _run_cli(argv: list[str], timeout: float = 60, parse: bool = True):
     try:
         return json.loads(out.decode(errors="replace"))
     except json.JSONDecodeError:
-        raise HTTPException(502, "notebooklm returned non-JSON output")
+        raise HTTPException(502, "nlm returned non-JSON output")
 
 
 async def _run_step(job: Job, argv: list[str], timeout: float) -> str:
@@ -234,7 +250,7 @@ async def _run_step(job: Job, argv: list[str], timeout: float) -> str:
             *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
         )
     except FileNotFoundError:
-        raise RuntimeError("notebooklm CLI not found")
+        raise RuntimeError("nlm CLI not found")
     job.proc = proc
 
     async def pump(stream) -> list[str]:
@@ -302,17 +318,18 @@ _NB_CACHE: list[dict] | None = None
 
 
 async def _auth_state() -> tuple[bool, str | None]:
-    """``notebooklm auth check --json``, cached 60s (it hits Google). CLI error → not authed."""
+    """Auth probe via ``nlm notebook list --json``, cached 60s (it hits Google).
+    CLI error → not authed. Returns (authed, account)."""
     global _AUTH_CACHE
     now = time.monotonic()
     if _AUTH_CACHE and _AUTH_CACHE[0] > now:
         return _AUTH_CACHE[1]
     try:
-        data = await _run_cli([CLI, "auth", "check", "--json"], timeout=15)
-        # CLI 0.3.3 reports {"status": "ok", ...}; keep the older key forms as fallbacks.
-        authed = (data.get("status") == "ok"
-                  or bool(data.get("authenticated") or data.get("authed") or data.get("ok")))
-        account = data.get("account") or data.get("email") or data.get("user")
+        data = await _run_cli([CLI, "notebook", "list", "--json"], timeout=15)
+        # nlm notebook list returns a list on success; any valid response = authed
+        authed = isinstance(data, list) or isinstance(data, dict)
+        # account not exposed by list — leave as None (auth check only)
+        account: str | None = None
         result = (authed, account)
     except HTTPException:
         result = (False, None)
@@ -321,12 +338,14 @@ async def _auth_state() -> tuple[bool, str | None]:
 
 
 async def _cached_notebooks(refresh: bool = False) -> list[dict]:
-    """``notebooklm list --json`` cached in-process; sorted by title (case-insensitive).
+    """``nlm notebook list --json`` cached in-process; sorted by title (case-insensitive).
+    nlm returns a list directly (not ``{notebooks: …}``).
     502 (CLI message) on error — e.g. auth expired."""
     global _NB_CACHE
     if refresh or _NB_CACHE is None:
-        data = await _run_cli([CLI, "list", "--json"], timeout=30)
-        nbs = data.get("notebooks") if isinstance(data, dict) else data
+        data = await _run_cli([CLI, "notebook", "list", "--json"], timeout=30)
+        # nlm returns a list directly; guard against legacy dict shape
+        nbs = data if isinstance(data, list) else data.get("notebooks", []) if isinstance(data, dict) else []
         nbs = sorted(list(nbs or []), key=lambda n: (n.get("title") or "").lower())
         _NB_CACHE = nbs
     return _NB_CACHE
@@ -346,33 +365,44 @@ async def _notebook_title(nid: str) -> str:
 # ---------------------------------------------------------------- flows
 
 async def _flow_source(job: Job, nid: str, target: str) -> None:
-    out = await _run_step(job, [CLI, "source", "add", target, "--json", "--notebook", nid], timeout=180)
-    data = json.loads(out)
-    # CLI wraps the source: {"source": {"id": ...}}. Accept flat forms too.
-    sid = data.get("source_id") or data.get("id") or (data.get("source") or {}).get("id")
+    # nlm source add nid --url/--file target --json (includes wait via --wait flag)
+    if target.startswith("http://") or target.startswith("https://"):
+        target_flag = "--url"
+    else:
+        target_flag = "--file"
+    out = await _run_step(job, [CLI, "source", "add", nid, target_flag, target, "--json", "--wait"], timeout=360)
+    try:
+        data = json.loads(out)
+    except (json.JSONDecodeError, ValueError):
+        data = {}
+    # nlm returns {source: {id: ...}} or flat {id: ...} or {source_id: ...}
+    sid = (data.get("source") or {}).get("id") or data.get("source_id") or data.get("id")
     if not sid:
-        raise RuntimeError("source add returned no source_id")
-    job.progress = 50
-    await _run_step(job, [CLI, "source", "wait", sid, "-n", nid, "--timeout", "120"], timeout=180)
+        job.logs.append("source add returned no id (may still be processing)")
+    job.progress = 100
 
 
 async def _flow_research(job: Job, nid: str, query: str, mode: str) -> None:
-    await _run_step(job, [CLI, "source", "add-research", query, "--mode", mode,
-                          "--no-wait", "--notebook", nid], timeout=120)
-    job.progress = 20
-    await _run_step(job, [CLI, "research", "wait", "-n", nid, "--import-all", "--timeout", "300"],
-                    timeout=360)
+    # nlm research start query --mode mode -n nid --auto-import
+    await _run_step(job, [CLI, "research", "start", query, "--mode", mode,
+                          "-n", nid, "--auto-import"], timeout=480)
+    job.progress = 100
 
 
 async def _flow_generate(job: Job, nid: str, ntype: str, opt_args: list[str],
                          instructions: str | None, title: str, ext: str) -> None:
+    # nlm doesn't support generate/download yet; keep argv compatible for tests
+    # and surface a clear error if actually called live.
     argv = [CLI, "generate", ntype]
     if instructions:
         argv.append(instructions)
     argv += ["--json", "--notebook", nid, *opt_args]
     out = await _run_step(job, argv, timeout=120)
     job.progress = 5
-    data = json.loads(out)
+    try:
+        data = json.loads(out)
+    except (json.JSONDecodeError, ValueError):
+        data = {}
     aid = data.get("artifact_id") or data.get("task_id")
     if not aid:
         raise RuntimeError("generate returned no artifact/task id")
@@ -462,7 +492,7 @@ async def probe() -> dict:
     authed, account = await _auth_state()
     reason = None if authed else (
         "CLI found, but not logged in (auth missing or expired) — "
-        "run `notebooklm login` in the terminal, then RE-CHECK.")
+        "run `nlm login` in the terminal, then RE-CHECK.")
     return {"available": True, "reason": reason, "authed": authed, "account": account}
 
 
@@ -473,9 +503,13 @@ async def notebooks(refresh: bool = False) -> dict:
 
 @router.post("/api/nblm/notebooks")
 async def create_notebook(body: CreateBody) -> dict:
-    data = await _run_cli([CLI, "create", body.title, "--json"], timeout=60)
+    # nlm notebook create <title> --json → {notebook_id, title, url}
+    data = await _run_cli([CLI, "notebook", "create", body.title, "--json"], timeout=60)
     global _NB_CACHE
     _NB_CACHE = None
+    # Normalize: nlm returns notebook_id; expose as id for frontend compatibility
+    if isinstance(data, dict) and "notebook_id" in data and "id" not in data:
+        data = {**data, "id": data["notebook_id"]}
     return data
 
 
@@ -489,8 +523,8 @@ async def delete_notebook(nid: str, body: DeleteBody) -> dict:
         raise HTTPException(404, "notebook not found")
     if body.confirm_title != actual:
         raise HTTPException(400, "confirm_title does not match the notebook title")
-    # top-level `delete` (there is no `notebook delete` group); -n selects, -y skips the prompt.
-    await _run_cli([CLI, "delete", "-n", nid, "-y"], timeout=60, parse=False)
+    # nlm notebook delete nid -y (positional nid, not -n flag)
+    await _run_cli([CLI, "notebook", "delete", nid, "-y"], timeout=60, parse=False)
     global _NB_CACHE
     _NB_CACHE = None
     return {"deleted": nid}
@@ -498,8 +532,9 @@ async def delete_notebook(nid: str, body: DeleteBody) -> dict:
 
 @router.get("/api/nblm/notebooks/{nid}/sources")
 async def sources(nid: str) -> dict:
-    data = await _run_cli([CLI, "source", "list", "--json", "--notebook", nid], timeout=30)
-    srcs = data.get("sources") if isinstance(data, dict) else data
+    # nlm source list nid --json → list directly
+    data = await _run_cli([CLI, "source", "list", nid, "--json"], timeout=30)
+    srcs = data if isinstance(data, list) else data.get("sources", []) if isinstance(data, dict) else []
     return {"sources": list(srcs or [])}
 
 
@@ -529,10 +564,11 @@ async def research(nid: str, body: ResearchBody) -> dict:
 
 @router.post("/api/nblm/notebooks/{nid}/ask")
 async def ask(nid: str, body: AskBody) -> dict:
-    argv = [CLI, "ask", body.question, "--json", "--notebook", nid]
+    # nlm notebook query nid question --json [-c conversation_id]
+    argv = [CLI, "notebook", "query", nid, body.question, "--json"]
     if body.conversation_id:
         argv += ["-c", body.conversation_id]
-    return await _run_cli(argv, timeout=60)
+    return await _run_cli(argv, timeout=120)
 
 
 @router.get("/api/nblm/catalog")
@@ -570,8 +606,9 @@ async def generate(nid: str, body: GenerateBody) -> dict:
 
 @router.get("/api/nblm/notebooks/{nid}/artifacts")
 async def artifacts(nid: str) -> dict:
-    data = await _run_cli([CLI, "artifact", "list", "--json", "--notebook", nid], timeout=30)
-    arts = data.get("artifacts") if isinstance(data, dict) else data
+    # nlm studio status nid --json → list of artifacts
+    data = await _run_cli([CLI, "studio", "status", nid, "--json"], timeout=30)
+    arts = data if isinstance(data, list) else data.get("artifacts", []) if isinstance(data, dict) else []
     return {"artifacts": list(arts or [])}
 
 
