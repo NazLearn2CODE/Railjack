@@ -4249,6 +4249,27 @@ def _build_gutenberg_from_doc_ast(
     group_inserted = False
     idx = content_start_idx
 
+    pending_list: list[str] = []
+
+    def _flush_list() -> None:
+        """Emit accumulated bullet paragraphs as one wp:list block (Ben-style grouping)."""
+        nonlocal group_inserted
+        if not pending_list:
+            return
+        if not group_inserted:
+            blocks.append(group_block)
+            group_inserted = True
+        items = "".join(
+            f"<!-- wp:list-item -->\n<li>{it}</li>\n<!-- /wp:list-item -->\n\n"
+            for it in pending_list
+        ).strip()
+        blocks.append(
+            f'<!-- wp:list -->\n'
+            f'<ul class="wp-block-list">\n{items}\n</ul>\n'
+            f'<!-- /wp:list -->'
+        )
+        pending_list.clear()
+
     while idx < len(body_content):
         el = body_content[idx]
         idx += 1
@@ -4258,6 +4279,7 @@ def _build_gutenberg_from_doc_ast(
 
         style = (para.get("paragraphStyle") or {}).get("namedStyleType", "")
         elements = para.get("elements", [])
+        is_bullet = bool(para.get("bullet"))
 
         # Check for image if not an article
         img_id = None
@@ -4269,6 +4291,7 @@ def _build_gutenberg_from_doc_ast(
                     break
 
         if img_id:
+            _flush_list()
             if not group_inserted:
                 blocks.append(group_block)
                 group_inserted = True
@@ -4294,6 +4317,12 @@ def _build_gutenberg_from_doc_ast(
         if re.match(r"^\[[a-z0-9]+\]", p_text):
             continue
 
+        if is_bullet:
+            pending_list.append(p_text)
+            continue
+
+        _flush_list()
+
         if style == "HEADING_2":
             if not group_inserted:
                 blocks.append(group_block)
@@ -4317,6 +4346,8 @@ def _build_gutenberg_from_doc_ast(
         else:
             para_block = f'<!-- wp:paragraph -->\n<p>{p_text}</p>\n<!-- /wp:paragraph -->'
             blocks.append(para_block)
+
+    _flush_list()
 
     if not group_inserted:
         if len(blocks) >= 2:
