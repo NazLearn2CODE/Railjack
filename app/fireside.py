@@ -59,26 +59,44 @@ class ProposeRequest(BaseModel):
     title: str | None = None
 
 
-# ponytail: per-anchor O(n*m) difflib match; upgrade to one global
-# script<->transcript DTW pass if accuracy is poor on a real episode or cue count grows
+# ponytail: difflib longest-common-run over SUB-tokenized Whisper words. Handles
+# the real failure modes (merged tokens like "just $20"; digits-vs-words like
+# "$20" vs "twenty dollars"; minor mishears) by matching on the stable content
+# words around them. If a real episode still shows poor accuracy (heavy accents,
+# very long scripts), upgrade to a full global script<->transcript forced-alignment pass.
+_STOP = {"the", "a", "an", "to", "of", "and", "or", "in", "on", "at", "is", "it",
+         "for", "that", "this", "with", "as", "by", "be", "are", "was", "were"}
+
+
 def _align_anchor(transcript_words: list[dict], anchor: str | None) -> float | None:
-    """Align an anchor phrase to word timestamps in a transcript."""
+    """Align an anchor phrase to word timestamps in a transcript.
+
+    Sub-tokenizes each Whisper word (so a merged token like "just $20" still aligns
+    token-by-token with the script) and returns the start time of the longest stable
+    matching run. None if no confident match.
+    """
     if not anchor or not transcript_words:
         return None
     anchor_tokens = re.findall(r"\w+", anchor.lower())
     if not anchor_tokens:
         return None
-    trans_tokens = [re.sub(r"^\W+|\W+$", "", w.get("word", "")).lower() for w in transcript_words]
+    trans_tokens: list[str] = []
+    trans_starts: list[float] = []
+    for w in transcript_words:
+        start = w.get("start")
+        for t in re.findall(r"\w+", (w.get("word", "") or "").lower()):
+            trans_tokens.append(t)
+            trans_starts.append(start)
+    if not trans_tokens:
+        return None
     blocks = difflib.SequenceMatcher(None, trans_tokens, anchor_tokens).get_matching_blocks()
-    if not blocks:
-        return None
     longest = max(blocks, key=lambda b: b.size)
-    if longest.size < 2:
+    if longest.size < 2 or longest.a >= len(trans_tokens):
         return None
-    coverage = longest.size / max(1, len(anchor_tokens))
-    if coverage >= 0.5 and longest.a < len(transcript_words):
-        return float(transcript_words[longest.a]["start"])
-    return None
+    # don't trust a short run that only coincides on stopwords (the/a/at/…)
+    if longest.size < 3 and trans_tokens[longest.a] in _STOP:
+        return None
+    return float(trans_starts[longest.a])
 
 
 @router.post("/api/fireside/propose")
@@ -230,4 +248,12 @@ if __name__ == "__main__":
     val = _align_anchor(tx, "welcome to the north")
     assert val is not None and abs(val - 0.0) < 1e-6
     assert _align_anchor(tx, "nonexistent gibberish xyz") is None
+    # real failure mode: Whisper merges "just $20" into one token and writes "$20"
+    # not "twenty dollars" — must still land on the stable word "fiber".
+    tx2 = [{"word": "Gigabit", "start": 3.24}, {"word": "fiber", "start": 3.86},
+           {"word": "starts", "start": 4.28}, {"word": "at", "start": 4.72},
+           {"word": "just $20", "start": 4.98}, {"word": "a", "start": 5.66},
+           {"word": "month.", "start": 6.16}]
+    val2 = _align_anchor(tx2, "fiber starts at just twenty dollars a month")
+    assert val2 is not None and abs(val2 - 3.86) < 1e-6, f"expected ~3.86 (fiber), got {val2}"
     print("Fireside self-tests passed.")
