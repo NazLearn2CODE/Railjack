@@ -148,7 +148,7 @@ async def align(
         cues_list = []
 
     mp4_path: str | None = None
-    wav_path: str | None = None
+    audio_path: str | None = None
 
     try:
         # 1. Obtain video bytes & write to temp mp4
@@ -165,12 +165,15 @@ async def align(
             f_mp4.write(video_bytes)
             mp4_path = f_mp4.name
 
-        # 2. Extract mono 16kHz audio with ffmpeg
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f_wav:
-            wav_path = f_wav.name
+        # 2. Extract mono 16kHz COMPRESSED mp3 audio. Uncompressed WAV exceeds Groq's
+        #    25 MB upload cap on real episodes (a 28-min ep = ~52 MB WAV vs ~10 MB mp3).
+        # ponytail: mp3@48k mono stays under 25 MB up to ~70 min; chunk long-form >70 min if ever needed.
+        with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f_audio:
+            audio_path = f_audio.name
 
         proc = subprocess.run(
-            ["ffmpeg", "-y", "-i", mp4_path, "-vn", "-ac", "1", "-ar", "16000", "-f", "wav", wav_path],
+            ["ffmpeg", "-y", "-i", mp4_path, "-vn", "-ac", "1", "-ar", "16000",
+             "-c:a", "libmp3lame", "-b:a", "48k", audio_path],
             capture_output=True,
             timeout=600,
         )
@@ -184,13 +187,13 @@ async def align(
             return {"cues": out_cues, "mode": "degraded", "hint": "set GROQ_API_KEY"}
 
         # 4. Transcribe with Groq Whisper API (word-level timestamps)
-        wav_bytes = Path(wav_path).read_bytes()
-        wav_name = Path(wav_path).name
+        audio_bytes = Path(audio_path).read_bytes()
+        audio_name = Path(audio_path).name
         async with httpx.AsyncClient(timeout=600) as client:
             r = await client.post(
                 "https://api.groq.com/openai/v1/audio/transcriptions",
                 headers={"Authorization": f"Bearer {groq_key}"},
-                files={"file": (wav_name, wav_bytes, "audio/wav")},
+                files={"file": (audio_name, audio_bytes, "audio/mpeg")},
                 data={
                     "model": "whisper-large-v3-turbo",
                     "response_format": "verbose_json",
@@ -227,7 +230,7 @@ async def align(
     except Exception as e:
         return {"cues": cues_list, "mode": "degraded", "hint": str(e)}
     finally:
-        for p in (mp4_path, wav_path):
+        for p in (mp4_path, audio_path):
             if p and os.path.exists(p):
                 try:
                     os.remove(p)
