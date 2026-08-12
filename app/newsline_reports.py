@@ -197,21 +197,21 @@ def weekday_rows(weekdays: list[datetime.date]) -> list[str]:
 
 
 def cover_doc_name(period: int | str, start_d: datetime.date, end_d: datetime.date) -> str:
-    """Generate target filename for Cover doc (preserves .docx):
-    '<period> ใบรายงานผลการปฏิบัติงาน แบบ QR Code <Thai-month> <BE-year> ณอรรฆย์ โรจนสุวรรณ.docx'"""
+    """Generate target name for Cover doc (no extension — Naz 2026-08-12: no '.doc' in doc names):
+    '<period> ใบรายงานผลการปฏิบัติงาน แบบ QR Code <Thai-month> <BE-year> ณอรรฆย์ โรจนสุวรรณ'"""
     p = str(period).strip()
     month_name = THAI_MONTHS[end_d.month - 1]
     year = be_year(end_d.year)
-    return f"{p} ใบรายงานผลการปฏิบัติงาน แบบ QR Code {month_name} {year} ณอรรฆย์ โรจนสุวรรณ.docx"
+    return f"{p} ใบรายงานผลการปฏิบัติงาน แบบ QR Code {month_name} {year} ณอรรฆย์ โรจนสุวรรณ"
 
 
 def log_doc_name(period: int | str, start_d: datetime.date, end_d: datetime.date) -> str:
-    """Generate target filename for Log doc (preserves .docx):
-    '<period> รายงานผลการปฏิบัติงาน <Thai-month> <BE-year>.docx'"""
+    """Generate target name for Log doc (no extension — Naz 2026-08-12: no '.doc' in doc names):
+    '<period> รายงานผลการปฏิบัติงาน <Thai-month> <BE-year>'"""
     p = str(period).strip()
     month_name = THAI_MONTHS[end_d.month - 1]
     year = be_year(end_d.year)
-    return f"{p} รายงานผลการปฏิบัติงาน {month_name} {year}.docx"
+    return f"{p} รายงานผลการปฏิบัติงาน {month_name} {year}"
 
 
 # --- Pure plan builder ---------------------------------------------------
@@ -1908,8 +1908,8 @@ def build_docgen_plan(fy_be: int, period: int | None = None) -> list[dict]:
         cal_be = fy_be + info["year_offset"]
         m_name = info["name_th"]
 
-        cover_name = f"{p_str} ใบรายงานผลการปฏิบัติงาน แบบ QR Code {m_name} {cal_be} ณอรรฆย์ โรจนสุวรรณ.docx"
-        log_name = f"{p_str} รายงานผลการปฏิบัติงาน {m_name} {cal_be}.docx"
+        cover_name = f"{p_str} ใบรายงานผลการปฏิบัติงาน แบบ QR Code {m_name} {cal_be} ณอรรฆย์ โรจนสุวรรณ"
+        log_name = f"{p_str} รายงานผลการปฏิบัติงาน {m_name} {cal_be}"
         rundown_name = f"{p_str} รันดาวน์ {m_name} {cal_be}"
 
         docs = [
