@@ -5,9 +5,9 @@ import type { ModuleConfig } from "../store";
  * FIRESIDE STUDIO — video annotation & production cue stamping tool.
  *
  * Workflow:
- * 1. Load local video file (native controls, object URL).
+ * 1. Load local video file or video URL (native controls, object/web URL).
  * 2. Paste TV episode script & click PROPOSE CUES (calls /api/fireside/propose).
- * 3. Review unassigned cues in TO STAMP bucket, stamp timestamps while watching video.
+ * 3. Auto-align cues via Groq Whisper (/api/fireside/align) or manually stamp timestamps.
  * 4. Add/edit/reorder manual or AI cues on the timeline and marker bar.
  * 5. Export deliverables: Print cue-sheet (Ben's convention), Copy text, or Download JSON.
  */
@@ -21,6 +21,7 @@ export interface Cue {
   text: string;
   source: "ai" | "manual";
   beat?: string;
+  script_anchor?: string;
 }
 
 const CT = { "content-type": "application/json" } as const;
@@ -77,6 +78,8 @@ export default function FiresideStudioPanel({ module: _module }: { module: Modul
   // Video player state
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
   const [videoName, setVideoName] = useState<string>("");
+  const [videoFile, setVideoFile] = useState<File | null>(null);
+  const [inputUrl, setInputUrl] = useState<string>("");
   const [duration, setDuration] = useState<number>(0);
   const [currentTime, setCurrentTime] = useState<number>(0);
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -88,8 +91,10 @@ export default function FiresideStudioPanel({ module: _module }: { module: Modul
   const [cues, setCues] = usePersistentState<Cue[]>("fireside.cues", []);
   const [showScriptEditor, setShowScriptEditor] = useState<boolean>(true);
 
-  // Propose status
+  // Propose & Align status
   const [loading, setLoading] = useState<boolean>(false);
+  const [aligning, setAligning] = useState<boolean>(false);
+  const [alignStatus, setAlignStatus] = useState<string | null>(null);
   const [mode, setMode] = useState<"direct" | "degraded" | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [copied, setCopied] = useState<boolean>(false);
@@ -97,7 +102,7 @@ export default function FiresideStudioPanel({ module: _module }: { module: Modul
   // Cleanup object URL on unmount or URL change
   useEffect(() => {
     return () => {
-      if (videoUrl) {
+      if (videoUrl && videoUrl.startsWith("blob:")) {
         URL.revokeObjectURL(videoUrl);
       }
     };
@@ -106,12 +111,33 @@ export default function FiresideStudioPanel({ module: _module }: { module: Modul
   const handleVideoFile = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    if (videoUrl) {
+    if (videoUrl && videoUrl.startsWith("blob:")) {
       URL.revokeObjectURL(videoUrl);
     }
     const url = URL.createObjectURL(file);
+    setVideoFile(file);
     setVideoUrl(url);
     setVideoName(file.name);
+    setCurrentTime(0);
+  };
+
+  const handleLoadUrl = () => {
+    const trimmed = inputUrl.trim();
+    if (!trimmed) return;
+    if (videoUrl && videoUrl.startsWith("blob:")) {
+      URL.revokeObjectURL(videoUrl);
+    }
+    // ponytail: direct browser playback; add a server /api/fireside/proxy stream if CORS/Drive-auth blocks playback
+    setVideoFile(null);
+    let hostLabel = trimmed;
+    try {
+      const u = new URL(trimmed);
+      hostLabel = u.hostname;
+    } catch {
+      /* fallback if url is not a valid absolute URL */
+    }
+    setVideoUrl(trimmed);
+    setVideoName(`URL: ${hostLabel}`);
     setCurrentTime(0);
   };
 
@@ -126,7 +152,10 @@ export default function FiresideStudioPanel({ module: _module }: { module: Modul
     setLoading(true);
     setErrorMsg(null);
     try {
-      const res = await post<{ cues: Array<{ type: CueType; text: string; beat?: string }>; mode: "direct" | "degraded" }>(
+      const res = await post<{
+        cues: Array<{ type: CueType; text: string; beat?: string; script_anchor?: string }>;
+        mode: "direct" | "degraded";
+      }>(
         "/api/fireside/propose",
         { script: script.trim(), title: title.trim() || undefined }
       );
@@ -143,6 +172,7 @@ export default function FiresideStudioPanel({ module: _module }: { module: Modul
         text: c.text || "",
         source: "ai",
         beat: c.beat,
+        script_anchor: c.script_anchor || "",
       }));
       if (incoming.length > 0) {
         setCues((prev) => [...prev, ...incoming]);
@@ -154,6 +184,75 @@ export default function FiresideStudioPanel({ module: _module }: { module: Modul
       setMode("degraded");
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleAutoStamp = async () => {
+    if (aligning || cues.length === 0) return;
+    if (!videoFile && !videoUrl) {
+      setErrorMsg("Please load a video file or enter a video URL first.");
+      return;
+    }
+    setAligning(true);
+    setErrorMsg(null);
+    setAlignStatus(null);
+    try {
+      const formData = new FormData();
+      if (videoFile) {
+        formData.append("video", videoFile);
+      } else if (videoUrl) {
+        formData.append("video_url", videoUrl);
+      }
+      formData.append("cues", JSON.stringify(cues));
+
+      const res = await fetch("/api/fireside/align", {
+        method: "POST",
+        body: formData,
+      });
+
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({ detail: res.statusText }));
+        const err = typeof d.detail === "string" ? d.detail : JSON.stringify(d.detail);
+        setErrorMsg(err || "Alignment request failed");
+        return;
+      }
+
+      const data = (await res.json()) as {
+        cues: Array<Cue>;
+        mode: "aligned" | "degraded";
+        matched?: number;
+        total?: number;
+        hint?: string;
+      };
+
+      if (data.mode === "degraded") {
+        setErrorMsg(data.hint ? `Auto-stamp degraded: ${data.hint}` : "Auto-stamp degraded. Could not align timestamps.");
+      }
+
+      if (Array.isArray(data.cues)) {
+        const returnedCues = data.cues;
+        setCues((prev) =>
+          prev.map((oldCue, idx) => {
+            const ret = returnedCues.find((rc) => rc.id === oldCue.id) || returnedCues[idx];
+            if (ret && ret.t != null) {
+              return {
+                ...oldCue,
+                t: ret.t,
+                script_anchor: ret.script_anchor ?? oldCue.script_anchor,
+              };
+            }
+            return oldCue;
+          })
+        );
+        const matched = data.matched ?? data.cues.filter((c) => c.t != null).length;
+        const total = data.total ?? data.cues.length;
+        setAlignStatus(`Auto-stamped ${matched}/${total}`);
+        setTimeout(() => setAlignStatus(null), 5000);
+      }
+    } catch (e: unknown) {
+      setErrorMsg(e instanceof Error ? e.message : "Network error during alignment");
+    } finally {
+      setAligning(false);
     }
   };
 
@@ -268,6 +367,11 @@ export default function FiresideStudioPanel({ module: _module }: { module: Modul
           <span className="mono text-xs text-phosphor-dim">
             {assignedCues.length} stamped · {unassignedCues.length} to stamp
           </span>
+          {alignStatus && (
+            <span className="mono text-xs font-bold text-go bg-go/10 border border-go/30 px-2 py-0.5 rounded">
+              {alignStatus}
+            </span>
+          )}
           {mode === "degraded" && (
             <span className="flex items-center gap-1.5 text-xs text-hazard" title="Degraded mode: fallback or empty response">
               <span className="pip pip--hazard" />
@@ -283,6 +387,15 @@ export default function FiresideStudioPanel({ module: _module }: { module: Modul
         </div>
 
         <div className="flex items-center gap-2">
+          <button
+            type="button"
+            className="btn btn--compact btn--signal flex items-center gap-1.5"
+            disabled={aligning || cues.length === 0 || (!videoFile && !videoUrl)}
+            onClick={handleAutoStamp}
+            title="Auto-transcribe audio with Groq Whisper & align cue timestamps"
+          >
+            <span>{aligning ? "ALIGNING..." : "⚡ AUTO-STAMP"}</span>
+          </button>
           <button
             type="button"
             className="btn btn--compact btn--signal flex items-center gap-1.5"
@@ -330,12 +443,12 @@ export default function FiresideStudioPanel({ module: _module }: { module: Modul
 
       {/* Main 2-Bay Working Area */}
       <div className="grid min-h-0 flex-1 grid-cols-1 gap-3 p-3 lg:grid-cols-12 overflow-hidden">
-        {/* Left Column: Video Loader + Player + Marker Bar + Script/Propose (5 cols) */}
+        {/* Left Column: Video Loader + Player + Marker Bar + Script/Propose (6 cols) */}
         <section className="hud hud--glass flex min-h-0 flex-col gap-3 p-3 lg:col-span-6 overflow-y-auto">
           {/* Video Player Bay */}
           <div className="flex flex-col gap-2">
-            <div className="flex items-center justify-between">
-              <span className="label">1. LOCAL VIDEO PLAYER</span>
+            <div className="flex items-center justify-between flex-wrap gap-2">
+              <span className="label">1. VIDEO PLAYER</span>
               <div className="flex items-center gap-2">
                 <input
                   ref={fileInputRef}
@@ -350,14 +463,39 @@ export default function FiresideStudioPanel({ module: _module }: { module: Modul
                   className="btn btn--compact flex items-center gap-1"
                   onClick={() => fileInputRef.current?.click()}
                 >
-                  <span>{videoUrl ? "CHANGE VIDEO" : "LOAD VIDEO"}</span>
+                  <span>{videoFile ? "CHANGE FILE" : "LOAD LOCAL VIDEO"}</span>
                 </button>
                 {videoName && (
-                  <span className="mono max-w-[160px] truncate text-xs text-muted" title={videoName}>
+                  <span className="mono max-w-[180px] truncate text-xs text-muted" title={videoName}>
                     {videoName}
                   </span>
                 )}
               </div>
+            </div>
+
+            {/* URL Input Row */}
+            <div className="flex items-center gap-2">
+              <input
+                type="url"
+                className="input text-xs flex-1"
+                placeholder="Or paste video MP4 / Google Drive URL..."
+                value={inputUrl}
+                onChange={(e) => setInputUrl(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    handleLoadUrl();
+                  }
+                }}
+              />
+              <button
+                type="button"
+                className="btn btn--compact text-xs shrink-0"
+                onClick={handleLoadUrl}
+                disabled={!inputUrl.trim()}
+              >
+                LOAD FROM URL
+              </button>
             </div>
 
             {/* Video Element or Dropzone */}
@@ -382,8 +520,8 @@ export default function FiresideStudioPanel({ module: _module }: { module: Modul
                   className="flex cursor-pointer flex-col items-center justify-center gap-2 p-6 text-center text-muted hover:text-signal transition-colors"
                 >
                   <span className="text-3xl">▶</span>
-                  <span className="label">CLICK TO LOAD LOCAL EPISODE VIDEO</span>
-                  <span className="mono text-xs opacity-75">MP4, WebM, or MOV — native video player & scrubbing</span>
+                  <span className="label">CLICK TO LOAD LOCAL VIDEO OR PASTE URL ABOVE</span>
+                  <span className="mono text-xs opacity-75">MP4, WebM, MOV, or direct URL stream</span>
                 </div>
               )}
             </div>
@@ -513,7 +651,7 @@ export default function FiresideStudioPanel({ module: _module }: { module: Modul
           </div>
         </section>
 
-        {/* Right Column: Cue Timeline, TO STAMP Bucket & Assigned Cues (7 cols) */}
+        {/* Right Column: Cue Timeline, TO STAMP Bucket & Assigned Cues (6 cols) */}
         <section className="hud hud--glass flex min-h-0 flex-col gap-3 p-3 lg:col-span-6 overflow-hidden">
           <div className="flex items-center justify-between border-b border-edge pb-2">
             <div className="flex items-center gap-2">
@@ -522,27 +660,49 @@ export default function FiresideStudioPanel({ module: _module }: { module: Modul
                 ({assignedCues.length + unassignedCues.length} total)
               </span>
             </div>
-            <button
-              type="button"
-              className="btn btn--compact btn--signal"
-              onClick={addManualCue}
-            >
-              + STAMP NEW CUE
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                className="btn btn--compact btn--signal text-xs"
+                disabled={aligning || cues.length === 0 || (!videoFile && !videoUrl)}
+                onClick={handleAutoStamp}
+                title="Auto-align cue timestamps using Groq Whisper speech-to-text"
+              >
+                {aligning ? "ALIGNING..." : "⚡ AUTO-STAMP"}
+              </button>
+              <button
+                type="button"
+                className="btn btn--compact"
+                onClick={addManualCue}
+              >
+                + STAMP NEW CUE
+              </button>
+            </div>
           </div>
 
           <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto pr-1">
             {/* TO STAMP Bucket (Unassigned cues from AI proposal) */}
             {unassignedCues.length > 0 && (
               <div className="flex flex-col gap-2 rounded border border-hazard/30 bg-hazard-deep/10 p-2.5">
-                <div className="flex items-center justify-between">
+                <div className="flex items-center justify-between flex-wrap gap-2">
                   <span className="label text-hazard flex items-center gap-1.5">
                     <span className="pip pip--hazard" />
                     TO STAMP ({unassignedCues.length})
                   </span>
-                  <span className="mono text-[11px] text-muted">
-                    Watch video & click Stamp at each moment
-                  </span>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      className="btn btn--compact btn--signal text-xs"
+                      disabled={aligning || (!videoFile && !videoUrl)}
+                      onClick={handleAutoStamp}
+                      title="Auto-align unassigned cues to spoken transcript"
+                    >
+                      {aligning ? "ALIGNING..." : "⚡ AUTO-STAMP"}
+                    </button>
+                    <span className="mono text-[11px] text-muted">
+                      or stamp manually while watching
+                    </span>
+                  </div>
                 </div>
 
                 <div className="flex flex-col gap-2 max-h-56 overflow-y-auto pr-1">
@@ -594,6 +754,11 @@ export default function FiresideStudioPanel({ module: _module }: { module: Modul
                         onChange={(e) => updateCueText(cue.id, e.target.value)}
                         placeholder="Cue text..."
                       />
+                      {cue.script_anchor && (
+                        <div className="mono text-[10px] text-phosphor-dim truncate" title={`Anchor: "${cue.script_anchor}"`}>
+                          ⚓ &ldquo;{cue.script_anchor}&rdquo;
+                        </div>
+                      )}
                     </div>
                   ))}
                 </div>
@@ -678,6 +843,12 @@ export default function FiresideStudioPanel({ module: _module }: { module: Modul
                         onChange={(e) => updateCueText(cue.id, e.target.value)}
                         placeholder="Cue description or lower-third copy..."
                       />
+
+                      {cue.script_anchor && (
+                        <div className="mono text-[10px] text-phosphor-dim truncate" title={`Anchor: "${cue.script_anchor}"`}>
+                          ⚓ &ldquo;{cue.script_anchor}&rdquo;
+                        </div>
+                      )}
 
                       {/* Ben's Convention Visual Style Preview */}
                       <div className="pt-0.5">

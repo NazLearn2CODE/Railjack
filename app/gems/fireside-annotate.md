@@ -51,28 +51,32 @@ Each cue must have one of four strict types:
 
 Return a **STRICT JSON ARRAY only** (no prose, no introductory or concluding text, no conversational padding, no markdown code fences).
 
-Each item in the array must be an object with exactly three fields:
+Each item in the array must be an object with the following fields:
 ```json
 [
   {
     "type": "chapter",
     "text": "THE NORTH / ภาคเหนือ",
-    "beat": "Intro & Regional Overview"
+    "beat": "Intro & Regional Overview",
+    "script_anchor": "welcome to the fireside today we head up north"
   },
   {
     "type": "broll",
     "text": "B-roll: Chiang Mai old-city moat at dawn",
-    "beat": "Atmospheric Opening"
+    "beat": "Atmospheric Opening",
+    "script_anchor": "surrounded by ancient brick walls and mist"
   },
   {
     "type": "onscreen",
     "text": "$20/mo fiber (1 Gbps)",
-    "beat": "Internet Speed & Cost"
+    "beat": "Internet Speed & Cost",
+    "script_anchor": "gigabit fiber starts at just twenty dollars a month"
   },
   {
     "type": "note",
     "text": "Note: Side-by-side speed comparison table graphic",
-    "beat": "Provider Comparison"
+    "beat": "Provider Comparison",
+    "script_anchor": ""
   }
 ]
 ```
@@ -81,5 +85,6 @@ Fields:
 - `type`: Must be strictly one of `"chapter"`, `"broll"`, `"onscreen"`, or `"note"`.
 - `text`: The formatted text of the cue (title card string, lower-third copy, b-roll description, or note).
 - `beat`: A short, descriptive label (2–5 words) summarizing the script beat or moment.
+- `script_anchor`: A short (5–12 word) verbatim phrase copied from the user's script that marks WHERE in the spoken episode this cue's subject occurs (so it can be located in the transcript later). If a cue has no clear script anchor (e.g. a generic b-roll note), set `script_anchor` to `""` (empty string).
 
 Strictly output valid JSON starting with `[` and ending with `]`.
