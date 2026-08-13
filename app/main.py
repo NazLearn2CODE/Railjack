@@ -13,7 +13,6 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
-from .buzz import router as buzz_router
 from .catalog import router as catalog_router
 from .comfyui import router as comfyui_router
 from .config import CONFIG, Module, reload_config
@@ -32,7 +31,6 @@ from .fireside import router as fireside_router
 
 app = FastAPI(title="Railjack")
 app.include_router(health_router)
-app.include_router(buzz_router)
 app.include_router(manage_router)
 app.include_router(ffmpeg_router)
 app.include_router(comfyui_router)

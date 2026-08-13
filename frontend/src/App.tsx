@@ -9,7 +9,6 @@ import ComfyPanel from "./components/ComfyPanel";
 import NotebookPanel from "./components/NotebookPanel";
 import NewsroomPanel from "./components/NewsroomPanel";
 import ThailandNowPanel from "./components/ThailandNowPanel";
-import BuzzPanel from "./components/BuzzPanel";
 import KanbanPanel from "./components/KanbanPanel";
 import FiresideStudioPanel from "./components/FiresideStudioPanel";
 
@@ -20,7 +19,6 @@ const PANELS: Record<string, FC<{ module: ModuleConfig }>> = {
   notebooklm: NotebookPanel,
   newsroom: NewsroomPanel,
   thailandnow: ThailandNowPanel,
-  buzz: BuzzPanel,
   kanban: KanbanPanel,
   fireside: FiresideStudioPanel,
 };
