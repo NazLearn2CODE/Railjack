@@ -3203,7 +3203,7 @@ function CopyButton({ text }: { text: string }) {
 }
 
 function WpOpTab() {
-  const [mode, setMode] = useState<"articles" | "events">("articles");
+  const [mode, setMode] = useState<"articles" | "events" | "blogs">("articles");
   const [cards, setCards] = useState<TrelloToPublishCard[]>([]);
   const [loadingCards, setLoadingCards] = useState(false);
   const [cardsErr, setCardsErr] = useState<string | null>(null);
@@ -3245,7 +3245,7 @@ function WpOpTab() {
 
     const r = await post<AnalyzeCardResp>("/api/thailandnow/events/analyze-card", {
       card_id: cardId,
-      kind: mode === "articles" ? "article" : "event",
+      kind: mode === "blogs" ? "blog" : mode === "articles" ? "article" : "event",
     });
 
     setAnalyzing(false);
@@ -3263,7 +3263,7 @@ function WpOpTab() {
 
     const r = await post<PublishFromCardResp>("/api/thailandnow/events/publish-from-card", {
       card_id: analysis.card_id,
-      kind: mode === "articles" ? "article" : "event",
+      kind: mode === "blogs" ? "blog" : mode === "articles" ? "article" : "event",
     });
 
     setPublishing(false);
@@ -3316,12 +3316,26 @@ function WpOpTab() {
           >
             🎪 Events (/event)
           </button>
+          <button
+            type="button"
+            className={`btn btn--compact ${mode === "blogs" ? "btn--signal font-bold" : ""}`}
+            onClick={() => {
+              setMode("blogs");
+              setSelectedCardId(null);
+              setAnalysis(null);
+              setPublishResult(null);
+            }}
+          >
+            ✍️ Blogs (/posts)
+          </button>
         </div>
 
         <div className="mono text-xs" style={{ color: "var(--color-muted)" }}>
           {mode === "articles"
             ? "Draft standard WordPress Articles (/posts) with Key Takeaways and image spacers."
-            : "Draft Event custom posts (/event) with Key Takeaways, dates, location, and images."}
+            : mode === "blogs"
+              ? "Draft Blogs (/posts) — title from the doc's first line, NO Key Takeaways, images only if present."
+              : "Draft Event custom posts (/event) with Key Takeaways, dates, location, and images."}
         </div>
 
         {loadingCards && (
@@ -3421,7 +3435,7 @@ function WpOpTab() {
                 >
                   {publishing
                     ? "PUBLISHING DRAFT…"
-                    : `Publish ${mode === "articles" ? "Article" : "Event"} to WordPress (${mode === "articles" ? "/posts" : "/event"})`}
+                    : `Publish ${mode === "articles" ? "Article" : mode === "blogs" ? "Blog" : "Event"} to WordPress (${mode === "events" ? "/event" : "/posts"})`}
                 </button>
               )}
             </div>

@@ -4115,9 +4115,10 @@ def _extract_google_doc_data(
     default_year: int | None = None,
     append_year: bool = False,
     is_article: bool = False,
+    is_blog: bool = False,
 ) -> dict:
     year = default_year or datetime.now().year
-    card_title = re.sub(r"^(Article|Event)\s*\|\s*", "", card_name, flags=re.IGNORECASE).strip() or card_name
+    card_title = re.sub(r"^(Article|Event|Blog)\s*\|\s*", "", card_name, flags=re.IGNORECASE).strip() or card_name
 
     if not doc_json or not isinstance(doc_json, dict) or "body" not in doc_json:
         doc_title = _extract_doc_title(doc_html, fallback_text)
@@ -4154,8 +4155,22 @@ def _extract_google_doc_data(
             doc_title = re.sub(r"\s+", " ", doc_title)
             break
 
-    title = doc_title or card_title
-    if append_year and not is_article and not re.search(r"\b20\d{2}\s*$", title):
+    # Blog: title = first non-empty paragraph (any style); body starts right after it.
+    blog_title = ""
+    blog_start_idx = -1
+    if is_blog:
+        for i, el in enumerate(body_content):
+            para = el.get("paragraph")
+            if not para:
+                continue
+            t = "".join(pe.get("textRun", {}).get("content", "") for pe in para.get("elements", [])).strip()
+            if t:
+                blog_title = re.sub(r"\s+", " ", t)
+                blog_start_idx = i + 1
+                break
+
+    title = (blog_title if is_blog else "") or doc_title or card_title
+    if append_year and not is_article and not is_blog and not re.search(r"\b20\d{2}\s*$", title):
         title = f"{title} {year}"
 
     location = ""
@@ -4163,9 +4178,12 @@ def _extract_google_doc_data(
     start_date = ""
     end_date = ""
 
-    if is_article:
-        # Articles do not have location/dates headers below title
-        content_start_idx = (h1_idx + 1) if h1_idx >= 0 else 0
+    if is_article or is_blog:
+        # Articles and Blogs have no location/dates headers below the title
+        if is_blog and blog_start_idx >= 0:
+            content_start_idx = blog_start_idx
+        else:
+            content_start_idx = (h1_idx + 1) if h1_idx >= 0 else 0
     else:
         # Events have Location and Dates in the paragraphs following H1
         idx = (h1_idx + 1) if h1_idx >= 0 else 0
@@ -4221,6 +4239,8 @@ def _build_gutenberg_from_doc_ast(
     takeaways: list[str],
     content_start_idx: int = 0,
     is_article: bool = False,
+    is_blog: bool = False,
+    include_takeaways: bool = True,
 ) -> str:
     takeaway_items = "".join(
         f"<!-- wp:list-item -->\n<li>{html.escape(t)}</li>\n<!-- /wp:list-item -->\n\n" for t in takeaways
@@ -4256,7 +4276,7 @@ def _build_gutenberg_from_doc_ast(
         nonlocal group_inserted
         if not pending_list:
             return
-        if not group_inserted:
+        if include_takeaways and not group_inserted:
             blocks.append(group_block)
             group_inserted = True
         items = "".join(
@@ -4292,7 +4312,7 @@ def _build_gutenberg_from_doc_ast(
 
         if img_id:
             _flush_list()
-            if not group_inserted:
+            if include_takeaways and not group_inserted:
                 blocks.append(group_block)
                 group_inserted = True
             media = img_map.get(img_id)
@@ -4324,12 +4344,12 @@ def _build_gutenberg_from_doc_ast(
         _flush_list()
 
         if style == "HEADING_2":
-            if not group_inserted:
+            if include_takeaways and not group_inserted:
                 blocks.append(group_block)
                 group_inserted = True
             h_text = "".join(pe.get("textRun", {}).get("content", "") for pe in elements).strip()
             anchor = f"h-{_slugify_anchor(h_text)}"
-            if is_article:
+            if is_article or is_blog:
                 h_block = (
                     f'<!-- wp:heading {{"anchor":"{anchor}"}} -->\n'
                     f'<h2 id="{anchor}" class="wp-block-heading"><strong>{html.escape(h_text)}</strong></h2>\n'
@@ -4349,7 +4369,7 @@ def _build_gutenberg_from_doc_ast(
 
     _flush_list()
 
-    if not group_inserted:
+    if include_takeaways and not group_inserted:
         if len(blocks) >= 2:
             blocks.insert(2, group_block)
         elif blocks:
@@ -4523,8 +4543,15 @@ async def analyze_card(payload: dict = Body(default={})) -> dict:
     card_desc = card.get("desc", "")
 
     if not kind:
-        kind = "article" if card_name.lower().startswith("article") else "event"
+        cn = card_name.lower()
+        if cn.startswith("blog"):
+            kind = "blog"
+        elif cn.startswith("article"):
+            kind = "article"
+        else:
+            kind = "event"
     is_article = (kind == "article")
+    is_blog = (kind == "blog")
 
     due_raw = card.get("due")
     year = datetime.now().year
@@ -4567,10 +4594,11 @@ async def analyze_card(payload: dict = Body(default={})) -> dict:
         default_year=year,
         append_year=False,
         is_article=is_article,
+        is_blog=is_blog,
     )
     title = parsed["title"]
     clean_body = parsed["clean_body_text"] or doc_text
-    category = "Articles" if is_article else "Events"
+    category = "Blogs" if is_blog else ("Articles" if is_article else "Events")
 
     seo, seo_model = await _generate_event_seo(title, clean_body, category)
     best_kp, best_meta = _seo_best(clean_body, seo["keyphrases"], seo["metas"], title=title)
@@ -4607,8 +4635,15 @@ async def publish_event_from_card(payload: dict = Body(default={})) -> dict:
     card_desc = card.get("desc", "")
 
     if not kind:
-        kind = "article" if card_name.lower().startswith("article") else "event"
+        cn = card_name.lower()
+        if cn.startswith("blog"):
+            kind = "blog"
+        elif cn.startswith("article"):
+            kind = "article"
+        else:
+            kind = "event"
     is_article = (kind == "article")
+    is_blog = (kind == "blog")
 
     due_raw = card.get("due")
     year = datetime.now().year
@@ -4649,12 +4684,13 @@ async def publish_event_from_card(payload: dict = Body(default={})) -> dict:
         doc_html=doc_html,
         card_name=card_name,
         default_year=year,
-        append_year=(not is_article),
+        append_year=(kind == "event"),
         is_article=is_article,
+        is_blog=is_blog,
     )
     title = parsed["title"]
     clean_body = parsed["clean_body_text"] or doc_text
-    category = "Articles" if is_article else "Events"
+    category = "Blogs" if is_blog else ("Articles" if is_article else "Events")
 
     img_map: dict[str, dict] = {}
     images_uploaded = 0
@@ -4726,7 +4762,7 @@ async def publish_event_from_card(payload: dict = Body(default={})) -> dict:
                         pass
 
     seo_data, seo_model = await _generate_event_seo(title, clean_body, category)
-    takeaways = seo_data.get("ai_b") or []
+    takeaways = [] if is_blog else (seo_data.get("ai_b") or [])
 
     if doc_json and parsed.get("body_content"):
         content = _build_gutenberg_from_doc_ast(
@@ -4735,6 +4771,8 @@ async def publish_event_from_card(payload: dict = Body(default={})) -> dict:
             takeaways,
             parsed["content_start_idx"],
             is_article=is_article,
+            is_blog=is_blog,
+            include_takeaways=(not is_blog),
         )
     else:
         # Fallback when no AST available
@@ -4750,16 +4788,19 @@ async def publish_event_from_card(payload: dict = Body(default={})) -> dict:
         else:
             gutenberg_body = _convert_google_html_to_gutenberg(_body_html, img_map)
 
-        takeaways_html = "\n".join(f"<li>{b}</li>" for b in takeaways)
-        takeaways_block = (
-            f'<h2 class="wp-block-heading">Key Takeaways</h2>\n<ul class="wp-block-list">\n{takeaways_html}\n</ul>'
-        )
-        _first_p = re.search(r"</p>", gutenberg_body)
-        if _first_p:
-            at = _first_p.end()
-            content = gutenberg_body[:at] + "\n\n" + takeaways_block + "\n\n" + gutenberg_body[at:]
+        if takeaways:
+            takeaways_html = "\n".join(f"<li>{b}</li>" for b in takeaways)
+            takeaways_block = (
+                f'<h2 class="wp-block-heading">Key Takeaways</h2>\n<ul class="wp-block-list">\n{takeaways_html}\n</ul>'
+            )
+            _first_p = re.search(r"</p>", gutenberg_body)
+            if _first_p:
+                at = _first_p.end()
+                content = gutenberg_body[:at] + "\n\n" + takeaways_block + "\n\n" + gutenberg_body[at:]
+            else:
+                content = takeaways_block + "\n\n" + gutenberg_body
         else:
-            content = takeaways_block + "\n\n" + gutenberg_body
+            content = gutenberg_body
 
     best_kp, best_meta = _seo_best(content, seo_data["keyphrases"], seo_data["metas"], title=title)
 
@@ -4771,8 +4812,8 @@ async def publish_event_from_card(payload: dict = Body(default={})) -> dict:
         "slug": slug,
     }
 
-    # Articles post to /posts (standard post), Events post to /event
-    wp_endpoint = "/posts" if is_article else "/event"
+    # Articles + Blogs post to /posts (standard post); Events post to /event
+    wp_endpoint = "/posts" if (is_article or is_blog) else "/event"
     res = await _wp("POST", wp_endpoint, json_body=wp_body)
     if not res or not isinstance(res, dict) or "id" not in res:
         raise HTTPException(502, f"WordPress {wp_endpoint} creation returned invalid response")
