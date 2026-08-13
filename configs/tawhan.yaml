@@ -103,12 +103,6 @@ modules:
       db_path: ~/.config/railjack/kanban.db
       default_columns: [Backlog, "To Do", "In Progress", Done]
       watchdog_max_minutes: 20   # kill a stalled worker past this; catches glm-5.2 stalls
-  - id: fireside
-    title: FIRESIDE
-    kind: panel
-    panel: fireside
-    options: {}
-
 # Phase F: always-visible bottom terminal dock. Same ttyd URL as the TERMINAL
 # module → both attach to the one tmux session (tmux new -A -s main); typing in
 # the dock mirrors in TERMINAL and vice versa. Optional; omit `dock:` to hide.
