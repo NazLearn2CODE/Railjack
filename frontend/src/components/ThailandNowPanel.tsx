@@ -1196,6 +1196,10 @@ function EventsTab() {
   const [pickedKey, setPickedKey] = useState<string | null>(null);
   const [selNb, setSelNb] = useState<string | null>(null);
   const [seeding, setSeeding] = useState(false);
+  const [manualOpen, setManualOpen] = useState(false);
+  const [manualUrl, setManualUrl] = useState("");
+  const [manualTitle, setManualTitle] = useState("");
+  const [manualErr, setManualErr] = useState<string | null>(null);
   const [notifyPerm, setNotifyPerm] = useState<NotificationPermission>(
     typeof Notification !== "undefined" ? Notification.permission : "denied",
   );
@@ -1367,6 +1371,31 @@ function EventsTab() {
     }
   }, []);
 
+  // MANUAL ADD: a link (reuses the seed scrape) or a title-only entry → seed a TnEvent → open ThickBox
+  const addManual = useCallback(async () => {
+    const url = manualUrl.trim();
+    const title = manualTitle.trim();
+    if (!url && !title) {
+      setManualErr("paste a link or a title");
+      return;
+    }
+    setManualErr(null);
+    setManualOpen(false);
+    setManualUrl("");
+    setManualTitle("");
+    if (url) {
+      await pickFromUrl(url); // scrapes the URL → opens ThickBox (manages seeding + pickedKey)
+      return;
+    }
+    const ev: TnEvent = { title, url: "" };
+    setEvents((prev) => {
+      const map = new Map(prev.map((e) => [keyOf(e), e]));
+      map.set(keyOf(ev), ev);
+      return [...map.values()];
+    });
+    setPickedKey(keyOf(ev)); // opens ThickBox with empty dates — user fills START/END/SIGNUP
+  }, [manualUrl, manualTitle, pickFromUrl]);
+
   const picked = pickedKey ? events.find((e) => keyOf(e) === pickedKey) ?? null : null;
   if (picked) {
     return (
@@ -1391,12 +1420,52 @@ function EventsTab() {
             {m === "scout" ? "SCOUT" : "DEEP"}
           </button>
         ))}
+        <button
+          className={`btn btn--compact ${manualOpen ? "btn--signal" : ""}`}
+          onClick={() => setManualOpen((o) => !o)}
+        >
+          + ADD MANUAL
+        </button>
         <span className="mono" style={{ color: "var(--color-muted)" }}>
           {mode === "scout"
             ? "instant keyless search"
             : "NotebookLM research + on-demand extract"}
         </span>
       </div>
+
+      {manualOpen && (
+        <div className="hud p-3 mb-2 flex flex-col gap-2">
+          <div className="label">▸ ADD EVENT MANUALLY — link or text</div>
+          <input
+            className="input"
+            placeholder="paste an event link (auto-scrapes title + dates)…"
+            value={manualUrl}
+            onChange={(e) => setManualUrl(e.target.value)}
+            disabled={seeding}
+          />
+          <input
+            className="input"
+            placeholder="…or type the event title (no link)"
+            value={manualTitle}
+            onChange={(e) => setManualTitle(e.target.value)}
+            disabled={seeding}
+          />
+          {manualErr && (
+            <div className="mono" style={{ color: "var(--color-critical)" }}>
+              ⚠ {manualErr}
+            </div>
+          )}
+          <div>
+            <button
+              className="btn btn--signal"
+              disabled={seeding}
+              onClick={() => void addManual()}
+            >
+              {seeding ? "SEEDING…" : "▸ ADD & OPEN"}
+            </button>
+          </div>
+        </div>
+      )}
 
       <section className="hud hud--bracket reveal reveal-1 p-3">
         <div className="label mb-2">{mode === "scout" ? "SCOUT" : "DEEP"}</div>
