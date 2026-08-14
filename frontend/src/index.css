@@ -300,6 +300,13 @@
   padding: 3px 8px;
   letter-spacing: 0.1em;
 }
+/* Medium button — midpoint of .btn (14px / 8px 14px) and .btn--compact (11px / 3px 8px);
+   uniform size for the EVENTS mode-row (SCOUT / DEEP / + ADD MANUAL). */
+.btn--md {
+  font-size: 12.5px;
+  padding: 5.5px 11px;
+  letter-spacing: 0.12em;
+}
 /* Module-rail button label: sized so the longest title (THAILAND NOW) stays on
    one line in the w-44 rail. nowrap guarantees it never wraps. */
 .module-label {

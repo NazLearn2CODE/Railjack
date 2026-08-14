@@ -1414,14 +1414,14 @@ function EventsTab() {
         {(["scout", "deep"] as const).map((m) => (
           <button
             key={m}
-            className={`btn ${mode === m ? "btn--signal" : ""}`}
+            className={`btn btn--md ${mode === m ? "btn--signal" : ""}`}
             onClick={() => setMode(m)}
           >
             {m === "scout" ? "SCOUT" : "DEEP"}
           </button>
         ))}
         <button
-          className={`btn btn--compact ${manualOpen ? "btn--signal" : ""}`}
+          className={`btn btn--md ${manualOpen ? "btn--signal" : ""}`}
           onClick={() => setManualOpen((o) => !o)}
         >
           + ADD MANUAL
