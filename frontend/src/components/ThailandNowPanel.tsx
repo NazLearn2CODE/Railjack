@@ -1182,6 +1182,9 @@ function Row({ label, value }: { label: string; value: string }) {
 
 /* --------------------------------- EVENTS --------------------------------- */
 
+/** Unicode-aware slug matching backend `_covered_slug` (keeps Thai letters + digits). */
+const slugCovered = (s: string) => (s || "").toLowerCase().replace(/[^\p{L}\p{N}]/gu, "");
+
 function EventsTab() {
   // persisted: walk away, come back — results + the form that produced them survive
   const [mode, setMode] = usePersistentState<"scout" | "deep">("tn.mode", "scout");
@@ -1200,9 +1203,35 @@ function EventsTab() {
   const [manualUrl, setManualUrl] = useState("");
   const [manualTitle, setManualTitle] = useState("");
   const [manualErr, setManualErr] = useState<string | null>(null);
+  const [harvesting, setHarvesting] = useState(false);
+  // hub library (saved source pages) for quick re-scanning
+  const [hubs, setHubs] = useState<{ url: string; title: string; mode: string; added?: string }[]>([]);
+  const [hubsOpen, setHubsOpen] = useState(false);
+  const [lastMode, setLastMode] = useState<"links" | "events">("links");
+  const [scanning, setScanning] = useState(false);
+  useEffect(() => {
+    let alive = true;
+    fetchJSON<{ hubs: { url: string; title: string; mode: string; added?: string }[] }>(
+      "/api/thailandnow/events/hubs",
+    )
+      .then((r) => { if (alive) setHubs(r.hubs ?? []); })
+      .catch(() => {});
+    return () => { alive = false; };
+  }, []);
   const [notifyPerm, setNotifyPerm] = useState<NotificationPermission>(
     typeof Notification !== "undefined" ? Notification.permission : "denied",
   );
+  // covered-events dedup set {slug: source} from OURS + COMPANY sheets — fetch once on mount
+  const [covered, setCovered] = useState<Record<string, string>>({});
+  useEffect(() => {
+    let alive = true;
+    fetchJSON<{ covered: Record<string, string>; errors: string[] }>(
+      "/api/thailandnow/events/covered",
+    )
+      .then((r) => { if (alive) setCovered(r.covered ?? {}); })
+      .catch(() => {}); // non-fatal: no badge if the sheets are unreachable
+    return () => { alive = false; };
+  }, []);
 
   // DEEP: poll jobs + this mode's notebooks
   const { data: jobsData, refetch: refetchJobs } = usePolling<{ jobs: TnJob[] }>(
@@ -1396,6 +1425,90 @@ function EventsTab() {
     setPickedKey(keyOf(ev)); // opens ThickBox with empty dates — user fills START/END/SIGNUP
   }, [manualUrl, manualTitle, pickFromUrl]);
 
+  const harvestPage = useCallback(async (mode: "links" | "events") => {
+    const url = manualUrl.trim();
+    if (!url) {
+      setManualErr(mode === "events" ? "paste a listicle URL to harvest events" : "paste a listings URL to harvest");
+      return;
+    }
+    setManualErr(null);
+    setHarvesting(true);
+    setLastMode(mode);
+    try {
+      const r = await post<{ events: TnEvent[]; count: number }>(
+        "/api/thailandnow/deep/harvest", { url, mode },
+      );
+      const found = r.data?.events ?? [];
+      if (!found.length) {
+        setManualErr(mode === "events"
+          ? "no inline events found — is this a listicle with event headings? (try HARVEST LINKS for an index page)"
+          : "no event links found — try ADD & OPEN for a single event");
+        return;
+      }
+      setEvents((prev) => {
+        const map = new Map(prev.map((e) => [keyOf(e), e]));
+        for (const e of found) map.set(keyOf(e), e); // dedupe by keyOf (url||title)
+        return [...map.values()];
+      });
+      setManualOpen(false);
+      setManualUrl("");
+      setManualTitle("");
+    } catch {
+      setManualErr("harvest failed — retry, or paste the link directly with ADD & OPEN");
+    } finally {
+      setHarvesting(false);
+    }
+  }, [manualUrl]);
+
+  const saveHub = useCallback(async () => {
+    const url = manualUrl.trim();
+    if (!url) { setManualErr("paste a URL first, then tap ★ HUB"); return; }
+    setManualErr(null);
+    try {
+      const r = await post<{ hubs: { url: string; title: string; mode: string; added?: string }[] }>(
+        "/api/thailandnow/events/hubs",
+        { url, title: manualTitle.trim() || url, mode: lastMode },
+      );
+      setHubs(r.data?.hubs ?? hubs);
+    } catch {
+      setManualErr("could not save hub");
+    }
+  }, [manualUrl, manualTitle, lastMode, hubs]);
+
+  const removeHub = useCallback(async (url: string) => {
+    try {
+      const r = await fetchJSON<{ hubs: { url: string; title: string; mode: string; added?: string }[] }>(
+        `/api/thailandnow/events/hubs?url=${encodeURIComponent(url)}`,
+        { method: "DELETE" },
+      );
+      setHubs(r.hubs ?? []);
+    } catch { /* ignore */ }
+  }, []);
+
+  const scanHubs = useCallback(async () => {
+    setScanning(true);
+    setManualErr(null);
+    try {
+      const r = await post<{ events: TnEvent[]; count: number; hubs_scanned: number; errors: string[] }>(
+        "/api/thailandnow/events/hubs/scan", {},
+      );
+      const found = r.data?.events ?? [];
+      if (found.length) {
+        setEvents((prev) => {
+          const map = new Map(prev.map((e) => [keyOf(e), e]));
+          for (const e of found) map.set(keyOf(e), e);
+          return [...map.values()];
+        });
+      }
+      setManualErr(found.length ? null : "no events from hubs");
+      setHubsOpen(false);
+    } catch {
+      setManualErr("hub scan failed");
+    } finally {
+      setScanning(false);
+    }
+  }, []);
+
   const picked = pickedKey ? events.find((e) => keyOf(e) === pickedKey) ?? null : null;
   if (picked) {
     return (
@@ -1426,6 +1539,12 @@ function EventsTab() {
         >
           + ADD MANUAL
         </button>
+        <button
+          className={`btn btn--md ${hubsOpen ? "btn--signal" : ""}`}
+          onClick={() => setHubsOpen((o) => !o)}
+        >
+          ★ HUBS{hubs.length ? ` (${hubs.length})` : ""}
+        </button>
         <span className="mono" style={{ color: "var(--color-muted)" }}>
           {mode === "scout"
             ? "instant keyless search"
@@ -1455,15 +1574,76 @@ function EventsTab() {
               ⚠ {manualErr}
             </div>
           )}
-          <div>
+          <div className="flex items-center gap-2 flex-wrap">
             <button
               className="btn btn--signal"
-              disabled={seeding}
+              disabled={seeding || harvesting}
               onClick={() => void addManual()}
             >
               {seeding ? "SEEDING…" : "▸ ADD & OPEN"}
             </button>
+            <button
+              className="btn"
+              disabled={seeding || harvesting}
+              onClick={() => void harvestPage("links")}
+            >
+              {harvesting ? "…" : "⇶ HARVEST LINKS"}
+            </button>
+            <button
+              className="btn"
+              disabled={seeding || harvesting}
+              onClick={() => void harvestPage("events")}
+              title="for a listicle whose events are headings/text, not separate links"
+            >
+              {harvesting ? "…" : "⇶ HARVEST EVENTS"}
+            </button>
+            <button
+              className="btn btn--compact"
+              disabled={seeding || harvesting || !manualUrl.trim()}
+              onClick={() => void saveHub()}
+              title="save this page as a hub to re-scan later (uses the last harvest mode)"
+            >
+              ★ HUB
+            </button>
           </div>
+        </div>
+      )}
+
+      {hubsOpen && (
+        <div className="hud p-3 mb-2 flex flex-col gap-2">
+          <div className="flex items-center justify-between">
+            <span className="label">▸ SAVED HUBS — re-scan sources anytime</span>
+            <button
+              className="btn btn--compact btn--signal"
+              disabled={scanning || !hubs.length}
+              onClick={() => void scanHubs()}
+            >
+              {scanning ? "SCANNING…" : "⇶ SCAN ALL"}
+            </button>
+          </div>
+          {hubs.length === 0 ? (
+            <div className="mono" style={{ color: "var(--color-muted)" }}>
+              no hubs yet — paste a page URL above and tap ★ HUB to save it (then SCAN ALL to pull fresh events from every saved source)
+            </div>
+          ) : (
+            <div className="flex flex-col gap-1">
+              {hubs.map((h) => (
+                <div key={h.url} className="row-in flex items-center gap-2">
+                  <span className="pip pip--signal" />
+                  <span className="label">{h.mode === "events" ? "events" : "links"}</span>
+                  <span
+                    className="mono"
+                    style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+                  >
+                    {h.title}
+                  </span>
+                  <button className="btn btn--compact btn--crit" onClick={() => void removeHub(h.url)}>
+                    ✕
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
 
@@ -1626,6 +1806,15 @@ function EventsTab() {
                   </span>
                 )}
                 <span className="mono">{e.title}</span>
+                {covered[slugCovered(e.title)] && (
+                  <span
+                    className="label"
+                    style={{ color: "var(--color-signal)" }}
+                    title={`already covered (${covered[slugCovered(e.title)]})`}
+                  >
+                    ✓ COVERED
+                  </span>
+                )}
                 {e.url && (
                   <a
                     href={e.url}

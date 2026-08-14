@@ -1714,6 +1714,67 @@ async def _fireside_registry() -> list[dict]:
         return rows
 
 
+# --- Covered-events dedup (double filter: OURS published + COMPANY plan) ---
+# OURS sheet: Event Title in col A (row 1 = header).
+# COMPANY sheet: Event Name in col C (row 2 = header), format "[YYYYMM] [EN] Name".
+COVERED_OURS_SHEET = "1Hk3o7eui5S_fvC7ptZWZceT3PBIT9SUQPf_iMkddXoI"
+COVERED_COMPANY_SHEET = "1LO32cJTCSN0XEUPiuEjQmeWr0LU-ohY7ca1GWQv2-N8"
+_COVERED_COMPANY_PREFIX = re.compile(r"^\s*\[\d{6}\]\s*\[[^\]]*\]\s*")
+
+
+def _covered_slug(title: str) -> str:
+    """Unicode-aware slug for fuzzy covered-match (keeps Thai letters + digits)."""
+    return re.sub(r"[^\w]", "", (title or "").lower(), flags=re.UNICODE)
+
+
+async def _read_sheet_col(sheet_id: str, range_param: str, col: int = 0, header_rows: int = 1) -> list[str]:
+    """Read one column of a Google Sheet range as plain strings (skips header_rows)."""
+    token = await _google_token()
+    hdr = {"Authorization": f"Bearer {token}"}
+    url = f"https://sheets.googleapis.com/v4/spreadsheets/{sheet_id}/values/{urllib.parse.quote(range_param)}"
+    async with httpx.AsyncClient(timeout=30) as c:
+        r = await c.get(url, headers=hdr)
+        if r.status_code != 200:
+            raise HTTPException(502, f"Sheets read failed ({sheet_id}): {r.text[:160]}")
+        values = r.json().get("values", [])
+    out: list[str] = []
+    for row in values[header_rows:]:
+        cell = (row[col] if col < len(row) else "").strip()
+        if cell:
+            out.append(cell)
+    return out
+
+
+async def _covered_events() -> tuple[dict[str, str], list[str]]:
+    """Return ({slug: source}, errors). A title is 'covered' if its slug is in
+    EITHER sheet (double filter). One unreadable sheet doesn't blank the set."""
+    out: dict[str, str] = {}
+    errors: list[str] = []
+    try:
+        for t in await _read_sheet_col(COVERED_OURS_SHEET, "A:E", col=0, header_rows=1):
+            slug = _covered_slug(t)
+            if slug:
+                out.setdefault(slug, "ours")
+    except Exception as e:
+        errors.append(f"ours: {e}")
+    try:
+        for t in await _read_sheet_col(COVERED_COMPANY_SHEET, "A2:E", col=2, header_rows=1):
+            name = _COVERED_COMPANY_PREFIX.sub("", t).strip()
+            slug = _covered_slug(name)
+            if slug:
+                out.setdefault(slug, "company")
+    except Exception as e:
+        errors.append(f"company: {e}")
+    return out, errors
+
+
+@router.get("/api/thailandnow/events/covered")
+async def get_covered_events() -> dict:
+    """Covered-events set for the EVENTS tab dedup badge. {covered: {slug: source}, errors: []}."""
+    covered, errors = await _covered_events()
+    return {"covered": covered, "errors": errors}
+
+
 def _fireside_source_gem_path() -> Path:
     """Fireside topic sourcing gem path."""
     return _resolve_gem("fireside_source_gem_path", "app/gems/fireside-source.md")
@@ -2366,6 +2427,300 @@ async def deep_seed(payload: dict = Body(default={})):
         "signup_deadline": "", "location": "", "language": "en",
         "summary": "", "source": "deep-seed",
     }}
+
+
+_HARVEST_BLOCK_SUBSTR = (
+    "facebook.com", "twitter.com", "x.com", "instagram.com", "youtube.com",
+    "tiktok.com", "linkedin.com", "mailto:", "tel:", "javascript:", "/login",
+    "/signin", "/register", "/cart", "/checkout", "/wp-admin", "/wp-content",
+    "/feed", ".pdf", ".jpg", ".jpeg", ".png", ".webp", "/tag/", "/category/",
+    "/author/", "/page/",
+)
+_HARVEST_BLOCK_TEXT = {
+    "home", "about", "about us", "contact", "contact us", "menu", "search",
+    "login", "log in", "sign in", "sign up", "register", "next", "previous",
+    "load more", "read more", "see more", "view all", "all events", "all news",
+    "events", "news", "back", "skip to content", "subscribe", "newsletter",
+    "privacy", "terms", "cookie", "english", "ภาษาไทย", "ไทย",
+}
+
+
+# --- Inline-event extraction (listicle pages: many events as H3/H4 headings on ONE
+# url, no per-event links) + a 5-day-past cutoff so stale events are dropped. ---
+_HUB_CUTOFF_DAYS = 5
+_INLINE_MONTH = {
+    "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+    "jul": 7, "aug": 8, "sep": 9, "sept": 9, "oct": 10, "nov": 11, "dec": 12,
+}
+
+
+def _inline_month_num(tok: str) -> int | None:
+    t = tok.lower()
+    return _INLINE_MONTH.get(t[:4]) or _INLINE_MONTH.get(t[:3])
+
+
+def _last_day_of_month(y: int, m: int) -> int:
+    nxt = datetime(y, m, 28) + timedelta(days=4)
+    return (nxt - timedelta(days=nxt.day)).day
+
+
+def _parse_inline_date(text: str, ctx_year: int) -> tuple[str, str] | None:
+    """Parse (start_iso, end_iso) from listicle-style date text. Handles ranges
+    ('August 7–9, 2026', '7 to 9 August'), single days with/without year, and
+    month-only / month-range ('August 2026', 'June to August 2026' → end month's
+    last day so ongoing months aren't dropped). None if nothing parses."""
+    if not text:
+        return None
+    t = text.lower()
+    pats = [
+        (r"([a-z]{3,9})\s+(\d{1,2})\s*[—–\-]\s*(\d{1,2})(?:[^\d]{0,4}(\d{4}))?", "mdd"),
+        (r"([a-z]{3,9})\s+(\d{1,2})\s+to\s+(\d{1,2})(?:[^\d]{0,4}(\d{4}))?", "mdd"),
+        (r"(\d{1,2})\s*[—–\-]\s*(\d{1,2})\s+([a-z]{3,9})(?:[^\d]{0,4}(\d{4}))?", "ddm"),
+        (r"(\d{1,2})\s+to\s+(\d{1,2})\s+([a-z]{3,9})(?:[^\d]{0,4}(\d{4}))?", "ddm"),
+        (r"([a-z]{3,9})\s+(\d{1,2})(?:[^\d]{0,4}(\d{4}))?", "md"),
+        (r"(\d{1,2})\s+([a-z]{3,9})(?:[^\d]{0,4}(\d{4}))?", "dm"),
+        (r"([a-z]{3,9})\s+to\s+([a-z]{3,9})(?:[^\d]{0,4}(\d{4}))?", "mm"),
+        (r"([a-z]{3,9})\s+(\d{4})", "my"),
+    ]
+    for pat, kind in pats:
+        m = re.search(pat, t)
+        if not m:
+            continue
+        g = m.groups()
+        try:
+            if kind in ("mdd", "ddm"):
+                if kind == "mdd":
+                    mo, d1, d2, yr = g
+                else:
+                    d1, d2, mo, yr = g
+                mn = _inline_month_num(mo)
+                if not mn:
+                    continue
+                y = int(yr) if yr else ctx_year
+                return (f"{y:04d}-{mn:02d}-{int(d1):02d}",
+                        f"{y:04d}-{mn:02d}-{int(d2):02d}")
+            if kind == "md":
+                mo, d, yr = g
+                mn = _inline_month_num(mo)
+                if not mn:
+                    continue
+                y = int(yr) if yr else ctx_year
+                ds = f"{y:04d}-{mn:02d}-{int(d):02d}"
+                return (ds, ds)
+            if kind == "dm":
+                d, mo, yr = g
+                mn = _inline_month_num(mo)
+                if not mn:
+                    continue
+                y = int(yr) if yr else ctx_year
+                ds = f"{y:04d}-{mn:02d}-{int(d):02d}"
+                return (ds, ds)
+            if kind == "mm":
+                mo1, mo2, yr = g
+                mn1, mn2 = _inline_month_num(mo1), _inline_month_num(mo2)
+                if not (mn1 and mn2):
+                    continue
+                y = int(yr) if yr else ctx_year
+                return (f"{y:04d}-{mn1:02d}-01",
+                        f"{y:04d}-{mn2:02d}-{_last_day_of_month(y, mn2):02d}")
+            if kind == "my":
+                mo, yr = g
+                mn = _inline_month_num(mo)
+                if not mn:
+                    continue
+                y = int(yr)
+                return (f"{y:04d}-{mn:02d}-01",
+                        f"{y:04d}-{mn:02d}-{_last_day_of_month(y, mn):02d}")
+        except ValueError:
+            continue
+    return None
+
+
+def _extract_inline_events(md: str, source_url: str) -> list[dict]:
+    """Extract events listed inline (H3/H4 headings + description) from one listicle
+    page. H2 = category (skip); scan stops at FAQ/Related/Comments. Drops events that
+    ended > _HUB_CUTOFF_DAYS ago; keeps undated (can't prove past) + upcoming. url is
+    set "" so the frontend keys by title (not the shared page url)."""
+    today = datetime.now()
+    cutoff = (today - timedelta(days=_HUB_CUTOFF_DAYS)).strftime("%Y-%m-%d")
+    ctx_year = today.year
+    mym = re.search(r"\b(20[2-3]\d)\b", md[:800])
+    if mym:
+        ctx_year = int(mym.group(1))
+
+    lines = md.split("\n")
+    cutoff_line = len(lines)
+    for i, ln in enumerate(lines):
+        if re.match(r"^#{1,3}\s*(FAQ|Frequently Asked|Related (Posts|Articles)|Comments|"
+                    r"Leave a|About the Author|Share this|You may also like)", ln, re.I):
+            cutoff_line = i
+            break
+
+    out: list[dict] = []
+    i = 0
+    n = min(cutoff_line, len(lines))
+    while i < n:
+        m = re.match(r"^(#{3,4})\s+(.+)$", lines[i])
+        if not m:
+            i += 1
+            continue
+        title = re.sub(r"\s+", " ", m.group(2)).strip()
+        buf: list[str] = []
+        j = i + 1
+        while j < n and not re.match(r"^#{1,6}\s", lines[j]):
+            buf.append(lines[j])
+            j += 1
+        section = title + "\n" + "\n".join(buf)
+        desc = re.sub(r"\s+", " ",
+                      re.sub(r"!\[[^\]]*\]\([^)]*\)", "", section)).strip()
+        parsed = _parse_inline_date(section, ctx_year)
+        if parsed:
+            start_iso, end_iso = parsed
+            if end_iso < cutoff:
+                i = j
+                continue  # ended >5 days ago — omit
+            out.append({"title": title, "start_date": start_iso, "end_date": end_iso,
+                        "signup_deadline": "", "location": "", "language": "en",
+                        "summary": desc[:300], "url": "", "source": "inline"})
+        elif len(desc) >= 60:  # undated but has a real description — keep
+            out.append({"title": title, "start_date": "", "end_date": "",
+                        "signup_deadline": "", "location": "", "language": "en",
+                        "summary": desc[:300], "url": "", "source": "inline"})
+        i = j
+    return out
+
+
+def _extract_link_events(md: str, url: str) -> list[dict]:
+    """Same-origin ``[text](url)`` link harvest (the 'links' mode). Returns
+    ``[{title, url}]`` scored by event-likeness, capped at 40. Shared by
+    /deep/harvest and /events/hubs/scan."""
+    base = urllib.parse.urlparse(url)
+    base_host = (base.hostname or "").removeprefix("www.")
+    base_abs = f"{base.scheme}://{base.netloc}"
+    raw: dict[str, str] = {}
+    for m in re.finditer(r"(?<!!)\[([^\]]+)\]\((https?://[^)\s]+|/[^)\s]*)\)", md):
+        text = re.sub(r"\s+", " ", m.group(1)).strip()
+        href = m.group(2).strip()
+        absu = urllib.parse.urljoin(base_abs, href)
+        pu = urllib.parse.urlparse(absu)
+        if (pu.hostname or "").removeprefix("www.") != base_host:
+            continue
+        if len(text) < 5 or text.lower() in _HARVEST_BLOCK_TEXT:
+            continue
+        if any(b in absu.lower() for b in _HARVEST_BLOCK_SUBSTR):
+            continue
+        raw.setdefault(absu, text)
+
+    def _score(u: str) -> int:
+        p = urllib.parse.urlparse(u).path.lower()
+        s = 6 if "event" in p else 0
+        s += 3 if re.search(r"/20\d{2}", p) else 0
+        s += min(len([x for x in p.split("/") if x]), 4)  # deeper path ≈ real page
+        return s
+
+    items = sorted(raw.items(), key=lambda kv: _score(kv[0]), reverse=True)[:40]
+    return [{"title": t, "url": u} for u, t in items]
+
+
+@router.post("/api/thailandnow/deep/harvest")
+async def deep_harvest(payload: dict = Body(default={})):
+    """Harvest events from a page. mode 'links' (default) = same-origin ``[text](url)``
+    links off a listings/index page; mode 'events' = inline events listed as H3/H4
+    headings on a single listicle page (many events, one url, no per-event links),
+    with a 5-day-past cutoff. Returns ``{events, count, mode}``."""
+    url = (payload.get("url") or "").strip()
+    mode = (payload.get("mode") or "links").strip().lower()
+    if not url:
+        raise HTTPException(400, "url required")
+    base = urllib.parse.urlparse(url)
+    base_host = (base.hostname or "").removeprefix("www.")
+    if not base_host:
+        raise HTTPException(400, "url has no host")
+
+    md = await _jina_read(url)
+
+    if mode == "events":
+        events = _extract_inline_events(md, url)
+        return {"events": events, "count": len(events), "mode": "events"}
+
+    events = _extract_link_events(md, url)
+    return {"events": events, "count": len(events), "mode": "links"}
+
+
+# --- Event-hub library: saved source pages (listing + listicle) for quick
+# re-scanning while scouting. Local JSON store (personal scraping aid). ---
+
+def _hubs_path() -> Path:
+    return Path(os.path.expanduser("~/.config/railjack/event_hubs.json"))
+
+
+def _read_hubs() -> list[dict]:
+    p = _hubs_path()
+    if not p.exists():
+        return []
+    try:
+        return json.loads(p.read_text() or "[]")
+    except Exception:
+        return []
+
+
+def _write_hubs(hubs: list[dict]) -> None:
+    p = _hubs_path()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(json.dumps(hubs, ensure_ascii=False, indent=2))
+
+
+@router.get("/api/thailandnow/events/hubs")
+def hubs_list() -> dict:
+    return {"hubs": _read_hubs()}
+
+
+@router.post("/api/thailandnow/events/hubs")
+async def hubs_add(payload: dict = Body(default={})) -> dict:
+    url = (payload.get("url") or "").strip()
+    if not url:
+        raise HTTPException(400, "url required")
+    title = (payload.get("title") or url)[:120]
+    mode = "events" if (payload.get("mode") or "").strip().lower() == "events" else "links"
+    hubs = _read_hubs()
+    if not any(h.get("url") == url for h in hubs):
+        hubs.append({"url": url, "title": title, "mode": mode,
+                     "added": datetime.now().strftime("%Y-%m-%d")})
+        _write_hubs(hubs)
+    return {"hubs": hubs}
+
+
+@router.delete("/api/thailandnow/events/hubs")
+async def hubs_remove(url: str) -> dict:
+    hubs = [h for h in _read_hubs() if h.get("url") != url]
+    _write_hubs(hubs)
+    return {"hubs": hubs}
+
+
+@router.post("/api/thailandnow/events/hubs/scan")
+async def hubs_scan() -> dict:
+    """Re-harvest every saved hub (by its stored mode) and merge into one event list.
+    Inline-mode hubs are already date-filtered; the ✓ COVERED badge is applied
+    client-side, so scanned events get marked automatically."""
+    hubs = _read_hubs()
+    merged: dict[str, dict] = {}  # keyOf (url||title) -> event (dedupe)
+    errors: list[str] = []
+    for h in hubs:
+        url = h.get("url", "")
+        mode = "events" if h.get("mode") == "events" else "links"
+        try:
+            md = await _jina_read(url)
+            evs = (_extract_inline_events(md, url) if mode == "events"
+                   else _extract_link_events(md, url))
+            for e in evs:
+                k = e.get("url") or e.get("title") or ""
+                if k:
+                    merged.setdefault(k, e)
+        except Exception as ex:  # one bad hub shouldn't abort the scan
+            errors.append(f"{url}: {ex}")
+    events = list(merged.values())
+    return {"events": events, "count": len(events),
+            "hubs_scanned": len(hubs), "errors": errors}
 
 
 @router.get("/api/thailandnow/deep/notebooks")
