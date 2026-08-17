@@ -307,6 +307,45 @@ def _parse_ag_groups(data: dict) -> dict[str, dict]:
 
 _ag_quota_cache: tuple[float, dict] = (0.0, {})
 
+# Last daemon reading persisted to disk: while no Antigravity session runs,
+# weekly usage cannot change, so a cached week reading stays true between
+# runs (capped anyway); the 5h window rolls on wall time, so its reading
+# expires as fast as the in-memory one.
+_AG_CACHE_FILE = Path.home() / ".cache" / "railjack" / "ag-quota.json"
+_AG_SESSION_TTL = 600.0
+_AG_WEEK_TTL = 6 * 3600.0
+
+
+def _save_ag_disk(groups: dict[str, dict]) -> None:
+    try:
+        _AG_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _AG_CACHE_FILE.write_text(json.dumps({"ts": time.time(), "groups": groups}))
+    except Exception:
+        pass
+
+
+def _load_ag_disk() -> dict[str, dict]:
+    """Persisted daemon quota with per-field TTL applied."""
+    try:
+        d = json.loads(_AG_CACHE_FILE.read_text())
+        age = time.time() - float(d.get("ts", 0))
+        out: dict[str, dict] = {}
+        for key, lane in (d.get("groups") or {}).items():
+            fresh: dict = {}
+            if age < _AG_SESSION_TTL:
+                for k in ("session_pct", "reset_at"):
+                    if k in lane:
+                        fresh[k] = lane[k]
+            if age < _AG_WEEK_TTL:
+                for k in ("week_pct", "week_reset_at"):
+                    if k in lane:
+                        fresh[k] = lane[k]
+            if fresh:
+                out[key] = fresh
+        return out
+    except Exception:
+        return {}
+
 
 async def _antigravity_quota() -> dict[str, dict]:
     """Both model-group quotas from the local Antigravity LanguageServer
@@ -357,6 +396,7 @@ async def _antigravity_quota() -> dict[str, dict]:
                         parsed = _parse_ag_groups(r.json().get("response") or r.json())
                         if parsed:
                             _ag_quota_cache = (time.monotonic(), parsed)
+                            _save_ag_disk(parsed)
                             return parsed
                 except Exception:
                     continue
@@ -367,11 +407,15 @@ async def _antigravity_quota() -> dict[str, dict]:
 
 async def _gemini_usage() -> dict | None:
     """Google / Gemini quota (AI-Pro): 5h + weekly from the local Antigravity
-    LanguageServer RPC; falls back to upstream retrieveUserQuota (daily REQUEST
-    buckets only) via the keyring bearer token when the daemon is down."""
+    LanguageServer RPC; then the persisted last daemon reading (week fields
+    outlive the run); then upstream retrieveUserQuota (daily REQUEST buckets
+    only) via the keyring bearer token."""
     groups = await _antigravity_quota()
     if groups.get("gemini"):
         return groups["gemini"]
+    disk = _load_ag_disk()
+    if disk.get("gemini"):
+        return disk["gemini"]
     try:
         import secretstorage
 
@@ -407,10 +451,12 @@ async def _gemini_usage() -> dict | None:
 
 async def _google_3p_usage() -> dict | None:
     """Claude+GPT group hosted on the Google AI-Pro sub, from the same local
-    Antigravity RPC (5h + weekly). None when the daemon is down → the claude
-    lane falls back to anthropic-oauth."""
+    Antigravity RPC (5h + weekly), then the persisted last daemon reading.
+    None beyond that → the claude lane falls back to anthropic-oauth."""
     groups = await _antigravity_quota()
-    return groups.get("3p")
+    if groups.get("3p"):
+        return groups["3p"]
+    return _load_ag_disk().get("3p")
 
 
 if __name__ == "__main__":

@@ -82,3 +82,27 @@ def test_parse_ag_groups_both_groups_with_weekly_reset():
 def test_norm_ag_model_strips_effort_suffix():
     assert session_stats._norm_ag_model("Gemini 3.7 Flash (Medium)") == "gemini-3.7-flash"
     assert session_stats._norm_ag_model("") == ""
+
+
+def test_ag_disk_cache_split_ttl(tmp_path, monkeypatch):
+    # Weekly usage can only change while an Antigravity session runs, so the
+    # week fields outlive the run (6h); the 5h window rolls on wall time, so
+    # its fields expire with the usual 10-min last-good TTL.
+    cache = tmp_path / "ag-quota.json"
+    monkeypatch.setattr(session_stats, "_AG_CACHE_FILE", cache)
+    full = {"gemini": {"session_pct": 8, "reset_at": "2026-08-17T06:26:00Z",
+                       "week_pct": 4, "week_reset_at": "2026-08-22T02:50:22Z"}}
+    session_stats._save_ag_disk(full)
+    assert session_stats._load_ag_disk() == full  # fresh: everything kept
+
+    stale_session = {"ts": session_stats.time.time() - 700, "groups": full}
+    cache.write_text(session_stats.json.dumps(stale_session))
+    assert session_stats._load_ag_disk() == {
+        "gemini": {"week_pct": 4, "week_reset_at": "2026-08-22T02:50:22Z"}}
+
+    stale_all = {"ts": session_stats.time.time() - 7 * 3600, "groups": full}
+    cache.write_text(session_stats.json.dumps(stale_all))
+    assert session_stats._load_ag_disk() == {}
+
+    cache.write_text("not json")
+    assert session_stats._load_ag_disk() == {}  # torn write → empty, never crash
