@@ -54,17 +54,39 @@ _PARA_STYLE_KEYS = ("namedStyleType", "alignment", "indentStart",
                     "indentFirstLine", "spaceAbove", "spaceBelow", "lineSpacing")
 
 
-def _anchor_name(script_doc_id: str) -> str:
-    """The script's NL header dropdown chip renders its current item in the
-    Drive plain-text export (documents.get cannot see chip contents)."""
+def _export_lines(script_doc_id: str) -> list[str]:
+    """The script's plain-text export — dropdown chips render their CURRENT
+    item there (documents.get cannot see chip contents at all)."""
     try:
         raw = _api("GET", f"https://www.googleapis.com/drive/v3/files/{extract_doc_id(script_doc_id)}/export",
                    params={"mimeType": "text/plain"}, raw_response=True)
-        text = raw.decode("utf-8-sig", errors="replace")
-        m = re.search(r"NEWSLINE [^\n]*?-- ANCHOR:\s*([^\n]+)", text)
-        return m.group(1).strip() if m else ""
+        return raw.decode("utf-8-sig", errors="replace").splitlines()
     except Exception:
-        return ""
+        return []
+
+
+def _anchor_name(script_doc_id: str) -> str:
+    """The NL header's anchor chip current item, e.g. 'SANDRA H.'."""
+    for l in _export_lines(script_doc_id):
+        m = re.search(r"NEWSLINE [^\n]*?-- ANCHOR:\s*([^\n]+)", l)
+        if m:
+            return m.group(1).strip()
+    return ""
+
+
+def _eve_announcer(script_doc_id: str) -> str:
+    """The EVE rundown's announcer chips (both sides of the '/') rendered as
+    one line, e.g. 'ผปก. EVE / TikTok: @sandrahanutsaha'."""
+    lines = _export_lines(script_doc_id)
+    for i, l in enumerate(lines):
+        if "BRIEF EVENING" in l:
+            for j in range(i + 1, min(i + 8, len(lines))):
+                if "ผู้ประกาศ" in lines[j]:
+                    for k in range(j + 1, min(j + 3, len(lines))):
+                        if lines[k].strip():
+                            return lines[k].strip()
+            break
+    return ""
 
 
 def _text(e: dict) -> str:
@@ -293,10 +315,13 @@ def extract_recording_docs(script_doc_id: str) -> dict:
     anchor_name = _anchor_name(script_doc_id)
     if not anchor_name:
         warnings.append("NL header has no anchor name after 'ANCHOR:' — the script's title is blank; fill it in the RUNDOWN doc by hand")
+    eve_announcer = _eve_announcer(script_doc_id)
+    if not eve_announcer:
+        warnings.append("EVE announcer chips render empty — fill the announcer line by hand")
 
     return {"script_doc": extract_doc_id(script_doc_id), "date": date_iso,
             "rundown_name": f"RUNDOWN NL-NWB {date_ddmmyy}" if date_ddmmyy else "",
-            "anchor_name": anchor_name,
+            "anchor_name": anchor_name, "eve_announcer": eve_announcer,
             "eve": eve, "nl": nl, "prompter_eve": eve_p, "prompter_nl": nl_p,
             "errors": errors, "warnings": warnings}
 
@@ -329,6 +354,7 @@ def preview_recording_docs(script_doc_id: str, rundown_doc_id: str | None = None
         "date": data["date"],
         "rundown_name": data["rundown_name"],
         "anchor_name": data.get("anchor_name", ""),
+        "eve_announcer": data.get("eve_announcer", ""),
         "rundown_doc": extract_doc_id(rundown_doc_id) if rundown_doc_id else DEFAULT_RUNDOWN_DOC,
         "prompter_doc": extract_doc_id(prompter_doc_id) if prompter_doc_id else DEFAULT_PROMPTER_DOC,
         "eve": {"header": data["eve"]["header"],
@@ -636,7 +662,16 @@ def apply_recording_docs(script_doc_id: str, rundown_doc_id: str | None = None,
         or [(data["eve"]["header"], _header_text_style(data))]
     seq: list[dict] = [{"kind": "para", "runs": eve_runs,
                         "para_style": data["eve"].get("header_style") or {"namedStyleType": "TITLE"}}]
-    seq += _space_rundown_blocks(data["eve"]["blocks"])
+    eve_blocks = _space_rundown_blocks(data["eve"]["blocks"])
+    if data.get("eve_announcer"):
+        # the bare '/' line between the announcer chips → the chips' current
+        # items (rendered, e.g. 'ผปก. EVE / TikTok: @sandrahanutsaha')
+        for b in eve_blocks:
+            if b["kind"] == "para" and "".join(t for t, _ in b["runs"]).strip() == "/":
+                style = _dominant_style(b["runs"]) or {"bold": True}
+                b["runs"] = [(data["eve_announcer"], style)]
+                break
+    seq += eve_blocks
     # NL header: source runs verbatim, the anchor name appended in the last run's style
     nl_runs = _strip_break_runs(data["nl"].get("header_runs"))
     if data.get("anchor_name"):
