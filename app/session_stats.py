@@ -307,12 +307,12 @@ def _parse_ag_groups(data: dict) -> dict[str, dict]:
 
 _ag_quota_cache: tuple[float, dict] = (0.0, {})
 
-# Last daemon reading persisted to disk: while no Antigravity session runs,
-# weekly usage cannot change, so a cached week reading stays true between
-# runs (capped anyway); the 5h window rolls on wall time, so its reading
-# expires as fast as the in-memory one.
+# Last daemon reading persisted to disk. Both windows are FIXED (they reset
+# at a wall-clock time, they don't slide), and usage can only change while an
+# Antigravity session runs — so a cached reading stays exactly true while the
+# machine is idle: session (5h) fields until their own reset_at passes, week
+# fields for 6h (sanity cap; the week window itself is days long).
 _AG_CACHE_FILE = Path.home() / ".cache" / "railjack" / "ag-quota.json"
-_AG_SESSION_TTL = 600.0
 _AG_WEEK_TTL = 6 * 3600.0
 
 
@@ -324,18 +324,26 @@ def _save_ag_disk(groups: dict[str, dict]) -> None:
         pass
 
 
+def _iso_ts(iso: str) -> float:
+    try:
+        return datetime.fromisoformat(iso.replace("Z", "+00:00")).timestamp()
+    except Exception:
+        return 0.0
+
+
 def _load_ag_disk() -> dict[str, dict]:
-    """Persisted daemon quota with per-field TTL applied."""
+    """Persisted daemon quota, validity-bounded per field (see _AG_CACHE_FILE)."""
     try:
         d = json.loads(_AG_CACHE_FILE.read_text())
         age = time.time() - float(d.get("ts", 0))
+        now = time.time()
         out: dict[str, dict] = {}
         for key, lane in (d.get("groups") or {}).items():
             fresh: dict = {}
-            if age < _AG_SESSION_TTL:
-                for k in ("session_pct", "reset_at"):
-                    if k in lane:
-                        fresh[k] = lane[k]
+            reset_at = lane.get("reset_at")
+            if "session_pct" in lane and reset_at and _iso_ts(reset_at) > now:
+                fresh["session_pct"] = lane["session_pct"]
+                fresh["reset_at"] = reset_at
             if age < _AG_WEEK_TTL:
                 for k in ("week_pct", "week_reset_at"):
                     if k in lane:

@@ -243,6 +243,7 @@ interface ReportAutofillDay {
   nbtwb_url?: string | null;
   newsline_linked?: boolean;
   nbtwb_linked?: boolean;
+  newsline_manual?: boolean;
   newsline_slot?: {
     start: number;
     end: number;
@@ -270,6 +271,7 @@ interface ReportAutofillPreviewResponse {
   };
   days: ReportAutofillDay[];
   missing: ReportAutofillMissing[];
+  errors?: string[];
   total_days?: number;
   filled_count?: number;
   _fatal?: string;
@@ -738,6 +740,7 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
   const [reportDocs, setReportDocs] = useState<ReportDocItem[]>([]);
   const [loadingReportDocs, setLoadingReportDocs] = useState<boolean>(false);
   const [autofillPreview, setAutofillPreview] = useState<ReportAutofillPreviewResponse | null>(null);
+  const [manualLinks, setManualLinks] = useState<Record<string, string>>({});
   const [autofillApplyResult, setAutofillApplyResult] = useState<ReportAutofillApplyResponse | null>(null);
   const [autofillLoading, setAutofillLoading] = useState<boolean>(false);
   const [autofillApplying, setAutofillApplying] = useState<boolean>(false);
@@ -1028,6 +1031,7 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
         headers: CT,
         body: JSON.stringify({
           doc_id: autofillDocId.trim(),
+          manual_links: manualLinks,
         }),
       });
       if (!res.ok) {
@@ -1054,6 +1058,7 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
         headers: CT,
         body: JSON.stringify({
           doc_id: autofillDocId.trim(),
+          manual_links: manualLinks,
         }),
       });
       if (!res.ok) {
@@ -4001,6 +4006,11 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
                                     >
                                       {day.newsline_url}
                                     </a>
+                                    {day.newsline_manual && (
+                                      <span className="label text-[10px]" style={{ color: "var(--color-hazard)" }}>
+                                        (manual)
+                                      </span>
+                                    )}
                                     {day.newsline_linked && (
                                       <span className="label text-[10px]" style={{ color: "var(--color-muted)" }}>
                                         (already linked)
@@ -4008,9 +4018,21 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
                                     )}
                                   </div>
                                 ) : (
-                                  <div className="flex items-center gap-1.5">
+                                  <div className="flex items-center gap-1.5 flex-wrap">
                                     <span className="pip pip--hazard" />
                                     <span style={{ color: "var(--color-hazard)" }}>— missing —</span>
+                                    {day.date_ce && (
+                                      <input
+                                        value={manualLinks[day.date_ce] || ""}
+                                        onChange={(e) =>
+                                          setManualLinks((m) => ({ ...m, [day.date_ce as string]: e.target.value }))
+                                        }
+                                        placeholder="paste FB link → FIND LINKS"
+                                        title="Paste any FB link form (share/v/…, videos/…, reel/…) — resolved to canonical on FIND LINKS"
+                                        className="bg-transparent border border-edge px-1.5 py-0.5 text-[11px] mono outline-none focus:border-[var(--color-signal)]"
+                                        style={{ width: 190, color: "var(--color-phosphor)" }}
+                                      />
+                                    )}
                                   </div>
                                 )}
                               </td>

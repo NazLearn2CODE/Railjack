@@ -2339,6 +2339,71 @@ def _ddg_search_newsline(date_ce: datetime.date | str, fetch_fn=None) -> str | N
     return None
 
 
+_FB_UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"
+_FB_VID_PATH = re.compile(r'facebook\.com/([^/]+)/videos/(?:([^/?#]+)/)?(\d+)/?')
+_FB_REEL = re.compile(r'facebook\.com/reel/(\d+)')
+_FB_WATCH = re.compile(r'[?&]v=(\d+)')
+_NL_SLUG_DATE = re.compile(r'newsline-(\d{1,2})-([a-z]+)-(\d{4})')
+
+
+def _fb_canonical(url: str) -> dict | None:
+    """Fast path (no network): canonicalize a URL already in videos/<slug>/<id>,
+    videos/<id>, reel/<id> or watch?v=<id> form to <page>/videos/<id>/.
+    A NEWSLINE date embedded in the slug (newsline-<d>-<month>-<yyyy>) is
+    returned as date_iso so callers can map the link to a report day."""
+    if not url:
+        return None
+    m = _FB_VID_PATH.search(url)
+    if m:
+        page, slug, vid = m.groups()
+        date_iso = None
+        if slug:
+            dm = _NL_SLUG_DATE.search(slug.lower())
+            if dm and dm.group(2).upper() in MONTH_MAP_EN:
+                mon = MONTH_MAP_EN[dm.group(2).upper()]
+                date_iso = f"{int(dm.group(3)):04d}-{mon:02d}-{int(dm.group(1)):02d}"
+        return {"url": f"https://www.facebook.com/{page}/videos/{vid}/",
+                "video_id": vid, "date_iso": date_iso}
+    m = _FB_REEL.search(url)
+    if m:
+        return {"url": f"https://www.facebook.com/nbtworld/videos/{m.group(1)}/",
+                "video_id": m.group(1), "date_iso": None}
+    m = _FB_WATCH.search(url)
+    if m:
+        return {"url": f"https://www.facebook.com/nbtworld/videos/{m.group(1)}/",
+                "video_id": m.group(1), "date_iso": None}
+    return None
+
+
+def resolve_fb_link(url: str, fetch_fn=None) -> dict | None:
+    """Canonicalize any public Facebook video link to <page>/videos/<id>/.
+
+    Share links (share/v/<code>, fb.watch/<code>) and post links resolve via
+    one public page fetch + the og:url tag (no auth needed). Returns
+    {url, video_id, date_iso} or None when the link isn't a usable FB video.
+    """
+    got = _fb_canonical((url or "").strip())
+    if got:
+        return got
+    final_url = ""
+    try:
+        if fetch_fn is not None:
+            html = fetch_fn((url or "").strip())
+        else:
+            req = urllib.request.Request((url or "").strip(), headers={"User-Agent": _FB_UA})
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                html = resp.read(200_000).decode("utf-8", errors="replace")
+                final_url = resp.geturl()
+    except Exception:
+        return None
+    m = re.search(r'(?:og:url"\s*content=|canonical"\s*href=)"([^"]+)"', html or "")
+    if m:
+        got = _fb_canonical(m.group(1))
+        if got:
+            return got
+    return _fb_canonical(final_url)
+
+
 def fetch_yt_listing(runner=None) -> list[tuple[str, str]]:
     """Fetch recent video listing from @NBTWorldOfficial via yt-dlp."""
     yt_bin = os.path.expanduser("~/.local/bin/yt-dlp")
@@ -2419,6 +2484,7 @@ def preview_report_autofill(
     ddg_fn=None,
     yt_fn=None,
     yt_listing: list[tuple[str, str]] | None = None,
+    manual_links: dict[str, str] | None = None,
 ) -> dict:
     """Scan report Doc, find unlinked show slots, search links for NEWSLINE & NBT WB."""
     clean_id = extract_doc_id(doc_id)
@@ -2434,18 +2500,31 @@ def preview_report_autofill(
     cached_yt = yt_listing
     days = []
     missing = []
+    errors: list[str] = []
+    manual_links = manual_links or {}
 
     for slot in slots:
         date_ce = slot["date_ce"]
         date_display = slot["date_display"]
         nl_info = slot["newsline"]
         nbtwb_info = slot["nbtwb"]
+        day_key = date_ce.isoformat() if isinstance(date_ce, datetime.date) else str(date_ce)
 
-        # 1. NEWSLINE — Brave first, DDG-via-Jina fallback (slug-verified) on miss.
+        # 1. NEWSLINE — manual paste first (human-verified; any FB link form,
+        # resolved to canonical), then Brave → DDG-via-Jina (slug-verified).
         # When any search fn is injected the caller owns the whole chain (no
         # implicit network in tests); only the no-injection path goes live.
+        manual = manual_links.get(day_key) or manual_links.get(date_display)
+        manual_ok = False
         if nl_info.get("linked") and nl_info.get("url"):
             newsline_url = nl_info["url"]
+        elif manual:
+            resolved = resolve_fb_link(manual)
+            if resolved:
+                newsline_url, manual_ok = resolved["url"], True
+            else:
+                newsline_url = None
+                errors.append(f"manual {day_key}: could not resolve FB link")
         else:
             if brave_fn is not None or ddg_fn is not None:
                 newsline_url = ((brave_fn(date_ce) if brave_fn else None)
@@ -2466,11 +2545,12 @@ def preview_report_autofill(
 
         day_entry = {
             "date_display": date_display,
-            "date_ce": date_ce.isoformat() if isinstance(date_ce, datetime.date) else str(date_ce),
+            "date_ce": day_key,
             "newsline_url": newsline_url,
             "nbtwb_url": nbtwb_url,
             "newsline_linked": bool(nl_info.get("linked")),
             "nbtwb_linked": bool(nbtwb_info.get("linked")),
+            "newsline_manual": manual_ok,
             "newsline_slot": nl_info,
             "nbtwb_slot": nbtwb_info,
         }
@@ -2495,6 +2575,7 @@ def preview_report_autofill(
         },
         "days": days,
         "missing": missing,
+        "errors": errors,
         "total_days": len(days),
         "filled_count": sum(1 for d in days if d["newsline_url"] and d["nbtwb_url"]),
     }
@@ -2509,6 +2590,7 @@ def apply_report_autofill(
     ddg_fn=None,
     yt_fn=None,
     yt_listing: list[tuple[str, str]] | None = None,
+    manual_links: dict[str, str] | None = None,
 ) -> dict:
     """Auto-fill found show video links into Google Doc via batchUpdate."""
     clean_id = extract_doc_id(doc_id)
@@ -2522,6 +2604,7 @@ def apply_report_autofill(
         ddg_fn=ddg_fn,
         yt_fn=yt_fn,
         yt_listing=yt_listing,
+        manual_links=manual_links,
     )
 
     requests = []
@@ -2685,12 +2768,19 @@ def main(argv=None):
         p.add_argument("--doc-id", required=True, help="Report Doc ID or URL")
         p.add_argument("--apply", action="store_true", help="Apply updates to Google Doc (default is preview)")
         p.add_argument("--dry-run", action="store_true", help="Dry run preview mode")
+        p.add_argument("--manual-link", action="append", default=None,
+                       metavar="DATE=URL", help="Manual NEWSLINE link for a day (DATE=FB-url, repeatable)")
         args = p.parse_args(argv[1:])
+        manual = {}
+        for pair in args.manual_link or []:
+            if "=" in pair:
+                k, v = pair.split("=", 1)
+                manual[k.strip()] = v.strip()
         dry = not args.apply or args.dry_run
         if args.apply and not args.dry_run:
-            res = apply_report_autofill(args.doc_id, dry_run=False)
+            res = apply_report_autofill(args.doc_id, dry_run=False, manual_links=manual)
         else:
-            res = preview_report_autofill(args.doc_id)
+            res = preview_report_autofill(args.doc_id, manual_links=manual)
         print(json.dumps(res, ensure_ascii=False))
         return
 

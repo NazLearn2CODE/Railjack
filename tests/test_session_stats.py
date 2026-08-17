@@ -84,24 +84,40 @@ def test_norm_ag_model_strips_effort_suffix():
     assert session_stats._norm_ag_model("") == ""
 
 
-def test_ag_disk_cache_split_ttl(tmp_path, monkeypatch):
-    # Weekly usage can only change while an Antigravity session runs, so the
-    # week fields outlive the run (6h); the 5h window rolls on wall time, so
-    # its fields expire with the usual 10-min last-good TTL.
+def test_ag_disk_cache_validity_bounds(tmp_path, monkeypatch):
+    # Both windows are fixed and usage only changes while an Antigravity
+    # session runs, so a cached reading stays true while idle: session (5h)
+    # fields until their own reset_at passes (age is irrelevant), week fields
+    # for the 6h sanity cap.
+    import datetime as _dt
     cache = tmp_path / "ag-quota.json"
     monkeypatch.setattr(session_stats, "_AG_CACHE_FILE", cache)
-    full = {"gemini": {"session_pct": 8, "reset_at": "2026-08-17T06:26:00Z",
+    future = (_dt.datetime.now(_dt.timezone.utc) + _dt.timedelta(hours=2)
+              ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    past = (_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(hours=1)
+            ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    full = {"gemini": {"session_pct": 8, "reset_at": future,
                        "week_pct": 4, "week_reset_at": "2026-08-22T02:50:22Z"}}
-    session_stats._save_ag_disk(full)
-    assert session_stats._load_ag_disk() == full  # fresh: everything kept
 
-    stale_session = {"ts": session_stats.time.time() - 700, "groups": full}
-    cache.write_text(session_stats.json.dumps(stale_session))
+    session_stats._save_ag_disk(full)
+    assert session_stats._load_ag_disk() == full  # window live: everything kept
+
+    # old sample, still-live window → session fields persist (no 10-min TTL)
+    old_but_live = {"ts": session_stats.time.time() - 3600, "groups": full}
+    cache.write_text(session_stats.json.dumps(old_but_live))
+    assert session_stats._load_ag_disk() == full
+
+    # window expired → session fields drop, week fields stay under the 6h cap
+    expired = {"gemini": {"session_pct": 8, "reset_at": past,
+                          "week_pct": 4, "week_reset_at": "2026-08-22T02:50:22Z"}}
+    cache.write_text(session_stats.json.dumps(
+        {"ts": session_stats.time.time() - 700, "groups": expired}))
     assert session_stats._load_ag_disk() == {
         "gemini": {"week_pct": 4, "week_reset_at": "2026-08-22T02:50:22Z"}}
 
-    stale_all = {"ts": session_stats.time.time() - 7 * 3600, "groups": full}
-    cache.write_text(session_stats.json.dumps(stale_all))
+    # everything out of validity → {}
+    cache.write_text(session_stats.json.dumps(
+        {"ts": session_stats.time.time() - 7 * 3600, "groups": expired}))
     assert session_stats._load_ag_disk() == {}
 
     cache.write_text("not json")

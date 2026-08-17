@@ -346,11 +346,17 @@ def _newsline_report_autofill_argv(body: dict) -> list[str]:
     doc_id = body.get("doc_id")
     if doc_id is None or not str(doc_id).strip():
         raise HTTPException(400, "doc_id required")
-    return [
+    argv = [
         PY, str(NEWSLINE_REPORTS),
         "report-autofill",
         "--doc-id", str(doc_id).strip(),
     ]
+    manual = body.get("manual_links")
+    if isinstance(manual, dict):
+        for k, v in manual.items():
+            if str(k).strip() and str(v).strip():
+                argv += ["--manual-link", f"{str(k).strip()}={str(v).strip()}"]
+    return argv
 
 
 @router.post("/api/newsroom/newsline-reports/autofill-preview")

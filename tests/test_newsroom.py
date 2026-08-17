@@ -3296,3 +3296,35 @@ def test_ddg_search_newsline_slug_verified():
     def _boom(q):
         raise RuntimeError("net down")
     assert nl_rep._ddg_search_newsline("2026-08-13", fetch_fn=_boom) is None
+
+
+def test_resolve_fb_link_all_forms():
+    nl_rep = _load_newsline_reports()
+    # fast paths — no network
+    assert nl_rep.resolve_fb_link(
+        "https://www.facebook.com/nbtworld/videos/newsline-17-august-20261-pm-departs/1055340527496679/"
+    ) == {"url": "https://www.facebook.com/nbtworld/videos/1055340527496679/",
+          "video_id": "1055340527496679", "date_iso": "2026-08-17"}
+    assert nl_rep.resolve_fb_link(
+        "https://www.facebook.com/nbtworld/videos/602161727157099/"
+    ) == {"url": "https://www.facebook.com/nbtworld/videos/602161727157099/",
+          "video_id": "602161727157099", "date_iso": None}
+    assert nl_rep.resolve_fb_link(
+        "https://www.facebook.com/reel/1055340527496679/?rdid=bbucjyNrAmg7norC"
+    )["video_id"] == "1055340527496679"
+    assert nl_rep.resolve_fb_link(
+        "https://www.facebook.com/watch/?v=1428624359155157"
+    )["url"] == "https://www.facebook.com/nbtworld/videos/1428624359155157/"
+    # share link: resolved via one public fetch + og:url (Naz's real link, 2026-08-18)
+    og_html = ('<meta property="og:url" content="https://www.facebook.com/nbtworld/videos/'
+               'newsline-17-august-20261-pm-departs-for-sydney-kicking-off-first-official-visit-/1055340527496679/">')
+    got = nl_rep.resolve_fb_link("https://www.facebook.com/share/v/1HA7rweTFM/", fetch_fn=lambda u: og_html)
+    assert got == {"url": "https://www.facebook.com/nbtworld/videos/1055340527496679/",
+                   "video_id": "1055340527496679", "date_iso": "2026-08-17"}
+    # non-FB / dead links → None, never a crash
+    assert nl_rep.resolve_fb_link("https://www.youtube.com/watch?v=abc") is None
+    assert nl_rep.resolve_fb_link("not a url") is None
+    assert nl_rep.resolve_fb_link("") is None
+    def _dead(u):
+        raise RuntimeError("net down")
+    assert nl_rep.resolve_fb_link("https://www.facebook.com/share/v/zzz/", fetch_fn=_dead) is None
