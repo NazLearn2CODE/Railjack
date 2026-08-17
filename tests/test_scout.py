@@ -442,3 +442,32 @@ def test_fireside_edit_flow(monkeypatch):
     assert res_deg["mode"] == "degraded"
     assert "couldn't read the URL" in res_deg["error"]
 
+
+
+def test_parse_reddit_posts_real_shape():
+    # verbatim opencli reddit search -f json shape (2026-08-17)
+    rows = [{"title": "Visa thread", "url": "https://www.reddit.com/r/Thailand/comments/1/x/",
+             "subreddit": "r/Thailand", "created_utc": 1786754473,
+             "selftext": "long discussion"}]
+    arts = thailandnow._parse_reddit_posts(json.dumps(rows))
+    assert arts == [{"title": "Visa thread", "url": rows[0]["url"],
+                     "snippet": "long discussion", "date": "2026-08-15",
+                     "lang": "en", "source": "reddit.com/r/Thailand"}]
+    assert thailandnow._parse_reddit_posts("not json") == []
+    assert thailandnow._parse_reddit_posts('{"data": []}') == []  # non-list → []
+
+
+def test_parse_twitter_posts_opencli_shape_recency_and_short_drop():
+    # opencli twitter tweets -f json: created_at / author as plain string
+    rows = [
+        {"id": "111", "text": "x" * 60, "created_at": "Mon Aug 17 08:00:00 +0000 2026",
+         "author": "ThaiPBSWorld"},
+        {"id": "222", "text": "short",  # dropped: <40 chars
+         "created_at": "Mon Aug 17 08:00:00 +0000 2026", "author": "ThaiPBSWorld"},
+        {"id": "333", "text": "y" * 60,  # dropped: too old
+         "created_at": "Mon Jan 01 08:00:00 +0000 2026", "author": "ThaiPBSWorld"},
+    ]
+    arts = thailandnow._parse_twitter_posts(json.dumps(rows), "fallback", days=7)
+    assert len(arts) == 1
+    assert arts[0]["source"] == "x.com/ThaiPBSWorld"
+    assert arts[0]["url"] == "https://x.com/ThaiPBSWorld/status/111"

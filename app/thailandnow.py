@@ -20,10 +20,11 @@ import os
 import re
 import signal
 import time
+import unicodedata
 import urllib.parse
 from collections import deque
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import html
 from html.parser import HTMLParser
 from pathlib import Path
@@ -876,6 +877,179 @@ async def _extract_events_from(url: str, today_iso: str, window_end_iso: str, ca
         return [], f"extract {url}: {e}"
 
 
+# --- social lanes (agent-reach: OpenCLI) --------------------------------------
+# Login-backed free backends (home-verified 2026-08-17): reddit + facebook +
+# twitter via OpenCLI (rides the Chrome session through its daemon). Every lane
+# no-ops to [] when the CLI/auth is missing, so the scout stays green without
+# them. Ported from Somatic 912efd2; twitter lane adapted twitter-cli → opencli.
+
+_SOCIAL_TIMEOUT = 90.0
+_LOCAL_BIN = Path.home() / ".local" / "bin"
+
+
+def _social_bin(name: str) -> str:
+    """Prefer ~/.local/bin — systemd services don't carry the fnm PATH."""
+    p = _LOCAL_BIN / name
+    return str(p) if p.exists() else name
+
+
+async def _social_cli(argv: list[str], timeout: float = _SOCIAL_TIMEOUT) -> str:
+    """Run one social-backend CLI, returning stdout. Raises on non-zero/timeout."""
+    proc = await asyncio.create_subprocess_exec(
+        *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+    out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    if proc.returncode != 0:
+        raise RuntimeError((err or out).decode(errors="replace")[:120])
+    return out.decode(errors="replace")
+
+
+_THAI_RE = re.compile(r"[฀-๿]")
+
+
+def _is_thai(text: str) -> bool:
+    return bool(_THAI_RE.search(text or ""))
+
+
+def _parse_reddit_posts(text: str) -> list[dict]:
+    """opencli `reddit search -f json` → scout articles (source = subreddit,
+    so the 1-per-domain filter keeps several threads)."""
+    try:
+        rows = json.loads(text)
+    except Exception:
+        return []
+    if not isinstance(rows, list):
+        return []
+    arts: list[dict] = []
+    for r in rows:
+        url = (r.get("url") or "").strip()
+        title = (r.get("title") or "").strip()
+        if not title or not url:
+            continue
+        try:
+            date = datetime.fromtimestamp(int(r.get("created_utc")), tz=timezone.utc).strftime("%Y-%m-%d")
+        except Exception:
+            date = ""
+        body = (r.get("selftext") or "").strip()
+        sub = (r.get("subreddit") or "reddit").strip().removeprefix("r/").removeprefix("/r/")
+        arts.append({"title": title[:200], "url": url,
+                     "snippet": (body or title)[:300], "date": date,
+                     "lang": "th" if _is_thai(title) else "en",
+                     "source": f"reddit.com/r/{sub}"})
+    return arts
+
+
+_TW_CREATED = "%a %b %d %H:%M:%S %z %Y"
+
+
+def _parse_twitter_posts(text: str, handle: str, days: int, limit: int = 6) -> list[dict]:
+    """opencli `twitter tweets -f json` → scout articles (source = x.com/<handle>),
+    recency-filtered to ``days``. Short posts are dropped."""
+    try:
+        data = json.loads(text)
+        rows = data.get("data") if isinstance(data, dict) else data
+    except Exception:
+        return []
+    if not isinstance(rows, list):
+        return []
+    arts: list[dict] = []
+    cutoff = datetime.now() - timedelta(days=days)
+    for r in rows:
+        created_raw = (r.get("created_at") or r.get("createdAt") or "").strip()
+        try:
+            created = datetime.strptime(created_raw, _TW_CREATED).replace(tzinfo=None)
+        except ValueError:
+            continue
+        if created < cutoff:
+            continue
+        txt = re.sub(r"\s+", " ", (r.get("text") or "").strip())
+        if len(txt) < 40:
+            continue
+        author = r.get("author")
+        screen = ((author.get("screenName") if isinstance(author, dict) else author) or handle).strip()
+        arts.append({"title": txt[:120],
+                     "url": f"https://x.com/{screen}/status/{r.get('id', '')}",
+                     "snippet": txt[:300], "date": created.strftime("%Y-%m-%d"),
+                     "lang": "th" if _is_thai(txt) else "en",
+                     "source": f"x.com/{screen}"})
+        if len(arts) >= limit:
+            break
+    return arts
+
+
+# FB style: "FRI, AUG 28 AT 11 AM" — all-caps month, optional comma, no year
+_FB_DATE = re.compile(r"\b([A-Za-z]{3})[ ,]+(\d{1,2}) AT \d{1,2} (?:AM|PM)\b")
+
+
+def _fb_year_resolve(month: int, day: int, today: datetime, window_end_iso: str) -> str | None:
+    """FB event text carries no year — pick the occurrence inside the window."""
+    for year in (today.year, today.year + 1):
+        try:
+            iso = datetime(year, month, day).strftime("%Y-%m-%d")
+        except ValueError:
+            return None
+        if today.strftime("%Y-%m-%d") <= iso <= window_end_iso:
+            return iso
+    return None
+
+
+def _parse_fb_events(text: str, today_iso: str, window_end_iso: str) -> list[dict]:
+    """opencli `facebook search -f json` rows with title=='Events' →
+    _normalize_event input dicts. Bold-unicode text is NFKC-normalized; the
+    date marker (e.g. 'FRI, AUG 28 AT 11 AM AND 2 MORE') resolves the year."""
+    try:
+        rows = json.loads(text)
+    except Exception:
+        return []
+    if not isinstance(rows, list):
+        return []
+    today = datetime.strptime(today_iso, "%Y-%m-%d")
+    out: list[dict] = []
+    for r in rows:
+        if (r.get("title") or "").strip() != "Events":
+            continue
+        raw = unicodedata.normalize("NFKC", r.get("text") or "")
+        m = _FB_DATE.search(raw)
+        if not m:
+            continue
+        month = MONTHS_MAP.get(m.group(1)[:3].lower())
+        start = _fb_year_resolve(month, int(m.group(2)), today, window_end_iso) if month else None
+        if not start:
+            continue
+        tail = re.sub(r"^\s*(?:AND \d+ MORE\s*)+", "", raw[m.end():])
+        name = re.split(r"\s·\s|\s?\d+ (?:people|going)", tail, 1)[0].strip(" ·–-")
+        out.append({"title": (name or "Facebook event")[:200],
+                    "url": (r.get("url") or "").strip(),
+                    "start_date": start,
+                    "summary": raw[:300]})
+    return out
+
+
+async def _social_news_lanes(main_query: str, days: int) -> tuple[list[dict], list[str]]:
+    """Reddit + Twitter audience-signal for the story scout. Lane errors are
+    soft — appended to the scout's error list, never fatal."""
+    arts: list[dict] = []
+    errs: list[str] = []
+    reddit_q = main_query.replace(" news", "").strip()
+    if reddit_q:
+        try:
+            out = await _social_cli([_social_bin("opencli"), "reddit", "search", reddit_q,
+                                     "--limit", "8", "-f", "json"])
+            arts.extend(_parse_reddit_posts(out))
+        except Exception as e:
+            errs.append(f"reddit: {e}")
+    # anchor accounts verified live 2026-08-17 (home: opencli twitter tweets) —
+    # override via options.social_twitter_accounts
+    for h in (_opts().get("social_twitter_accounts")
+              or ["ThaiPBSWorld", "BangkokPostNews", "Thairath_News"])[:3]:
+        try:
+            out = await _social_cli([_social_bin("opencli"), "twitter", "tweets", f"@{h}",
+                                     "--limit", "15", "-f", "json"])
+            arts.extend(_parse_twitter_posts(out, h, days))
+        except Exception as e:
+            errs.append(f"twitter @{h}: {e}")
+    return arts, errs
+
+
 @router.post("/api/thailandnow/events/scout")
 async def scout_events(payload: dict = Body(default={})):
     """Events radar (R5) — future Thailand events only, multi-source, dated + filtered.
@@ -944,6 +1118,20 @@ async def scout_events(payload: dict = Body(default={})):
             urls.append(u)
         if len(urls) >= 15:
             break
+
+    # social lane (agent-reach/OpenCLI): Facebook events — Jina can't reach FB
+    # (login-walled); OpenCLI rides the Chrome session. Lane no-ops without it.
+    fb_events: list[dict] = []
+    try:
+        fb_q = (f"Thailand {category} event".replace("  ", " ").strip()
+                if category else queries[0])
+        fb_out = await _social_cli([_social_bin("opencli"), "facebook", "search", fb_q,
+                                    "--limit", "10", "-f", "json"])
+        fb_events = [ev for ev in _parse_fb_events(fb_out, today_iso, window_end_iso)
+                     if ev.get("title") and ev.get("url")]
+    except Exception as e:
+        errors.append(f"facebook: {e}")
+
     results = await asyncio.gather(*[
         _extract_events_from(u, today_iso, window_end_iso, category, "scout") for u in urls
     ])
@@ -954,6 +1142,10 @@ async def scout_events(payload: dict = Body(default={})):
             continue
         for ev in evs:
             events.setdefault(ev["url"] or ev["title"], ev)
+    for ev in fb_events:
+        n = _normalize_event(ev, today_iso, window_end_iso, "facebook")
+        if n:
+            events.setdefault(n["url"] or n["title"], n)
     ordered = sorted(events.values(), key=lambda e: e.get("start_date") or "9999")
     return {"events": ordered, "count": len(ordered), "errors": errors,
             "window": {"from": today_iso, "to": window_end_iso, "weeks": weeks}}
@@ -1258,6 +1450,13 @@ async def _scout_news(query: str | None = None, category: str | None = None, day
             if not _scout_date_in_range(d_str, cutoff_iso, today_iso):
                 continue  # strict: undated or out-of-window dropped
             ordered.append(res)
+
+    # social lanes (agent-reach/OpenCLI): reddit threads + twitter anchor
+    # accounts — audience signal the wires can't give; pre-fetched, no Jina.
+    social_arts, social_errs = await _social_news_lanes(query or "Thailand news", days)
+    errors.extend(social_errs)
+    ordered.extend(a for a in social_arts
+                   if _scout_date_in_range(a.get("date") or "", cutoff_iso, today_iso))
 
     ordered = await _scout_rerank(ordered)
 

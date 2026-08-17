@@ -100,3 +100,22 @@ def test_convert_soft_fails_on_unparseable_handoff(tmp_path, monkeypatch):
     res = asyncio.run(convert_ide_events({}))
     assert res == {"events": [], "count": 0,
                    "errors": ["no IDE handoff file — run 📋 IDE SCOUT first"]}
+
+
+def test_parse_fb_events_real_shape_bold_unicode():
+    # verbatim structure from opencli facebook search (2026-08-17 probe)
+    rows = [
+        {"title": "Events", "url": "https://www.facebook.com/events/1805396480911086/",
+         "text": ("Events FRI, AUG 28 AT 11 AM AND 2 MORE"
+                  "𝗕𝗮𝗻𝗴𝗸𝗼𝗸 𝗜𝗻𝘁𝗲𝗿𝗻𝗮𝘁𝗶𝗼𝗻𝗮𝗹 𝗚𝗮𝗺𝗲 𝗙𝗲𝘀𝘁𝗶𝘃𝗮𝗹 𝟮𝟬𝟮𝟲\n"
+                  "28 people interested · 8th floor of")},
+        {"title": "Pages", "url": "https://www.facebook.com/x", "text": "noise"},
+    ]
+    out = thailandnow._parse_fb_events(json.dumps(rows), "2026-08-17", "2026-09-14")
+    assert len(out) == 1
+    ev = out[0]
+    assert ev["title"] == "Bangkok International Game Festival 2026"  # NFKC de-bolded
+    assert ev["start_date"] == "2026-08-28"
+    assert ev["url"].endswith("1805396480911086/")
+    # out-of-window dates are dropped
+    assert thailandnow._parse_fb_events(json.dumps(rows), "2026-10-01", "2026-11-01") == []
