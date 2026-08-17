@@ -49,7 +49,7 @@ WRAP_AT_WORDS = 7
 # ---------------------------------------------------------------- helpers
 
 _TEXT_STYLE_KEYS = ("bold", "italic", "underline", "weightedFontFamily",
-                    "fontSize", "foregroundColor")
+                    "fontSize", "foregroundColor", "backgroundColor")
 _PARA_STYLE_KEYS = ("namedStyleType", "alignment", "indentStart",
                     "indentFirstLine", "spaceAbove", "spaceBelow", "lineSpacing")
 
@@ -106,6 +106,15 @@ def _dominant_style(runs: list[tuple[str, dict]]) -> dict:
     return {}
 
 
+def _strip_break_runs(runs: list[tuple[str, dict]] | None) -> list[tuple[str, dict]]:
+    """Drop trailing newline-only runs — _write_para adds the paragraph break
+    itself, so a captured one would double it."""
+    out = list(runs or [])
+    while out and not out[-1][0].strip():
+        out = out[:-1]
+    return out
+
+
 def _table_cell_paras(e: dict) -> list[dict]:
     try:
         return [p for p in e["table"]["tableRows"][0]["tableCells"][0]["content"] if "paragraph" in p]
@@ -153,6 +162,7 @@ def _extract_rundown(els: list[dict]) -> dict:
     """The rundown LIST region of a tab → header + copyable blocks (styled)."""
     header = ""
     header_style: dict = {}
+    header_runs: list[tuple[str, dict]] = []
     blocks: list[dict] = []
     in_sb = False
     started = False
@@ -163,6 +173,7 @@ def _extract_rundown(els: list[dict]) -> dict:
             if _style_name(e) == "TITLE":
                 header = txt
                 header_style = _para_style(e)
+                header_runs = _runs(e)  # colors/highlight travel with the copy
                 started = True
                 continue
             if not started or not txt:
@@ -197,7 +208,7 @@ def _extract_rundown(els: list[dict]) -> dict:
             if "โยนเบรค" in cell_text:
                 break  # EVE: the throw-to-break table is not part of the rundown
             blocks.append({"kind": "table", "cell": _table_cell(e)})
-    return {"header": header, "header_style": header_style, "blocks": blocks}
+    return {"header": header, "header_style": header_style, "header_runs": header_runs, "blocks": blocks}
 
 
 def _extract_prompter(els: list[dict]) -> dict:
@@ -621,12 +632,22 @@ def apply_recording_docs(script_doc_id: str, rundown_doc_id: str | None = None,
             _api("PATCH", f"https://www.googleapis.com/drive/v3/files/{rundown_id}",
                  body={"name": data["rundown_name"]})
             out["renamed_to"] = data["rundown_name"]
-    seq: list[dict] = [{"kind": "para", "runs": [(data["eve"]["header"],
-                                                  _header_text_style(data))],
+    eve_runs = _strip_break_runs(data["eve"].get("header_runs")) \
+        or [(data["eve"]["header"], _header_text_style(data))]
+    seq: list[dict] = [{"kind": "para", "runs": eve_runs,
                         "para_style": data["eve"].get("header_style") or {"namedStyleType": "TITLE"}}]
     seq += _space_rundown_blocks(data["eve"]["blocks"])
-    nl_head_text = data["nl"]["header"] + (f" {data['anchor_name']}" if data.get("anchor_name") else "")
-    seq += [{"kind": "para", "runs": [(nl_head_text, _header_text_style(data))],
+    # NL header: source runs verbatim, the anchor name appended in the last run's style
+    nl_runs = _strip_break_runs(data["nl"].get("header_runs"))
+    if data.get("anchor_name"):
+        tail_style = dict(nl_runs[-1][1]) if nl_runs else _header_text_style(data)
+        if nl_runs:
+            nl_runs = nl_runs[:-1] + [(nl_runs[-1][0].rstrip() + f" {data['anchor_name']}", tail_style)]
+        else:
+            nl_runs = [(data["nl"]["header"] + f" {data['anchor_name']}", tail_style)]
+    if not nl_runs:
+        nl_runs = [(data["nl"]["header"], _header_text_style(data))]
+    seq += [{"kind": "para", "runs": nl_runs,
              "para_style": data["nl"].get("header_style") or {"namedStyleType": "TITLE"}}]
     seq += _space_rundown_blocks(data["nl"]["blocks"])
     seq += [{"kind": "para", "runs": [(" ", {})], "para_style": None}]  # spacer
