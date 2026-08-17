@@ -377,6 +377,34 @@ async def api_newsline_reports_list_report_docs():
     return await _script([PY, str(NEWSLINE_REPORTS), "report-list"])
 
 
+# ------------------------------------------------- recording docs (Sub-tab 4)
+RECORDING_DOCS = Path(__file__).parent / "recording_docs.py"
+
+
+def _recording_docs_argv(body: dict, verb: str) -> list[str]:
+    script = str(body.get("script_doc") or "").strip()
+    if not script:
+        raise HTTPException(400, "script_doc required")
+    argv = [PY, str(RECORDING_DOCS), verb, "--script-doc", script]
+    for key, flag in (("rundown_doc", "--rundown-doc"), ("prompter_doc", "--prompter-doc")):
+        v = str(body.get(key) or "").strip()
+        if v:
+            argv += [flag, v]
+    return argv
+
+
+@router.post("/api/newsroom/newsline-reports/recording-docs/preview")
+async def api_recording_docs_preview(body: dict = Body(...)):
+    """Recording docs preview (read-only): extract EVE/NL rundowns + prompter rows."""
+    return await _script(_recording_docs_argv(body, "preview"), timeout=120)
+
+
+@router.post("/api/newsroom/newsline-reports/recording-docs/apply")
+async def api_recording_docs_apply(body: dict = Body(...)):
+    """Recording docs apply: rename RUNDOWN doc + rewrite both docs (Anchor block kept)."""
+    return await _script(_recording_docs_argv(body, "apply"), timeout=300)
+
+
 
 # ---------------------------------------------------------------- newsline rundown (Sub-tab 1: Daily NL Rundown)
 # Extracts daily NEWSLINE headlines from 'NL & NWB DDMMYY' Google Doc (NL RUNDOWN tab)

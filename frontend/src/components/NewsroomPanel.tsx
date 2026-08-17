@@ -277,6 +277,22 @@ interface ReportAutofillPreviewResponse {
   _fatal?: string;
 }
 
+interface RecordingPreviewResponse {
+  script_doc: string;
+  date?: string;
+  rundown_name?: string;
+  rundown_doc?: string;
+  prompter_doc?: string;
+  eve?: { header: string; lines: string[]; tables: string[] };
+  nl?: { header: string; lines: string[]; tables: string[] };
+  prompter?: { eve_rows: string[]; nl_rows: string[] };
+  errors?: string[];
+  applied?: boolean;
+  renamed_to?: string;
+  rundown_tables?: number;
+  prompter_tables?: number;
+}
+
 interface ReportAutofillApplyResponse {
   doc?: {
     id: string;
@@ -701,7 +717,7 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
   const [nlGenGenerating, setNlGenGenerating] = useState<boolean>(false);
 
   // NEWSLINE Reports v2 state (3 sub-tabs: ① NL Rundown, ② Monthly Report, ③ NL Docgen)
-  const [reportSubTab, setReportSubTab] = useState<"rundown" | "monthly" | "docgen">("rundown");
+  const [reportSubTab, setReportSubTab] = useState<"rundown" | "monthly" | "docgen" | "recording">("rundown");
 
   // Sub-tab ①: NEWSLINE Rundown state
   const [rundownMode, setRundownMode] = useState<"single" | "month">("single");
@@ -741,6 +757,12 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
   const [loadingReportDocs, setLoadingReportDocs] = useState<boolean>(false);
   const [autofillPreview, setAutofillPreview] = useState<ReportAutofillPreviewResponse | null>(null);
   const [manualLinks, setManualLinks] = useState<Record<string, string>>({});
+  const [recScriptDoc, setRecScriptDoc] = useState("");
+  const [recRundownDoc, setRecRundownDoc] = useState("");
+  const [recPrompterDoc, setRecPrompterDoc] = useState("");
+  const [recPreview, setRecPreview] = useState<RecordingPreviewResponse | null>(null);
+  const [recLoading, setRecLoading] = useState(false);
+  const [recApplying, setRecApplying] = useState(false);
   const [autofillApplyResult, setAutofillApplyResult] = useState<ReportAutofillApplyResponse | null>(null);
   const [autofillLoading, setAutofillLoading] = useState<boolean>(false);
   const [autofillApplying, setAutofillApplying] = useState<boolean>(false);
@@ -1075,6 +1097,39 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
     }
   };
 
+  const handleRecordingRun = async (verb: "preview" | "apply") => {
+    if (!recScriptDoc.trim()) return;
+    if (verb === "preview") {
+      setRecLoading(true);
+      setRecPreview(null);
+    } else {
+      setRecApplying(true);
+    }
+    setError(null);
+    try {
+      const res = await fetch(`/api/newsroom/newsline-reports/recording-docs/${verb}`, {
+        method: "POST",
+        headers: CT,
+        body: JSON.stringify({
+          script_doc: recScriptDoc.trim(),
+          rundown_doc: recRundownDoc.trim() || undefined,
+          prompter_doc: recPrompterDoc.trim() || undefined,
+        }),
+      });
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({ detail: res.statusText }));
+        setError(typeof d.detail === "string" ? d.detail : JSON.stringify(d.detail));
+      } else {
+        setRecPreview(await res.json());
+      }
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setRecLoading(false);
+      setRecApplying(false);
+    }
+  };
+
   const fetchReportDocs = useCallback(async () => {
     setLoadingReportDocs(true);
     try {
@@ -1142,7 +1197,7 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
   }, []);
 
   useEffect(() => {
-    if (tab === "reports" && reportSubTab === "rundown" && recentDailyDocs.length === 0) {
+    if (tab === "reports" && (reportSubTab === "rundown" || reportSubTab === "recording") && recentDailyDocs.length === 0) {
       void fetchRecentDailyDocs();
     }
   }, [tab, reportSubTab, recentDailyDocs.length, fetchRecentDailyDocs]);
@@ -3150,6 +3205,12 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
                 >
                   ③ NL DOC GENERATOR
                 </button>
+                <button
+                  className={`btn btn--compact ${reportSubTab === "recording" ? "btn--signal" : ""}`}
+                  onClick={() => setReportSubTab("recording")}
+                >
+                  ④ RECORDING DOCS
+                </button>
               </div>
             </div>
           </div>
@@ -4318,6 +4379,158 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
                   </div>
                 )}
               </div>
+            </div>
+          )}
+
+          {/* Sub-tab ④: RECORDING DOCS */}
+          {reportSubTab === "recording" && (
+            <div className="flex min-h-0 flex-1 flex-col gap-3">
+              <div className="flex flex-wrap items-center gap-2 border-b border-edge-soft pb-2">
+                <label className="flex items-center gap-2 text-xs mono">
+                  <span className="label shrink-0">SCRIPT DOC:</span>
+                  <input
+                    value={recScriptDoc}
+                    onChange={(e) => setRecScriptDoc(e.target.value)}
+                    placeholder="Daily script Doc ID / URL (EVE + NL tabs)"
+                    className="input mono px-2 py-1 text-xs"
+                    style={{ width: 290 }}
+                  />
+                </label>
+                {recentDailyDocs.length > 0 && (
+                  <select
+                    className="input mono px-2 py-1 text-xs"
+                    style={{ maxWidth: 220 }}
+                    value=""
+                    onChange={(e) => {
+                      if (e.target.value) {
+                        setRecScriptDoc(e.target.value);
+                        setRecPreview(null);
+                      }
+                    }}
+                  >
+                    <option value="">— Pick Recent Daily Doc —</option>
+                    {recentDailyDocs.map((d) => (
+                      <option key={d.id} value={d.id}>
+                        {d.name}
+                      </option>
+                    ))}
+                  </select>
+                )}
+                <button
+                  className="btn btn--compact"
+                  onClick={() => void fetchRecentDailyDocs()}
+                  title="Refresh recent daily docs from Drive"
+                >
+                  ↻
+                </button>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2">
+                <label className="flex items-center gap-2 text-xs mono">
+                  <span className="label shrink-0">RUNDOWN DOC:</span>
+                  <input
+                    value={recRundownDoc}
+                    onChange={(e) => setRecRundownDoc(e.target.value)}
+                    placeholder="default: standing RUNDOWN doc"
+                    className="input mono px-2 py-1 text-xs"
+                    style={{ width: 210 }}
+                  />
+                </label>
+                <label className="flex items-center gap-2 text-xs mono">
+                  <span className="label shrink-0">PROMPTER DOC:</span>
+                  <input
+                    value={recPrompterDoc}
+                    onChange={(e) => setRecPrompterDoc(e.target.value)}
+                    placeholder="default: standing PROMPTER doc"
+                    className="input mono px-2 py-1 text-xs"
+                    style={{ width: 210 }}
+                  />
+                </label>
+                <button
+                  className="btn btn--compact btn--signal"
+                  onClick={() => void handleRecordingRun("preview")}
+                  disabled={recLoading || recApplying || !recScriptDoc.trim()}
+                >
+                  {recLoading ? "EXTRACTING…" : "▸ PREVIEW"}
+                </button>
+                <button
+                  className="btn btn--compact"
+                  style={{ borderColor: "var(--color-hazard)", color: "var(--color-hazard)" }}
+                  onClick={() => {
+                    if (window.confirm("Rewrite RUNDOWN + PROMPTER docs from this script?\nThe RUNDOWN doc will be renamed (DDMMYY) and both docs' bodies replaced — the Anchor block is preserved."))
+                      void handleRecordingRun("apply");
+                  }}
+                  disabled={recApplying || recLoading || !recPreview?.eve?.lines?.length}
+                  title={!recPreview ? "Run PREVIEW first" : "Rename + rewrite both recording docs"}
+                >
+                  {recApplying ? "WRITING…" : "✓ APPLY"}
+                </button>
+              </div>
+
+              {recPreview && (
+                <div className="flex flex-col gap-2 border border-edge p-2" style={{ background: "var(--color-void)" }}>
+                  <div className="flex flex-wrap items-center justify-between border-b border-edge-soft pb-1 text-xs mono">
+                    <div className="flex items-center gap-2">
+                      <span className="label">DATE:</span>
+                      <span style={{ color: "var(--color-phosphor)" }}>{recPreview.date || "?"}</span>
+                      <span className="label">RENAME →</span>
+                      <span style={{ color: "var(--color-signal)" }}>{recPreview.rundown_name || "?"}</span>
+                      {recPreview.renamed_to && (
+                        <span style={{ color: "var(--color-go)" }}>✓ renamed</span>
+                      )}
+                      {recPreview.applied && (
+                        <span style={{ color: "var(--color-go)" }}>
+                          ✓ applied ({recPreview.rundown_tables} + {recPreview.prompter_tables} tables)
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                  {(recPreview.errors?.length ?? 0) > 0 && (
+                    <div className="mono text-[11px]" style={{ color: "var(--color-hazard)" }}>
+                      ⚠ {(recPreview.errors ?? []).join(" · ")}
+                    </div>
+                  )}
+                  {recPreview.eve && recPreview.nl && (
+                    <div className="grid grid-cols-1 gap-2 lg:grid-cols-2">
+                      {[["EVE RUNDOWN", recPreview.eve], ["NL RUNDOWN", recPreview.nl]].map(([label, sec]) => (
+                        <div key={label as string} className="border border-edge-soft p-2 overflow-y-auto" style={{ maxHeight: 220 }}>
+                          <div className="label text-[11px]" style={{ color: "var(--color-signal)" }}>
+                            {label as string}: <span style={{ color: "var(--color-muted)" }}>{(sec as { header: string }).header}</span>
+                          </div>
+                          {((sec as { tables: string[] }).tables || []).map((t, i) => (
+                            <div key={`t${i}`} className="mono text-[11px]" style={{ color: "var(--color-hazard)" }}>
+                              ▣ {t}
+                            </div>
+                          ))}
+                          {((sec as { lines: string[] }).lines || []).map((l, i) => (
+                            <div key={i} className="mono text-[11px]" style={{ color: "var(--color-phosphor-dim)" }}>
+                              {l}
+                            </div>
+                          ))}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                  {recPreview.prompter && (
+                    <div className="border border-edge-soft p-2 overflow-y-auto" style={{ maxHeight: 200 }}>
+                      <div className="label text-[11px]" style={{ color: "var(--color-signal)" }}>
+                        PROMPTER — {recPreview.prompter.eve_rows.length} EVE rows · ++++ · {recPreview.prompter.nl_rows.length} NL rows
+                      </div>
+                      {recPreview.prompter.eve_rows.map((r, i) => (
+                        <div key={i} className="mono text-[11px] truncate" style={{ color: "var(--color-phosphor-dim)" }} title={r}>
+                          {r}
+                        </div>
+                      ))}
+                      <div className="mono text-[11px]" style={{ color: "var(--color-hazard)" }}>++++</div>
+                      {recPreview.prompter.nl_rows.map((r, i) => (
+                        <div key={i} className="mono text-[11px] truncate" style={{ color: "var(--color-phosphor-dim)" }} title={r}>
+                          {r}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           )}
         </div>
