@@ -16,9 +16,9 @@ def _reset_session_caches():
     """Session telemetry + catalog keep process-global caches. Clear them between
     tests so ordering can't leak a cached reading into a test that expects a
     fresh fetch/fallback."""
-    session_stats._cache = None
-    session_stats._last_usage.clear()
     session_stats._max_seen.clear()
+    session_stats._usage_cache.clear()
+    session_stats._last_state.clear()
     catalog._cache = None
     yield
 

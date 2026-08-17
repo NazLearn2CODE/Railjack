@@ -1,496 +1,504 @@
-"""GET /api/session — current Claude session telemetry, read from disk.
+"""Session telemetry — CTX / SES / WK / RESET for the sidebar strip.
 
-Newest ``~/.claude/projects/<slug>/<uuid>.jsonl`` by mtime (``idle`` if >10 min
-stale). Context tokens = ``input_tokens + cache_read_input_tokens +
-cache_creation_input_tokens + output_tokens`` of the last assistant
-``message.usage`` (input is the conversation at request time; +output is the
-post-turn fill the gauge should show). The denominator is the model's *real*
-context limit, resolved per-model from a curated table (``_MODEL_CONTEXT_
-LIMITS``) — provider ``context_limit`` is only the fallback for unlisted
-models, and an empirical floor (``_max_seen``) clamps it so a stale entry can
-never push the gauge past 100 %. The session's ``message.model`` → provider
-via the ``providers`` config (regex, ``window_hours``); unknown model →
-provider ``"?"`` with default 5 h / 200 k, ctx % still reported.
-
-Session %/reset come from the provider's **official usage API** when its
-``usage_source`` adapter is configured (``source: "api"``): anthropic-oauth →
-the same endpoint Claude Code's /usage uses; zai-quota → rate-ck's endpoint.
-On any API failure we fall back to the 5 h block heuristic below and mark
-``source: "estimate"``.
-
-5 h block math (ccusage convention, ESTIMATE ONLY — measured ~80 min drift vs
-the real Anthropic window on 2026-07-18): a new block starts at the first
-event after a ≥ window gap OR past the previous block's ``reset_at``; block
-start is floored to the hour; ``reset_at = block_start + window``. Only files
-matching the active provider's model regex contribute events. 30 s cache.
+This is now the home Railjack module, back-ported from Somatic's 2026-08-17 telemetry state (4 commits 97fc6d9/e8ed042/a3b3bf0/a2512b4):
+- CTX comes from the newest Claude Code session JSONL on disk (last committed
+  usage line: input + cache_read + cache_creation + output tokens).
+- The denominator is a per-model limit table resolved from the LIVE model
+  string every poll (a mid-session /model switch is automatic), lifted by an
+  empirical clamp: once a model has accepted N tokens, its limit is ≥ N — a
+  stale table entry can never push the gauge past 100%.
+- SES/WK/RESET come only from official usage sources (anthropic OAuth /usage,
+  z.ai quota endpoint, cco-usage.jsonl spend, Antigravity local quota RPC);
+  on transient failures the last good reading is retained for 10 minutes.
+  No estimates are shown.
+- Secrets: tokens are read, used in a header, never logged or returned.
 """
-
 from __future__ import annotations
 
 import json
 import os
 import re
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from pathlib import Path
 
 import httpx
 from fastapi import APIRouter
 
-from .config import CONFIG
-
 router = APIRouter()
 
-SESSIONS_ROOT = Path.home() / ".claude" / "projects"
-# OAuth token maintained (and refreshed) by Claude Code itself — we only read it.
-CREDS_FILE = Path.home() / ".claude" / ".credentials.json"
-ANTHROPIC_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
-ZAI_QUOTA_URL = "https://api.z.ai/api/monitor/usage/quota/limit"
-_USAGE_TIMEOUT = 5.0
+CLAUDE_DIR = Path.home() / ".claude"
+PROJECTS = CLAUDE_DIR / "projects"
 
-_CACHE_TTL = 30
-_DEFAULT_WINDOW = 5
-_DEFAULT_LIMIT = 200_000
-_IDLE_MIN = 10
-# Anthropic's /usage endpoint is tightly rate-limited and 429s intermittently;
-# reuse the last good reading this long so the strip doesn't flap to the estimate.
-_USAGE_RETAIN = 600
-_cache: tuple[float, dict] | None = None
-_last_usage: dict[str, tuple[float, dict]] = {}
-
-# Per-model context limits — the real denominator for the CTX %. Public, stable
-# specs; z.ai's /models endpoint returns no context_window, so a curated table
-# is the source of truth (anthropic /v1/models has it, but a static table avoids
-# the extra call/failure mode for values that never change). First regex match
-# wins; provider.context_limit is the fallback. Extend as new models ship.
-_MODEL_CONTEXT_LIMITS: list[tuple[re.Pattern, int]] = [
-    (re.compile(r"(^|/)gemini-"), 1_000_000),  # Gemini 3.x Flash — 1M context window (AI Pro)
-    (re.compile(r"(^|/)cco-glm"), 1_000_000),  # cco alias (OpenRouter GLM-5.2) — same 1M context
-    (re.compile(r"(^|/)glm-5\.2"), 1_000_000),  # z.ai: 200K → 1M extension
+# Model-pattern → context limit. All with (^|/) prefix to match bare and openrouter-prefixed models.
+_MODEL_CONTEXT_LIMITS: list[tuple[re.Pattern[str], int]] = [
+    # glm-5.x: whole line runs the IndexShare 1M stack (5.2 + 5.3 confirmed on z.ai blog)
+    (re.compile(r"(^|/)glm-5\.\d"), 1_000_000),
+    (re.compile(r"(^|/)glm-5-turbo"), 1_000_000),
+    (re.compile(r"(^|/)cco-glm"), 1_000_000),
+    (re.compile(r"(^|/)gemini-"), 1_000_000),
+    (re.compile(r"(^|/)claude-(fable|mythos)"), 1_000_000),
     (re.compile(r"(^|/)claude-haiku"), 200_000),
-    (re.compile(r"(^|/)claude-"), 1_000_000),  # current Claude line is 1M except Haiku (matched above)
+    (re.compile(r"(^|/)claude-"), 1_000_000),
 ]
-# Largest input context ever observed per model — proof its real limit is ≥ that,
-# so clamping a stale table entry to this floor keeps the gauge ≤ 100 % until the
-# table catches up. Creeps up for unknown models; no-op when the table is right.
+_DEFAULT_LIMIT = 200_000
+
+# provider detection from the model string (order matters: cco BEFORE zai)
+_PROVIDERS: list[tuple[re.Pattern[str], str]] = [
+    (re.compile(r"(^|/)cco-"), "cco"),
+    (re.compile(r"(^|/)glm-"), "zai"),
+    (re.compile(r"(^|/)gemini-"), "gemini"),
+    (re.compile(r"(^|/)claude-"), "claude"),
+]
+
 _max_seen: dict[str, int] = {}
 
+_LAST_GOOD_TTL = 600.0
+_usage_cache: dict[str, tuple[float, dict]] = {}
 
-def _parse_ts(ts: str) -> datetime | None:
+# A provider counts as "in use" if its newest session JSONL was written within
+# this window (seconds) — drives a telemetry lane's green/red light.
+ACTIVE_WINDOW = 90.0
+# Model shown per provider before any session is ever seen, so a lane is
+# populated on first boot.
+_DEFAULT_MODELS: dict[str, str] = {"zai": "glm-5.2", "gemini": "gemini-3.6-flash", "claude": "claude-3.7-sonnet"}
+_last_state: dict[str, dict] = {}
+
+
+def _limit_for(model: str, used: int) -> int:
+    limit = next((v for p, v in _MODEL_CONTEXT_LIMITS if p.search(model)), _DEFAULT_LIMIT)
+    seen = _max_seen.get(model, 0)
+    if used > seen:
+        _max_seen[model] = seen = used
+    return max(limit, seen)
+
+
+def _provider_for(model: str) -> str:
+    return next((name for p, name in _PROVIDERS if p.search(model)), "unknown")
+
+
+GEMINI_DIR = Path.home() / ".gemini" / "antigravity-cli"
+
+
+def _norm_ag_model(display: str) -> str:
+    """'Gemini 3.7 Flash (Medium)' → 'gemini-3.7-flash' (drops effort suffix)."""
+    return re.sub(r"\s*\([^)]*\)", "", display or "").strip().lower().replace(" ", "-")
+
+
+_ag_model_cache: tuple[float, str] = (0.0, "")
+
+
+def _agy_selected_model() -> str:
+    """Antigravity's selected model, read live from its settings.json (5-min
+    cache) — the client updates model versions ahead of our table."""
+    global _ag_model_cache
+    ts, model = _ag_model_cache
+    if model and time.monotonic() - ts < 300:
+        return model
     try:
-        return datetime.fromisoformat(ts.replace("Z", "+00:00"))
-    except (ValueError, TypeError):
-        return None
-
-
-def _match_provider(model: str | None, providers):
-    """Return (matched Provider | None, compiled regex | None)."""
-    if model:
-        for p in providers:
-            rx = re.compile(p.model_match)
-            if rx.search(model):
-                return p, rx
-    return None, None
-
-
-def _resolve_context_limit(model: str | None, fallback: int) -> int:
-    """Model's real context window: table match, else the provider fallback.
-
-    Re-resolved from the live model string every poll, so a mid-session
-    ``/model`` switch picks up the new limit automatically — no switch detection.
-    """
-    for rx, lim in _MODEL_CONTEXT_LIMITS:
-        if model and rx.search(model):
-            return lim
-    return fallback
-
-
-# ---------------------------------------------------------------- usage adapters
-#
-# Official per-provider usage APIs — the calibrated source for session %/reset
-# (2026-07-18: the JSONL block heuristic drifted ~80 min vs Claude Code's own
-# /usage; these endpoints match it). Each returns
-# {"session_pct": int, "weekly_pct": int | None, "reset_at": iso-str} or None
-# on any failure (offline, 401, missing key) — caller falls back to heuristic.
-# NEVER log or return tokens/keys.
-
-
-def _usage_anthropic() -> dict | None:
-    """Claude Code's own /usage source: OAuth usage endpoint, token from disk."""
-    try:
-        tok = json.loads(CREDS_FILE.read_text())["claudeAiOauth"]["accessToken"]
-        r = httpx.get(
-            ANTHROPIC_USAGE_URL,
-            headers={"Authorization": f"Bearer {tok}", "anthropic-beta": "oauth-2025-04-20"},
-            timeout=_USAGE_TIMEOUT,
-        )
-        r.raise_for_status()
-        d = r.json()
-        five, seven = d.get("five_hour") or {}, d.get("seven_day") or {}
-        if five.get("utilization") is None or not five.get("resets_at"):
-            return None
-        return {
-            "session_pct": round(five["utilization"]),
-            "weekly_pct": round(seven["utilization"]) if seven.get("utilization") is not None else None,
-            "reset_at": five["resets_at"],
-        }
+        s = json.loads((GEMINI_DIR / "settings.json").read_text())
+        m = _norm_ag_model(s.get("model", ""))
+        if m:
+            _ag_model_cache = (time.monotonic(), m)
+            return m
     except Exception:
-        return None
+        pass
+    return model or "gemini-3.6-flash"
 
 
-def _usage_zai(key_env: str | None) -> dict | None:
-    """rate-ck's endpoint: TOKENS_LIMIT is the binding coding-plan quota."""
-    key = os.environ.get(key_env or "ZAI_API_KEY")
-    if not key:
-        return None
+def _scan_jsonl_usage(path: Path) -> tuple[str, int] | None:
+    """(model, context_tokens) from the last assistant usage line in ``path``."""
+    if GEMINI_DIR in path.parents or path.parent == GEMINI_DIR:
+        return _agy_selected_model(), 0
     try:
-        r = httpx.get(
-            ZAI_QUOTA_URL, headers={"Authorization": f"Bearer {key}"}, timeout=_USAGE_TIMEOUT
-        )
-        r.raise_for_status()
-        limits = (r.json().get("data") or {}).get("limits") or []
-        tk = next((x for x in limits if x.get("type") == "TOKENS_LIMIT"), None)
-        if not tk or tk.get("percentage") is None or not tk.get("nextResetTime"):
-            return None
-        reset = datetime.fromtimestamp(tk["nextResetTime"] / 1000, tz=timezone.utc)
-        return {
-            "session_pct": round(tk["percentage"]),
-            "weekly_pct": None,
-            "reset_at": reset.isoformat(),
-        }
-    except Exception:
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            f.seek(max(0, size - 262_144))
+            tail = f.read().decode(errors="replace")
+    except OSError:
         return None
-
-
-def _usage_cco_spend() -> dict | None:
-    # OpenRouter $5/mo per-key cap; authoritative tracker is `cco-usage --cap 5`.
-    LOG_PATH = Path.home() / ".claude" / "cco-usage.jsonl"
-    CAP = 5.0
-
-    try:
-        now = datetime.now(timezone.utc)
-        if now.month == 12:
-            reset_dt = datetime(now.year + 1, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
-        else:
-            reset_dt = datetime(now.year, now.month + 1, 1, 0, 0, 0, tzinfo=timezone.utc)
-        reset_at = reset_dt.isoformat()
-
-        if not LOG_PATH.exists() or LOG_PATH.stat().st_size == 0:
-            return {"session_pct": 0, "weekly_pct": None, "reset_at": reset_at}
-
-        spent = 0.0
-        with open(LOG_PATH, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                data = json.loads(line)
-                ts_str = data.get("ts")
-                if not ts_str:
-                    continue
-                dt = _parse_ts(ts_str)
-                if not dt:
-                    continue
-                dt_utc = dt.astimezone(timezone.utc) if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
-                if dt_utc.year == now.year and dt_utc.month == now.month:
-                    spent += float(data.get("cost") or 0.0)
-
-        if spent == 0.0:
-            return {"session_pct": 0, "weekly_pct": None, "reset_at": reset_at}
-
-        return {
-            "session_pct": round(spent / CAP * 100),
-            "weekly_pct": None,
-            "reset_at": reset_at,
-            "source_note": f"${spent:.4f} / ${CAP:.2f}",
-        }
-    except Exception:
-        return None
-
-
-def _usage_agy_tokens() -> dict | None:
-    """agy (Antigravity CLI / Gemini) 7-day rolling window usage adapter."""
-    LOG_PATH = Path.home() / ".claude" / "agy-usage.jsonl"
-    try:
-        now = datetime.now(timezone.utc)
-        window_days = 7
-        if not LOG_PATH.exists() or LOG_PATH.stat().st_size == 0:
-            reset_at = (now + timedelta(days=window_days)).isoformat()
-            return {"session_pct": 0, "weekly_pct": 0, "reset_at": reset_at}
-
-        tot_tokens = 0
-        earliest_ts = None
-        with open(LOG_PATH, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    data = json.loads(line)
-                except Exception:
-                    continue
-                ts_str = data.get("ts")
-                if not ts_str:
-                    continue
-                dt = _parse_ts(ts_str)
-                if not dt:
-                    continue
-                dt_utc = dt.astimezone(timezone.utc) if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
-                if (now - dt_utc) <= timedelta(days=window_days):
-                    if earliest_ts is None or dt_utc < earliest_ts:
-                        earliest_ts = dt_utc
-                    tot_tokens += int(data.get("total_tokens") or 0)
-
-        reset_start = earliest_ts or now
-        reset_at = (reset_start + timedelta(days=window_days)).isoformat()
-        
-        EST_WEEKLY_CAP = 10_000_000
-        weekly_pct = min(100, round((tot_tokens / EST_WEEKLY_CAP) * 100))
-
-        return {
-            "session_pct": weekly_pct,
-            "weekly_pct": weekly_pct,
-            "reset_at": reset_at,
-            "source_note": f"{tot_tokens:,} tokens / 7d",
-        }
-    except Exception:
-        return None
-
-
-def _scan_agy_log() -> tuple[datetime | None, str | None, int]:
-    """Scans ~/.claude/agy-usage.jsonl for the latest agy call."""
-    LOG_PATH = Path.home() / ".claude" / "agy-usage.jsonl"
-    if not LOG_PATH.exists() or LOG_PATH.stat().st_size == 0:
-        return None, None, 0
-    try:
-        last_line = None
-        with open(LOG_PATH, "r", encoding="utf-8") as f:
-            for line in f:
-                if line.strip():
-                    last_line = line.strip()
-        if not last_line:
-            return None, None, 0
-        data = json.loads(last_line)
-        ts = _parse_ts(data.get("ts", ""))
-        model = data.get("model")
-        ctx = (
-            int(data.get("input_tokens", 0) or 0)
-            + int(data.get("output_tokens", 0) or 0)
-            + int(data.get("thinking_tokens", 0) or 0)
-        )
-        return ts, model, ctx
-    except Exception:
-        return None, None, 0
-
-
-_USAGE_ADAPTERS = {
-    "anthropic-oauth": lambda p: _usage_anthropic(),
-    "zai-quota": lambda p: _usage_zai(p.key_env),
-    "cco-spend": lambda p: _usage_cco_spend(),
-    "agy-tokens": lambda p: _usage_agy_tokens(),
-}
-
-
-def _fetch_usage(provider) -> dict | None:
-    """Provider's official usage API, with last-good retention.
-
-    A raw failure (e.g. Anthropic's /usage 429ing every other poll) would flap
-    the strip to the JSONL estimate. So on failure we reuse the last successful
-    reading for up to ``_USAGE_RETAIN`` s: ``reset_at`` is absolute so the
-    countdown stays correct, and ``session_pct`` only goes slightly stale — fine
-    for a slow 5 h/7 d window. Past the window we give up → caller falls back to
-    the estimate.
-    """
-    if provider is None:
-        return None
-    fn = _USAGE_ADAPTERS.get(provider.usage_source)
-    if not fn:
-        return None
-    fresh = fn(provider)
-    if fresh is not None:
-        _last_usage[provider.name] = (time.monotonic(), fresh)
-        return fresh
-    cached = _last_usage.get(provider.name)
-    if cached and time.monotonic() - cached[0] < _USAGE_RETAIN:
-        return cached[1]
+    for line in reversed(tail.splitlines()):
+        try:
+            d = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        msg = d.get("message") or {}
+        u = msg.get("usage")
+        model = msg.get("model")
+        if u and model:
+            used = (u.get("input_tokens", 0) + u.get("cache_read_input_tokens", 0)
+                    + u.get("cache_creation_input_tokens", 0) + u.get("output_tokens", 0))
+            return model, used
     return None
 
 
-def _scan(path: Path) -> tuple[list[datetime], str | None, int]:
-    """One pass over a transcript: (timestamps, last assistant model, last ctx tokens).
+def _per_provider_state() -> dict[str, dict]:
+    """Newest session JSONLs grouped by provider, merged over the cached
+    last-seen state so an idle provider keeps its model + ctx capacity.
 
-    ponytail: single full scan per file gives block timestamps AND the trailing
-    usage line in one read — simpler than the tail-then-fallback dance, and the
-    mtime cutoff bounds it to recent files. If a transcript balloons past
-    ~100 MB and scan latency shows, gate usage behind a tail read (last 256 KB)
-    while keeping the full scan only for block math.
+    Returns ``{provider: {model, ctx_used, ctx_limit, last_mtime}}``.
     """
-    times: list[datetime] = []
-    model: str | None = None
-    ctx = 0
+    jsonls: list[Path] = []
     try:
-        with open(path) as f:
+        jsonls.extend(PROJECTS.glob("*/*.jsonl"))
+    except Exception:
+        pass
+    try:
+        if GEMINI_DIR.exists():
+            jsonls.extend(GEMINI_DIR.glob("history.jsonl"))
+            jsonls.extend(GEMINI_DIR.glob("brain/**/transcript.jsonl"))
+    except Exception:
+        pass
+    try:
+        jsonls = sorted(jsonls, key=lambda p: p.stat().st_mtime, reverse=True)
+    except Exception:
+        jsonls = []
+
+    state: dict[str, dict] = {k: dict(v) for k, v in _last_state.items()}
+    for path in jsonls[:15]:  # newest covers recent multi-provider activity
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            continue
+        found = _scan_jsonl_usage(path)
+        if not found:
+            continue
+        model, used = found
+        provider = _provider_for(model)
+        prev = state.get(provider)
+        if prev is None or mtime > prev.get("last_mtime", 0):
+            state[provider] = {
+                "model": model,
+                "ctx_used": used,
+                "ctx_limit": _limit_for(model, used),
+                "last_mtime": mtime,
+            }
+    _last_state.clear()
+    _last_state.update(state)
+    return state
+
+
+# ── official usage APIs (SES / WK / RESET) ──────────────────────────────
+
+async def _anthropic_usage() -> dict | None:
+    """The OAuth /usage endpoint Claude Code itself polls. Tightly
+    rate-limited (intermittent 429s) → last-good retention."""
+    try:
+        creds = json.loads((CLAUDE_DIR / ".credentials.json").read_text())
+        token = creds["claudeAiOauth"]["accessToken"]
+    except Exception:
+        return None
+    async with httpx.AsyncClient(timeout=5.0) as client:
+        resp = await client.get(
+            "https://api.anthropic.com/api/oauth/usage",
+            headers={"Authorization": f"Bearer {token}",
+                     "anthropic-beta": "oauth-2025-04-20"},
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    out: dict = {}
+    five = data.get("five_hour") or {}
+    week = data.get("seven_day") or {}
+    if "utilization" in five:
+        out["session_pct"] = round(float(five["utilization"]))
+        if five.get("resets_at"):
+            out["reset_at"] = five["resets_at"]
+    if "utilization" in week:
+        out["week_pct"] = round(float(week["utilization"]))
+    return out or None
+
+
+def _parse_zai_usage(resp: dict) -> dict | None:
+    """SES/RESET from a z.ai /monitor/usage/quota/limit response."""
+    data = (resp or {}).get("data") or {}
+    limits = data.get("limits") if isinstance(data, dict) else None
+    if not isinstance(limits, list):
+        return None
+    tok_q = next((it for it in limits
+                  if isinstance(it, dict) and str(it.get("type", "")).upper() == "TOKENS_LIMIT"), None)
+    if not tok_q or tok_q.get("percentage") is None or not tok_q.get("nextResetTime"):
+        return None
+    return {
+        "session_pct": round(float(tok_q["percentage"])),
+        "reset_at": time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(int(tok_q["nextResetTime"]) / 1000)),
+    }
+
+
+async def _zai_usage() -> dict | None:
+    """z.ai quota endpoint (see vault: zai-quota-monitoring)."""
+    key = os.environ.get("ZAI_API_KEY")
+    if not key:
+        return None
+    async with httpx.AsyncClient(timeout=5.0) as client:
+        resp = await client.get(
+            "https://api.z.ai/api/monitor/usage/quota/limit",
+            headers={"Authorization": f"Bearer {key}"},
+        )
+        resp.raise_for_status()
+        return _parse_zai_usage(resp.json())
+
+
+def _usage_cco_spend() -> dict | None:
+    """Sum cco-usage.jsonl month-to-date cost vs $5 cap."""
+    log_path = CLAUDE_DIR / "cco-usage.jsonl"
+    if not log_path.exists():
+        return None
+    now_dt = datetime.now()
+    month_start = datetime(now_dt.year, now_dt.month, 1).timestamp()
+    month_cost = 0.0
+    try:
+        with open(log_path, "r") as f:
             for line in f:
                 line = line.strip()
                 if not line:
                     continue
                 try:
-                    obj = json.loads(line)
-                except json.JSONDecodeError:
+                    rec = json.loads(line)
+                except Exception:
                     continue
-                ts = _parse_ts(obj.get("timestamp", ""))
-                if ts:
-                    times.append(ts)
-                if obj.get("type") == "assistant":
-                    msg = obj.get("message") or {}
-                    m = msg.get("model")
-                    if m:
-                        model = m
-                    usage = msg.get("usage")
-                    if isinstance(usage, dict):
-                        # input = conversation at request time; +output = the
-                        # post-turn fill (what the gauge should reflect).
-                        ctx = (
-                            int(usage.get("input_tokens", 0))
-                            + int(usage.get("cache_read_input_tokens", 0))
-                            + int(usage.get("cache_creation_input_tokens", 0))
-                            + int(usage.get("output_tokens", 0))
-                        )
-    except OSError:
-        pass
-    return times, model, ctx
-
-
-def _floor_hour(dt: datetime) -> datetime:
-    return dt.replace(minute=0, second=0, microsecond=0)
-
-
-def _current_block(
-    events: list[datetime], window_hours: float
-) -> tuple[datetime | None, datetime | None]:
-    """The block holding the newest event: (block_start, reset_at)."""
-    if not events:
-        return None, None
-    window = timedelta(hours=window_hours)
-    ev = sorted(events)
-    block_start = _floor_hour(ev[0])
-    reset_at = block_start + window
-    prev = ev[0]
-    for t in ev[1:]:
-        if t >= reset_at or (t - prev) >= window:
-            block_start = _floor_hour(t)
-            reset_at = block_start + window
-        prev = t
-    return block_start, reset_at
-
-
-def _all_jsonl() -> list[Path]:
-    try:
-        return list(SESSIONS_ROOT.rglob("*.jsonl"))
-    except OSError:
-        return []
-
-
-def _empty() -> dict:
-    return {
-        "provider": "?",
-        "model": "",
-        "context_tokens": 0,
-        "context_limit": _DEFAULT_LIMIT,
-        "context_pct": 0,
-        "session_pct": None,
-        "weekly_pct": None,
-        "reset_at": None,
-        "source": "none",
-        "idle": True,
-    }
-
-
-def _session_state() -> dict:
-    files = _all_jsonl()
-    if not files:
-        return _empty()
-
-    now = datetime.now(timezone.utc)
-    # newest by mtime (resolve ties deterministically by path)
-    newest = max(files, key=lambda p: (p.stat().st_mtime, str(p)))
-    try:
-        nstat = newest.stat()
-    except OSError:
-        return _empty()
-    newest_mtime = datetime.fromtimestamp(nstat.st_mtime, tz=timezone.utc)
-    idle = (now - newest_mtime) > timedelta(minutes=_IDLE_MIN)
-    n_times, model, ctx = _scan(newest)
-    agy_ts, agy_model, agy_ctx = _scan_agy_log()
-    if agy_model and (not model or model.startswith("<") or (agy_ts and agy_ts > newest_mtime)):
-        model = agy_model
-        ctx = agy_ctx
-        if agy_ts:
-            idle = (now - agy_ts) > timedelta(minutes=_IDLE_MIN)
-
-    provider, rx = _match_provider(model, CONFIG.providers)
-    name = provider.name if provider else "?"
-    window_h = provider.window_hours if provider else _DEFAULT_WINDOW
-    # Denominator: the model's real limit (per-model table), clamped to the
-    # largest context we've ever seen it accept so a stale table entry can't
-    # make the gauge read >100 % (proof: if it accepted N, its limit is ≥ N).
-    resolved = _resolve_context_limit(model, provider.context_limit if provider else _DEFAULT_LIMIT)
-    if model:
-        _max_seen[model] = max(_max_seen.get(model, 0), ctx)
-    limit = max(resolved, _max_seen.get(model, 0))
-
-    # Preferred: the provider's official usage API (calibrated vs /usage).
-    usage = _fetch_usage(provider)
-    if usage is not None:
-        session_pct, weekly_pct = usage["session_pct"], usage["weekly_pct"]
-        reset_iso, source = usage["reset_at"], "api"
+                ts = rec.get("ts", 0)
+                if ts >= month_start:
+                    month_cost += rec.get("cost", 0.0) or 0.0
+    except Exception:
+        return None
+    cap = 5.0
+    pct = min(100, round((month_cost / cap) * 100))
+    if now_dt.month == 12:
+        next_month = datetime(now_dt.year + 1, 1, 1)
     else:
-        # Fallback: JSONL block heuristic — an ESTIMATE (drifts vs the real
-        # billing window anchor); events = active session + provider siblings.
-        events = list(n_times)
-        cutoff = now - timedelta(hours=window_h + 1)
-        for f in files:
-            if f == newest:
-                continue
-            try:
-                mt = datetime.fromtimestamp(f.stat().st_mtime, tz=timezone.utc)
-            except OSError:
-                continue
-            if mt < cutoff:
-                continue
-            # ponytail: unknown provider (rx is None) → no sibling matches; the
-            # active session's own events still define the block.
-            if rx is None:
-                continue
-            ftimes, fmodel, _ = _scan(f)
-            if fmodel and rx.search(fmodel):
-                events.extend(ftimes)
-        _, reset_at = _current_block(events, window_h)
-        session_pct, weekly_pct = None, None
-        reset_iso = reset_at.isoformat() if reset_at else None
-        source = "estimate"
-
-    pct = round(ctx / limit * 100) if limit else 0
+        next_month = datetime(now_dt.year, now_dt.month + 1, 1)
     return {
-        "provider": name,
-        "model": model or "",
-        "context_tokens": ctx,
-        "context_limit": limit,
-        "context_pct": pct,
-        "session_pct": session_pct,
-        "weekly_pct": weekly_pct,
-        "reset_at": reset_iso,
-        "source": source,
-        "idle": idle,
+        "session_pct": pct,
+        "reset_at": next_month.strftime("%Y-%m-%dT00:00:00Z"),
     }
+
+
+def _parse_ag_groups(data: dict) -> dict[str, dict]:
+    """Parse a RetrieveUserQuotaSummary response into per-group usage dicts:
+    ``{"gemini": {...}, "3p": ...}`` — each carries the 5h window
+    (session_pct + reset_at) and the weekly window (week_pct + week_reset_at),
+    inverted from remainingFraction (dashboard shows remaining, we show used)."""
+    out: dict[str, dict] = {}
+    for g in (data or {}).get("groups") or []:
+        name = (g.get("displayName") or "").lower()
+        key = ("gemini" if "gemini" in name
+               else "3p" if "claude" in name or "gpt" in name else None)
+        if not key or key in out:
+            continue
+        lane: dict = {}
+        for b in g.get("buckets") or []:
+            if b.get("remainingFraction") is None:
+                continue
+            w = f"{b.get('window', '')} {b.get('bucketId', '')}"
+            used = round((1.0 - float(b["remainingFraction"])) * 100)
+            if "5h" in w:
+                lane["session_pct"] = used
+                if b.get("resetTime"):
+                    lane["reset_at"] = b["resetTime"]
+            elif "week" in w:
+                lane["week_pct"] = used
+                if b.get("resetTime"):
+                    lane["week_reset_at"] = b["resetTime"]
+        if lane:
+            out[key] = lane
+    return out
+
+
+_ag_quota_cache: tuple[float, dict] = (0.0, {})
+
+
+async def _antigravity_quota() -> dict[str, dict]:
+    """Both model-group quotas from the local Antigravity LanguageServer
+    Connect-RPC (60s cache, shared by the gemini + claude lanes — one RPC per
+    minute, not one per lane). Empty dict on failure; callers fall back."""
+    global _ag_quota_cache
+    ts, groups = _ag_quota_cache
+    if groups and time.monotonic() - ts < 60:
+        return groups
+    try:
+        import subprocess
+
+        # Discover local LanguageServerService / agy Connect-RPC ports
+        ports: set[int] = set()
+        try:
+            out = subprocess.run(["ss", "-tlpn"], capture_output=True, text=True, timeout=1).stdout
+            for line in out.splitlines():
+                if "agy" in line or "language_server" in line:
+                    m = re.search(r"127\.0\.0\.1:(\d+)", line)
+                    if m:
+                        ports.add(int(m.group(1)))
+        except Exception:
+            pass
+
+        if not ports:
+            try:
+                with open("/proc/net/tcp", "r") as f:
+                    for line in f.readlines()[1:]:
+                        parts = line.strip().split()
+                        if len(parts) > 3 and parts[3] == "0A":
+                            local_addr, local_port_hex = parts[1].split(":")
+                            if local_addr in ("0100007F", "00000000"):
+                                p = int(local_port_hex, 16)
+                                if p > 1024 and p not in (8700, 11434, 27124, 4127, 4128, 3456, 19825, 7681):
+                                    ports.add(p)
+            except Exception:
+                pass
+
+        async with httpx.AsyncClient(timeout=1.0) as client:
+            for port in sorted(ports):
+                try:
+                    r = await client.post(
+                        f"http://127.0.0.1:{port}/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary",
+                        headers={"Content-Type": "application/json", "Connect-Protocol-Version": "1"},
+                        json={},
+                    )
+                    if r.status_code == 200:
+                        parsed = _parse_ag_groups(r.json().get("response") or r.json())
+                        if parsed:
+                            _ag_quota_cache = (time.monotonic(), parsed)
+                            return parsed
+                except Exception:
+                    continue
+    except Exception:
+        pass
+    return {}
+
+
+async def _gemini_usage() -> dict | None:
+    """Google / Gemini quota (AI-Pro): 5h + weekly from the local Antigravity
+    LanguageServer RPC; falls back to upstream retrieveUserQuota (daily REQUEST
+    buckets only) via the keyring bearer token when the daemon is down."""
+    groups = await _antigravity_quota()
+    if groups.get("gemini"):
+        return groups["gemini"]
+    try:
+        import secretstorage
+
+        conn = secretstorage.dbus_init()
+        collection = secretstorage.get_default_collection(conn)
+        items = list(collection.search_items({"service": "gemini", "username": "antigravity"}))
+        if not items:
+            return None
+        secret = json.loads(items[0].get_secret())
+        token = secret.get("token", {}).get("access_token")
+        if not token:
+            return None
+
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.post(
+                "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota",
+                headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+                json={},
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                b = min(data.get("buckets") or [],
+                        key=lambda x: float(x.get("remainingFraction", 1.0)), default=None)
+                if b is not None and b.get("remainingFraction") is not None:
+                    out = {"session_pct": round((1.0 - float(b["remainingFraction"])) * 100)}
+                    if b.get("resetTime"):
+                        out["reset_at"] = b["resetTime"]
+                    return out
+    except Exception:
+        pass
+    return None
+
+
+async def _google_3p_usage() -> dict | None:
+    """Claude+GPT group hosted on the Google AI-Pro sub, from the same local
+    Antigravity RPC (5h + weekly). None when the daemon is down → the claude
+    lane falls back to anthropic-oauth."""
+    groups = await _antigravity_quota()
+    return groups.get("3p")
+
+
+if __name__ == "__main__":
+    import sys
+    try:
+        import secretstorage
+        conn = secretstorage.dbus_init()
+        collection = secretstorage.get_default_collection(conn)
+        items = list(collection.search_items({"service": "gemini", "username": "antigravity"}))
+        if not items:
+            print("ERROR: No keyring item found (service='gemini', username='antigravity')")
+            sys.exit(1)
+        secret = json.loads(items[0].get_secret())
+        token = secret.get("token", {})
+        access_token = token.get("access_token", "")
+        expiry = token.get("expiry", "")
+        print(f"Token length: {len(access_token)} chars")
+        print(f"Token expiry: {expiry}")
+    except Exception as e:
+        print(f"ERROR: {e}")
+        sys.exit(1)
+
+
+async def _provider_usage(provider: str) -> dict:
+    """Fetch with 10-min last-good retention across transient failures."""
+    now = time.monotonic()
+    try:
+        if provider == "anthropic" or provider == "claude":
+            # Google-sub Claude/GPT quota first (the CLAUDE / GPT lane); native
+            # Anthropic OAuth as fallback when the Antigravity daemon is down.
+            data = await _google_3p_usage() or await _anthropic_usage()
+        elif provider == "zai":
+            data = await _zai_usage()
+        elif provider == "cco":
+            data = _usage_cco_spend()
+        elif provider == "gemini":
+            data = await _gemini_usage()
+        else:
+            data = None
+
+        if data:
+            _usage_cache[provider] = (now, data)
+            return data
+    except Exception:
+        pass
+    ts, cached = _usage_cache.get(provider, (0.0, {}))
+    if now - ts < _LAST_GOOD_TTL and cached:
+        return cached
+    return {}  # no real reading + no fresh cache → show nothing, never fabricate
+
+
+async def session_payload() -> dict:
+    """Per-provider telemetry lanes for the sidebar strip.
+
+    Each lane is always populated with model + ctx capacity + quota used-% +
+    reset timer (quota data survives idle via ``_provider_usage``'s 10-min
+    last-good retention); ``ctx_pct`` (live context-window fill) appears only
+    when the provider is ``active`` (a session writing within ACTIVE_WINDOW).
+    ``active`` alone drives the green/red light — the rest stays visible idle.
+    """
+    now = time.time()
+    state = _per_provider_state()
+    lanes: dict[str, dict] = {}
+    for provider in ("gemini", "claude", "zai"):
+        st = state.get(provider)
+        active = bool(st and (now - st.get("last_mtime", 0)) <= ACTIVE_WINDOW)
+        model = st["model"] if st else _DEFAULT_MODELS.get(provider)
+        ctx_limit = st["ctx_limit"] if st else (_limit_for(model, 0) if model else None)
+        lane: dict = {"active": active}
+        if model:
+            lane["model"] = model
+        if ctx_limit:
+            lane["ctx_limit"] = ctx_limit
+        if st and active and ctx_limit:
+            lane["ctx_pct"] = round(st["ctx_used"] / ctx_limit * 100)
+        usage = await _provider_usage(provider)
+        if usage.get("session_pct") is not None:
+            lane["used_pct"] = usage["session_pct"]
+        if usage.get("week_pct") is not None:
+            lane["week_pct"] = usage["week_pct"]
+        if usage.get("week_reset_at"):
+            lane["week_reset_at"] = usage["week_reset_at"]
+        if usage.get("reset_at"):
+            lane["reset_at"] = usage["reset_at"]
+        lanes[provider] = lane
+    return {"lanes": lanes}
 
 
 @router.get("/api/session")
-def session() -> dict:
-    global _cache
-    now = time.monotonic()
-    if _cache and now - _cache[0] < _CACHE_TTL:
-        return _cache[1]
-    data = _session_state()
-    _cache = (now, data)
-    return data
+async def session() -> dict:
+    return await session_payload()
