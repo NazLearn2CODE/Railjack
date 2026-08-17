@@ -1,0 +1,9 @@
+[Unit]
+Description=Poke Antigravity quota every 25 minutes
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=25min
+
+[Install]
+WantedBy=timers.target

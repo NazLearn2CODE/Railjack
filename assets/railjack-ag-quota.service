@@ -1,0 +1,6 @@
+[Unit]
+Description=Railjack AG quota harvest (free agy listing + hub poke)
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/railjack-ag-quota-harvest.sh
