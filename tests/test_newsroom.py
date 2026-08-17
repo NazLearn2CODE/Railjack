@@ -3270,3 +3270,29 @@ def test_newsline_reports_list_report_docs_route(monkeypatch):
 
 
 
+
+
+def test_ddg_search_newsline_slug_verified():
+    nl_rep = _load_newsline_reports()
+    # real DDG-via-Jina result shape (2026-08-18 probe): FB slug URLs embed the
+    # date — 'newsline-13-august-2026' + headline continuation; /posts/ rows and
+    # other-show slugs (nbt-world-brief) must never match.
+    md = (
+        "[posts](https://www.facebook.com/nbtworld/posts/newsline-13-august-20261-pm-orders/1469052331925559/)\n"
+        "[video](https://www.facebook.com/nbtworld/videos/newsline-13-august-20261-pm-orders-police/1474193984470207/)\n"
+        "[wb](https://www.facebook.com/nbtworld/videos/nbt-world-brief-13-august-2026-eveningcat/37635803729401091/)\n"
+        "[enc](https://duckduckgo.com/l/?uddg=https%3A%2F%2Fwww.facebook.com%2Fnbtworld%2Fvideos%2Fnewsline-13-august-2026-enc-slug%2F555000111222%2F)\n"
+    )
+    got = nl_rep._ddg_search_newsline("2026-08-13", fetch_fn=lambda q: md)
+    assert got == "https://www.facebook.com/nbtworld/videos/1474193984470207/"
+    # encoded uddg links are found after unquoting (first match wins)
+    md2 = "[enc](https://duckduckgo.com/l/?uddg=https%3A%2F%2Fwww.facebook.com%2Fnbtworld%2Fvideos%2Fnewsline-13-august-2026-enc-slug%2F555000111222%2F)\n"
+    assert nl_rep._ddg_search_newsline("2026-08-13", fetch_fn=lambda q: md2) == \
+        "https://www.facebook.com/nbtworld/videos/555000111222/"
+    # neighboring day / other show / empty markdown → None, never a fuzzy hit
+    assert nl_rep._ddg_search_newsline("2026-08-12", fetch_fn=lambda q: md) is None
+    assert nl_rep._ddg_search_newsline("2026-08-13", fetch_fn=lambda q: "") is None
+    assert nl_rep._ddg_search_newsline("bogus", fetch_fn=lambda q: md) is None
+    def _boom(q):
+        raise RuntimeError("net down")
+    assert nl_rep._ddg_search_newsline("2026-08-13", fetch_fn=_boom) is None

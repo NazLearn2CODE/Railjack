@@ -2295,6 +2295,50 @@ def _brave_search_newsline(date_ce: datetime.date | str, fetch_fn=None) -> str |
     return None
 
 
+_FB_VIDEO_RE = re.compile(r'facebook\.com/nbtworld/videos/([^\s"\')]+)/(\d+)/?')
+
+
+def _jina_fetch(url: str, timeout: int = 30) -> str:
+    """Fetch a URL as markdown via Jina Reader (keyless: r.jina.ai/<url>)."""
+    req = urllib.request.Request(f"https://r.jina.ai/{url}")
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return resp.read().decode("utf-8", errors="replace")
+
+
+def _ddg_search_newsline(date_ce: datetime.date | str, fetch_fn=None) -> str | None:
+    """DuckDuckGo (via Jina) fallback for the full NEWSLINE show video.
+
+    Same strict query as the Brave lane; correctness is proven by the URL
+    itself — FB slug URLs carry 'newsline-<d>-<month>-<yyyy>', so a match
+    cannot be a neighboring day. (Loosened queries on any engine silently
+    return adjacent days' videos — never loosen the query.)
+    Returns canonical https://www.facebook.com/nbtworld/videos/<id>/ or None.
+    """
+    if isinstance(date_ce, str):
+        try:
+            date_ce = datetime.date.fromisoformat(date_ce)
+        except Exception:
+            return None
+
+    d_day = date_ce.day
+    d_mon_en = ENGLISH_MONTHS[date_ce.month - 1].capitalize()
+    d_year = date_ce.year
+    query = f"NBT NEWSLINE {d_day} {d_mon_en} {d_year}"
+    try:
+        if fetch_fn is not None:
+            md = fetch_fn(query)
+        else:
+            md = _jina_fetch(f"https://duckduckgo.com/html/?q={urllib.parse.quote(query)}")
+    except Exception:
+        return None
+
+    need = f"newsline-{d_day}-{d_mon_en.lower()}-{d_year}"
+    for slug, vid in _FB_VIDEO_RE.findall(urllib.parse.unquote(md)):
+        if need in slug.lower():
+            return f"https://www.facebook.com/nbtworld/videos/{vid}/"
+    return None
+
+
 def fetch_yt_listing(runner=None) -> list[tuple[str, str]]:
     """Fetch recent video listing from @NBTWorldOfficial via yt-dlp."""
     yt_bin = os.path.expanduser("~/.local/bin/yt-dlp")
@@ -2372,6 +2416,7 @@ def preview_report_autofill(
     doc_id: str,
     doc_data: dict | None = None,
     brave_fn=None,
+    ddg_fn=None,
     yt_fn=None,
     yt_listing: list[tuple[str, str]] | None = None,
 ) -> dict:
@@ -2396,14 +2441,17 @@ def preview_report_autofill(
         nl_info = slot["newsline"]
         nbtwb_info = slot["nbtwb"]
 
-        # 1. NEWSLINE
+        # 1. NEWSLINE — Brave first, DDG-via-Jina fallback (slug-verified) on miss.
+        # When any search fn is injected the caller owns the whole chain (no
+        # implicit network in tests); only the no-injection path goes live.
         if nl_info.get("linked") and nl_info.get("url"):
             newsline_url = nl_info["url"]
         else:
-            if brave_fn is not None:
-                newsline_url = brave_fn(date_ce)
+            if brave_fn is not None or ddg_fn is not None:
+                newsline_url = ((brave_fn(date_ce) if brave_fn else None)
+                                or (ddg_fn(date_ce) if ddg_fn else None))
             else:
-                newsline_url = _brave_search_newsline(date_ce)
+                newsline_url = _brave_search_newsline(date_ce) or _ddg_search_newsline(date_ce)
 
         # 2. NBT WB Evening
         if nbtwb_info.get("linked") and nbtwb_info.get("url"):
@@ -2458,6 +2506,7 @@ def apply_report_autofill(
     preview_data: dict | None = None,
     doc_data: dict | None = None,
     brave_fn=None,
+    ddg_fn=None,
     yt_fn=None,
     yt_listing: list[tuple[str, str]] | None = None,
 ) -> dict:
@@ -2470,6 +2519,7 @@ def apply_report_autofill(
         doc_id=doc_id,
         doc_data=doc_data,
         brave_fn=brave_fn,
+        ddg_fn=ddg_fn,
         yt_fn=yt_fn,
         yt_listing=yt_listing,
     )
