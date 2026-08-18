@@ -52,3 +52,98 @@ export function usePolling<T>(url: string, intervalMs: number): {
 
   return { data, error, refetch };
 }
+
+export interface DaySummary {
+  date: string;
+  reminders: number;
+  prompts: number;
+  completed: number;
+  total: number;
+}
+
+export interface MonthOverview {
+  year: number;
+  month: number;
+  month_name: string;
+  days: Record<string, DaySummary>;
+}
+
+export interface CalendarTask {
+  id: string;
+  date?: string;
+  type: "reminder" | "prompt_task";
+  title: string;
+  status: "pending" | "in_progress" | "completed" | "snoozed";
+  tags?: string[];
+  target_repo?: string;
+  prompt?: string;
+  interpolated_prompt?: string;
+  cron?: string;
+  is_recurring?: boolean;
+}
+
+export interface DayTasksResponse {
+  date: string;
+  date_formatted: string;
+  tasks: CalendarTask[];
+}
+
+export async function fetchMonthOverview(year?: number, month?: number): Promise<MonthOverview> {
+  const params = new URLSearchParams();
+  if (year) params.append("year", String(year));
+  if (month) params.append("month", String(month));
+  const query = params.toString() ? `?${params.toString()}` : "";
+  return fetchJSON<MonthOverview>(`/api/calendar/month${query}`);
+}
+
+export async function fetchDayTasks(date?: string): Promise<DayTasksResponse> {
+  const query = date ? `?date=${date}` : "";
+  return fetchJSON<DayTasksResponse>(`/api/calendar/day${query}`);
+}
+
+export async function createCalendarTask(body: {
+  date?: string;
+  type: "reminder" | "prompt_task";
+  title: string;
+  status?: string;
+  tags?: string[];
+  target_repo?: string;
+  prompt?: string;
+  cron?: string;
+}): Promise<{ status: string; task: CalendarTask }> {
+  return fetchJSON("/api/calendar/task", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+export async function updateCalendarTaskStatus(
+  taskId: string,
+  status: "pending" | "in_progress" | "completed" | "snoozed"
+): Promise<{ status: string; id: string; new_status: string }> {
+  return fetchJSON(`/api/calendar/task/${taskId}/status`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ status }),
+  });
+}
+
+export async function deleteCalendarTask(taskId: string): Promise<{ status: string; deleted_id: string }> {
+  return fetchJSON(`/api/calendar/task/${taskId}`, {
+    method: "DELETE",
+  });
+}
+
+export async function dispatchCalendarPrompt(
+  taskId: string,
+  date?: string,
+  customPrompt?: string
+): Promise<{ status: string; detail?: string }> {
+  return fetchJSON(`/api/calendar/task/${taskId}/dispatch`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ date, custom_prompt: customPrompt }),
+  });
+}
+

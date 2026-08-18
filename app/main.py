@@ -14,6 +14,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
 from .catalog import router as catalog_router
+from .calendar_tasks import router as calendar_router
 from .comfyui import router as comfyui_router
 from .config import CONFIG, Module, reload_config
 from .ffmpeg_jobs import router as ffmpeg_router
@@ -41,6 +42,7 @@ app.include_router(session_router)
 app.include_router(terminal_router)
 app.include_router(thailandnow_router)
 app.include_router(kanban_router)
+app.include_router(calendar_router)
 # Phase E: same-origin reverse proxy for the n8n editor (mounted before the
 # catch-all static mount below so /n8n/* wins over frontend/dist).
 app.include_router(n8n_proxy_router)

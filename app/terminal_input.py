@@ -43,9 +43,8 @@ def _run(argv: list[str]) -> tuple[int, str, str]:
     )
 
 
-@router.post("/api/terminal/insert")
-def insert(body: InsertBody) -> dict:
-    text = body.text
+def insert_text(text: str) -> dict:
+    """Programmatic insert seam — calendar dispatch types prompts in directly."""
     # Reject ALL control chars (not just \n\r): with `-l` tmux types bytes
     # literally, so \x03 would deliver Ctrl-C and \x1b starts escape sequences.
     if any(ord(c) < 32 or ord(c) == 127 for c in text):
@@ -56,3 +55,8 @@ def insert(body: InsertBody) -> dict:
     if rc != 0:
         return {"status": "error", "detail": err.strip()}
     return {"status": "ok"}
+
+
+@router.post("/api/terminal/insert")
+def insert(body: InsertBody) -> dict:
+    return insert_text(body.text)
