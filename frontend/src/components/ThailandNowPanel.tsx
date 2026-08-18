@@ -1191,6 +1191,7 @@ function EventsTab() {
   const [query, setQuery] = usePersistentState("tn.query", "");
   const [weeks, setWeeks] = usePersistentState("tn.weeks", 4);
   const [events, setEvents] = usePersistentState<TnEvent[]>("tn.events", []);
+  const [hideCovered, setHideCovered] = usePersistentState<boolean>("tn.events.hideCovered", true);
   const [fetching, setFetching] = useState(false);
   const [busyLabel, setBusyLabel] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -1209,6 +1210,9 @@ function EventsTab() {
   const [hubsOpen, setHubsOpen] = useState(false);
   const [lastMode, setLastMode] = useState<"links" | "events">("links");
   const [scanning, setScanning] = useState(false);
+  const [syncingRegistry, setSyncingRegistry] = useState(false);
+  const [syncMsg, setSyncMsg] = useState<string | null>(null);
+  const syncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
     let alive = true;
     fetchJSON<{ hubs: { url: string; title: string; mode: string; added?: string }[] }>(
@@ -1221,17 +1225,21 @@ function EventsTab() {
   const [notifyPerm, setNotifyPerm] = useState<NotificationPermission>(
     typeof Notification !== "undefined" ? Notification.permission : "denied",
   );
-  // covered-events dedup set {slug: source} from OURS + COMPANY sheets — fetch once on mount
+  // covered-events dedup set {slug: source} from OURS + COMPANY sheets — fetch on mount or registry sync
   const [covered, setCovered] = useState<Record<string, string>>({});
-  useEffect(() => {
-    let alive = true;
-    fetchJSON<{ covered: Record<string, string>; errors: string[] }>(
-      "/api/thailandnow/events/covered",
-    )
-      .then((r) => { if (alive) setCovered(r.covered ?? {}); })
-      .catch(() => {}); // non-fatal: no badge if the sheets are unreachable
-    return () => { alive = false; };
+  const loadCovered = useCallback(async () => {
+    try {
+      const r = await fetchJSON<{ covered: Record<string, string>; errors: string[] }>(
+        "/api/thailandnow/events/covered",
+      );
+      setCovered(r.covered ?? {});
+    } catch {
+      // non-fatal: no badge if the sheets are unreachable
+    }
   }, []);
+  useEffect(() => {
+    loadCovered();
+  }, [loadCovered]);
 
   // DEEP: poll jobs + this mode's notebooks
   const { data: jobsData, refetch: refetchJobs } = usePolling<{ jobs: TnJob[] }>(
@@ -1258,8 +1266,11 @@ function EventsTab() {
     }
   }, [mode]);
 
-  // clear the 📋 IDE SCOUT "COPIED ✓" flash timer on unmount
-  useEffect(() => () => { if (copyTimeoutRef.current) clearTimeout(copyTimeoutRef.current); }, []);
+  // clear the 📋 IDE SCOUT and sync flash timers on unmount
+  useEffect(() => () => {
+    if (copyTimeoutRef.current) clearTimeout(copyTimeoutRef.current);
+    if (syncTimerRef.current) clearTimeout(syncTimerRef.current);
+  }, []);
 
   // browser-notify when a deep-search job flips to done (and refresh the notebook list)
   const prevDone = useRef<Set<string>>(new Set());
@@ -1280,15 +1291,41 @@ function EventsTab() {
 
   // dedup key + ascending-by-start-date view (stable for events sharing a date)
   const keyOf = (e: TnEvent) => e.url || e.title;
-  const sorted = useMemo(
-    () =>
-      [...events].sort((a, b) => {
-        const sa = a.start_date ?? "";
-        const sb = b.start_date ?? "";
-        return sa < sb ? -1 : sa > sb ? 1 : 0;
-      }),
-    [events],
-  );
+  const sorted = useMemo(() => {
+    const list = [...events].sort((a, b) => {
+      const sa = a.start_date ?? "";
+      const sb = b.start_date ?? "";
+      return sa < sb ? -1 : sa > sb ? 1 : 0;
+    });
+    if (!hideCovered) return list;
+    return list.filter((e) => {
+      const src = covered[slugCovered(e.title)];
+      return !(src === "ours" || src === "company");
+    });
+  }, [events, hideCovered, covered]);
+
+  const hiddenCount = events.length - sorted.length;
+
+  const handleSyncRegistry = useCallback(async () => {
+    setSyncingRegistry(true);
+    try {
+      const r = await fetchJSON<{ published_synced: number; pipeline_flipped: number }>(
+        "/api/thailandnow/events/registry/sync",
+        { method: "POST" },
+      );
+      await loadCovered();
+      const msg = `synced ${r.published_synced ?? 0} published (${r.pipeline_flipped ?? 0} flipped)`;
+      setSyncMsg(msg);
+      if (syncTimerRef.current) clearTimeout(syncTimerRef.current);
+      syncTimerRef.current = setTimeout(() => setSyncMsg(null), 4000);
+    } catch (e: any) {
+      setSyncMsg(`sync failed: ${e?.message || e}`);
+      if (syncTimerRef.current) clearTimeout(syncTimerRef.current);
+      syncTimerRef.current = setTimeout(() => setSyncMsg(null), 4000);
+    } finally {
+      setSyncingRegistry(false);
+    }
+  }, [loadCovered]);
 
   // SCOUT (instant, sync)
   const runScout = useCallback(async () => {
@@ -1545,10 +1582,17 @@ function EventsTab() {
         >
           ★ HUBS{hubs.length ? ` (${hubs.length})` : ""}
         </button>
+        <button
+          className="btn btn--md"
+          disabled={syncingRegistry}
+          onClick={handleSyncRegistry}
+        >
+          {syncingRegistry ? "↻ SYNCING…" : "↻ SYNC REGISTRY"}
+        </button>
         <span className="mono" style={{ color: "var(--color-muted)" }}>
-          {mode === "scout"
+          {syncMsg || (mode === "scout"
             ? "instant keyless search"
-            : "NotebookLM research + on-demand extract"}
+            : "NotebookLM research + on-demand extract")}
         </span>
       </div>
 
@@ -1769,12 +1813,23 @@ function EventsTab() {
 
       <section className="hud hud--bracket reveal reveal-2 p-3">
         <div className="mb-2 flex items-center justify-between">
-          <span className="label">RESULTS{sorted.length ? ` · ${sorted.length}` : ""}</span>
-          {sorted.length > 0 && (
-            <button className="btn btn--compact btn--crit" onClick={() => setEvents([])}>
-              CLEAR
+          <span className="label">
+            RESULTS{sorted.length ? ` · ${sorted.length}` : ""}
+            {hiddenCount > 0 ? `, ${hiddenCount} covered hidden` : ""}
+          </span>
+          <div className="flex items-center gap-2">
+            <button
+              className={`btn btn--compact ${hideCovered ? "btn--signal" : ""}`}
+              onClick={() => setHideCovered((v) => !v)}
+            >
+              {hideCovered ? "✕ HIDE COVERED" : "☐ HIDE COVERED"}
             </button>
-          )}
+            {events.length > 0 && (
+              <button className="btn btn--compact btn--crit" onClick={() => setEvents([])}>
+                CLEAR
+              </button>
+            )}
+          </div>
         </div>
         {busyLabel ? (
           <div className="mono caret" style={{ color: "var(--color-signal)" }}>
@@ -1806,13 +1861,22 @@ function EventsTab() {
                   </span>
                 )}
                 <span className="mono">{e.title}</span>
-                {covered[slugCovered(e.title)] && (
+                {(covered[slugCovered(e.title)] === "ours" || covered[slugCovered(e.title)] === "company") && (
                   <span
                     className="label"
                     style={{ color: "var(--color-signal)" }}
                     title={`already covered (${covered[slugCovered(e.title)]})`}
                   >
                     ✓ COVERED
+                  </span>
+                )}
+                {covered[slugCovered(e.title)] === "pipeline" && (
+                  <span
+                    className="label"
+                    style={{ color: "var(--color-go)" }}
+                    title="in pipeline (see Pipeline tab)"
+                  >
+                    ⚙ PIPELINE
                   </span>
                 )}
                 {e.url && (

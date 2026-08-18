@@ -1944,9 +1944,88 @@ async def _read_sheet_col(sheet_id: str, range_param: str, col: int = 0, header_
     return out
 
 
+async def _sheet_append_rows(sheet_id: str, tab: str, rows: list[list[str]]) -> None:
+    """Append rows under existing data of tab in Google Sheet."""
+    token = await _google_token()
+    hdr = {"Authorization": f"Bearer {token}"}
+    rng = f"{tab}!A1" if tab else "A1"
+    url = f"https://sheets.googleapis.com/v4/spreadsheets/{sheet_id}/values/{urllib.parse.quote(rng)}:append?valueInputOption=RAW"
+    async with httpx.AsyncClient(timeout=30) as c:
+        r = await c.post(url, headers=hdr, json={"values": rows})
+        if r.status_code != 200:
+            raise HTTPException(502, f"Sheets append failed ({sheet_id}): {r.text[:160]}")
+
+
+async def _sheet_update_range(sheet_id: str, tab: str, range_param: str, rows: list[list[str]]) -> None:
+    """Update a specific range in Google Sheet with rows."""
+    token = await _google_token()
+    hdr = {"Authorization": f"Bearer {token}"}
+    full_range = f"{tab}!{range_param}" if tab else range_param
+    url = f"https://sheets.googleapis.com/v4/spreadsheets/{sheet_id}/values/{urllib.parse.quote(full_range)}?valueInputOption=RAW"
+    async with httpx.AsyncClient(timeout=30) as c:
+        r = await c.put(url, headers=hdr, json={"values": rows})
+        if r.status_code != 200:
+            raise HTTPException(502, f"Sheets update failed ({sheet_id}): {r.text[:160]}")
+
+
+async def _sheet_update_cell(sheet_id: str, tab: str, row_number: int, col_letter: str, value: str) -> None:
+    """Update a single cell in Google Sheet."""
+    await _sheet_update_range(sheet_id, tab, f"{col_letter}{row_number}", [[value]])
+
+
+async def _sheet_read_all(sheet_id: str, tab: str) -> list[list[str]]:
+    """Read all rows (A1:F10000) from tab as raw strings."""
+    token = await _google_token()
+    hdr = {"Authorization": f"Bearer {token}"}
+    rng = f"{tab}!A1:F10000" if tab else "A1:F10000"
+    url = f"https://sheets.googleapis.com/v4/spreadsheets/{sheet_id}/values/{urllib.parse.quote(rng)}"
+    async with httpx.AsyncClient(timeout=30) as c:
+        r = await c.get(url, headers=hdr)
+        if r.status_code != 200:
+            raise HTTPException(502, f"Sheets read failed ({sheet_id}): {r.text[:160]}")
+        return r.json().get("values", [])
+
+
+async def _ensure_pipeline_tab() -> None:
+    """Ensure the 'Pipeline' tab exists in the OURS Covered Events Registry sheet."""
+    token = await _google_token()
+    hdr = {"Authorization": f"Bearer {token}"}
+    url = f"https://sheets.googleapis.com/v4/spreadsheets/{COVERED_OURS_SHEET}?fields=sheets.properties.title"
+    async with httpx.AsyncClient(timeout=30) as c:
+        r = await c.get(url, headers=hdr)
+        if r.status_code != 200:
+            raise HTTPException(502, f"Sheets metadata read failed ({COVERED_OURS_SHEET}): {r.text[:160]}")
+        sheets = r.json().get("sheets", [])
+        titles = [s.get("properties", {}).get("title") for s in sheets if isinstance(s, dict)]
+        if "Pipeline" not in titles:
+            batch_url = f"https://sheets.googleapis.com/v4/spreadsheets/{COVERED_OURS_SHEET}:batchUpdate"
+            batch_body = {"requests": [{"addSheet": {"properties": {"title": "Pipeline"}}}]}
+            r_add = await c.post(batch_url, headers=hdr, json=batch_body)
+            if r_add.status_code != 200:
+                raise HTTPException(502, f"Sheets addSheet failed ({COVERED_OURS_SHEET}): {r_add.text[:160]}")
+            header = ["Provisioned At", "Event Title", "Slug", "Trello Card", "Doc Link", "Status"]
+            await _sheet_append_rows(COVERED_OURS_SHEET, "Pipeline", [header])
+
+
+async def _pipeline_find_row(slug: str) -> int | None:
+    """Find 1-based row number in Pipeline tab matching slug; None if absent."""
+    await _ensure_pipeline_tab()
+    rows = await _sheet_read_all(COVERED_OURS_SHEET, "Pipeline")
+    target_slug = _covered_slug(slug)
+    if not target_slug:
+        return None
+    for idx, row in enumerate(rows, start=1):
+        if idx == 1:
+            continue
+        col_slug = row[2] if len(row) > 2 else ""
+        if _covered_slug(col_slug) == target_slug:
+            return idx
+    return None
+
+
 async def _covered_events() -> tuple[dict[str, str], list[str]]:
     """Return ({slug: source}, errors). A title is 'covered' if its slug is in
-    EITHER sheet (double filter). One unreadable sheet doesn't blank the set."""
+    EITHER sheet (double filter) or in pipeline. One unreadable sheet doesn't blank the set."""
     out: dict[str, str] = {}
     errors: list[str] = []
     try:
@@ -1964,6 +2043,15 @@ async def _covered_events() -> tuple[dict[str, str], list[str]]:
                 out.setdefault(slug, "company")
     except Exception as e:
         errors.append(f"company: {e}")
+    try:
+        pipeline_rows = await _sheet_read_all(COVERED_OURS_SHEET, "Pipeline")
+        for row in pipeline_rows[1:]:
+            if len(row) > 2:
+                slug = _covered_slug(row[2])
+                if slug:
+                    out.setdefault(slug, "pipeline")
+    except Exception as e:
+        errors.append(f"pipeline: {e}")
     return out, errors
 
 
@@ -1972,6 +2060,105 @@ async def get_covered_events() -> dict:
     """Covered-events set for the EVENTS tab dedup badge. {covered: {slug: source}, errors: []}."""
     covered, errors = await _covered_events()
     return {"covered": covered, "errors": errors}
+
+
+async def _wp_pull_published_events() -> list[dict]:
+    """Page the public Thailand NOW WP REST event endpoint."""
+    events: list[dict] = []
+    page = 1
+    async with httpx.AsyncClient(timeout=30) as c:
+        while True:
+            url = f"https://www.thailandnow.in.th/wp-json/wp/v2/event?per_page=100&page={page}&_fields=slug,date,title,link,id"
+            r = await c.get(url)
+            if r.status_code != 200:
+                break
+            try:
+                items = r.json()
+            except Exception:
+                break
+            if not isinstance(items, list) or not items:
+                break
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                t_val = item.get("title")
+                title = t_val.get("rendered", "") if isinstance(t_val, dict) else str(t_val or "")
+                title = html.unescape(title).strip()
+                events.append({
+                    "id": item.get("id"),
+                    "date": item.get("date") or "",
+                    "slug": item.get("slug") or "",
+                    "link": item.get("link") or "",
+                    "title": title,
+                })
+            if len(items) < 100:
+                break
+            page += 1
+    return events
+
+
+@router.post("/api/thailandnow/events/registry/sync")
+async def sync_events_registry() -> dict:
+    """Sync published events from WP to the OURS Covered Events Registry sheet (tab 1),
+    and flip matched pipeline items to PUBLISHED."""
+    events = await _wp_pull_published_events()
+    if not events:
+        # A dead/renamed WP endpoint must never blank the registry — skip the rewrite.
+        return {"published_synced": 0, "pipeline_flipped": 0,
+                "skipped": "WP pull returned no events — Published tab left untouched"}
+    events.sort(key=lambda x: str(x.get("date") or ""))
+
+    header = ["Event Title", "Date Published (WP)", "Slug", "WP Link", "WP ID"]
+    new_rows: list[list[str]] = [header]
+    for e in events:
+        new_rows.append([
+            str(e.get("title") or ""),
+            str(e.get("date") or ""),
+            str(e.get("slug") or ""),
+            str(e.get("link") or ""),
+            str(e.get("id") or ""),
+        ])
+
+    curr_rows: list[list[str]] = []
+    try:
+        curr_rows = await _sheet_read_all(COVERED_OURS_SHEET, "")
+    except Exception:
+        pass
+
+    max_rows = max(len(new_rows), len(curr_rows) + 1)
+    padded_rows: list[list[str]] = []
+    for r in new_rows:
+        padded_rows.append((r + [""] * 5)[:5])
+    while len(padded_rows) < max_rows:
+        padded_rows.append(["", "", "", "", ""])
+
+    await _sheet_update_range(COVERED_OURS_SHEET, "", f"A1:E{max_rows}", padded_rows)
+
+    published_slugs = set()
+    for e in events:
+        s1 = _covered_slug(e.get("slug") or "")
+        if s1:
+            published_slugs.add(s1)
+        s2 = _covered_slug(e.get("title") or "")
+        if s2:
+            published_slugs.add(s2)
+
+    pipeline_flipped = 0
+    try:
+        await _ensure_pipeline_tab()
+        pipeline_rows = await _sheet_read_all(COVERED_OURS_SHEET, "Pipeline")
+        for idx, row in enumerate(pipeline_rows, start=1):
+            if idx == 1:
+                continue
+            row_slug = _covered_slug(row[2]) if len(row) > 2 else ""
+            row_status = (row[5] if len(row) > 5 else "").strip()
+            if row_slug and (row_slug in published_slugs) and row_status != "PUBLISHED":
+                await _sheet_update_cell(COVERED_OURS_SHEET, "Pipeline", idx, "F", "PUBLISHED")
+                pipeline_flipped += 1
+    except Exception:
+        pass
+
+    return {"published_synced": len(events), "pipeline_flipped": pipeline_flipped}
 
 
 def _fireside_source_gem_path() -> Path:
@@ -3098,7 +3285,7 @@ async def create_event_doc(payload: dict = Body(default={})):
     start_iso, due_iso = _date_rule(
         event.get("start_date"), event.get("end_date"), event.get("signup_deadline")
     )
-    return await provision({
+    res = await provision({
         "desk_id": "tian",
         "title": title,
         "body": body.get("bundle_text") or "",
@@ -3108,6 +3295,22 @@ async def create_event_doc(payload: dict = Body(default={})):
         "due": body.get("due") or due_iso,
         "start": body.get("start") or start_iso,
     })
+    if isinstance(res, dict) and res.get("items"):
+        try:
+            item0 = res["items"][0]
+            card_url = item0.get("card_url", "")
+            doc_url = item0.get("doc_url", "")
+            today_iso = datetime.now().strftime("%Y-%m-%d")
+            await _ensure_pipeline_tab()
+            await _sheet_append_rows(
+                COVERED_OURS_SHEET,
+                "Pipeline",
+                [[today_iso, title, _covered_slug(title), card_url, doc_url, "PIPELINE"]],
+            )
+            res["registry"] = "pipeline-logged"
+        except Exception as e:
+            res["registry"] = f"skipped: {e}"
+    return res
 
 
 # --- ARCHIVE tab (Stage 1) — chat Q&A over the Event Drive, DIRECT path only ---
@@ -5377,7 +5580,25 @@ async def publish_event_from_card(payload: dict = Body(default={})) -> dict:
     _o = urllib.parse.urlparse(permalink)
     link = f"{_o.scheme}://{_o.netloc}/wp-admin/post.php?post={post_id}&action=edit" if _o.netloc else permalink
 
-    return {
+    registry_status = None
+    if kind == "event":
+        try:
+            slug_key = _covered_slug(title) or _covered_slug(slug)
+            row_num = await _pipeline_find_row(slug_key)
+            today_iso = datetime.now().strftime("%Y-%m-%d")
+            if row_num:
+                await _sheet_update_cell(COVERED_OURS_SHEET, "Pipeline", row_num, "F", "DRAFT")
+            else:
+                await _sheet_append_rows(
+                    COVERED_OURS_SHEET,
+                    "Pipeline",
+                    [[today_iso, title, slug_key, "", permalink, "DRAFT"]],
+                )
+            registry_status = "draft-logged"
+        except Exception as e:
+            registry_status = f"skipped: {e}"
+
+    ret = {
         "wp_id": post_id,
         "link": link,
         "status": "draft",
@@ -5397,6 +5618,9 @@ async def publish_event_from_card(payload: dict = Body(default={})) -> dict:
             "key_takeaways": seo_data["ai_b"],
         },
     }
+    if registry_status is not None:
+        ret["registry"] = registry_status
+    return ret
 
 
 @router.post("/api/thailandnow/events/wp-publish")
