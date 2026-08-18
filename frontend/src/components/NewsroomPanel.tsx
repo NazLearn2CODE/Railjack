@@ -482,7 +482,6 @@ interface NewsReportResponse {
   category: "global" | "business";
   results: NewsArticle[];
   count: number;
-  slice_of_life: NewsArticle[];
   mtime: number;
 }
 
@@ -810,7 +809,6 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
   const [newsReportLoading, setNewsReportLoading] = useState<boolean>(false);
   const [newsReport, setNewsReport] = useState<NewsReportResponse | null>(null);
   const [selectedArticles, setSelectedArticles] = useState<NewsArticle[]>([]);
-  const [slicePick, setSlicePick] = useState<NewsArticle | null>(null);
   const [newsApplying, setNewsApplying] = useState<boolean>(false);
   const [newsApplyResult, setNewsApplyResult] = useState<NewsFillApplyResponse | null>(null);
   // Cheap lane: exact-count scout + one-click autopilot (no human curation)
@@ -1432,7 +1430,6 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
     setError(null);
     setNewsReport(null);
     setSelectedArticles([]);
-    setSlicePick(null);
     setNewsApplyResult(null);
     try {
       const data = await fetchJSON<NewsReportResponse>("/api/newsroom/radio/news/report");
@@ -1447,17 +1444,18 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
     }
   };
 
-  const targetHardCount = selectedDoc?.kind === "weekend" ? (newsCategory === "global" ? 7 : 6) : 10;
-  const isWeekdayGlobal = selectedDoc?.kind === "weekday" && newsCategory === "global";
+  const targetHardCount =
+    selectedDoc?.kind === "weekend" ? (newsCategory === "global" ? 7 : 6) : newsCategory === "global" ? 11 : 10;
 
-  // Cheap-lane exact-fill counts: N results / M SEA / K slice, keyed on
-  // category + kind (matches the backend fill-map — no headroom, AUTOPILOT
-  // takes all). A doc with no kind yet is treated as weekday (the default).
+  // Cheap-lane exact-fill counts: N results / M SEA, keyed on category + kind
+  // (matches the backend fill-map — no headroom, AUTOPILOT takes all). Slice-of-life
+  // decommissioned 2026-08-18 — its weekday quota folded into Global (10+1 → 11).
+  // A doc with no kind yet is treated as weekday (the default).
   const cheapCounts = (() => {
     if (newsCategory === "global") {
-      return selectedDoc?.kind === "weekend" ? { N: 7, M: 2, K: 0 } : { N: 10, M: 3, K: 1 };
+      return selectedDoc?.kind === "weekend" ? { N: 7, M: 2 } : { N: 11, M: 3 };
     }
-    return selectedDoc?.kind === "weekend" ? { N: 6, M: 0, K: 0 } : { N: 10, M: 0, K: 0 };
+    return selectedDoc?.kind === "weekend" ? { N: 6, M: 0 } : { N: 10, M: 0 };
   })();
 
   const toggleArticleSelect = (article: NewsArticle) => {
@@ -1474,7 +1472,6 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
   const isConfirmEnabled =
     Boolean(selectedDoc) &&
     selectedArticles.length === targetHardCount &&
-    (!isWeekdayGlobal || slicePick !== null) &&
     !newsApplying;
 
   const handleNewsApply = async () => {
@@ -1488,7 +1485,6 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
         kind: selectedDoc.kind,
         category: newsCategory,
         pieces: selectedArticles,
-        slice: isWeekdayGlobal ? slicePick : null,
       };
       const res = await fetch("/api/newsroom/radio/news/apply", {
         method: "POST",
@@ -1518,9 +1514,9 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
     setNewsCheapScouting(true);
     setError(null);
     try {
-      const { N, M, K } = cheapCounts;
+      const { N, M } = cheapCounts;
       await post("/api/terminal/insert", {
-        text: `/radio-news-scout ${newsCategory} --results ${N} --sea ${M} --slice ${K}`,
+        text: `/radio-news-scout ${newsCategory} --results ${N} --sea ${M}`,
       });
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : String(e));
@@ -1605,13 +1601,12 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
   const REGULAR_LANE_BUFFER = 5;
   const handleCopyAntigravityPrompt = async (curated = false) => {
     const kind = selectedDoc?.kind ?? "weekday";
-    const { N, M, K } = cheapCounts;
+    const { N, M } = cheapCounts;
     const scoutN = curated ? N + REGULAR_LANE_BUFFER : N;
-    const sliceClause = K > 0 ? ` plus ${K} slice-of-life piece` : " and no slice-of-life piece (no AM tab)";
     const countClause = curated
-      ? `gather ${scoutN} results (aim for at least ${M} SEA-led)${sliceClause} — a few MORE than the ${N} I need, so I can curate`
-      : `gather EXACTLY ${scoutN} results (${M} of them SEA-led)${sliceClause}`;
-    const promptText = `Read \`10-knowledge/radio-news-antigravity-handoff.md\` in this vault. Scout TODAY-ONLY (published today, not yesterday — this airs same-day) news for category \`${newsCategory}\`, kind \`${kind}\` — ${countClause} — from the anchor outlets first, broadening to ANY reputable non-blacklisted source to fill the count; REJECT pure stock-market churn (daily index/earnings/share-price recaps); word floor ≥180, tiering DOWN (170/160/…) only if same-day supply is short (never relax same-day); tag each piece's \`word_floor\`. Rewrite each piece + the slice-of-life into Editor Ben's broadcast voice (≥ the piece's \`word_floor\`, ≤ 250 words; rules in that note), tag SEA pieces, and write the result to \`/tmp/railjack-radio-news/latest.json\` in the exact shape shown — \`"rewritten": true\` on every piece. Do not touch any Google Doc.`;
+      ? `gather ${scoutN} results (aim for at least ${M} SEA-led) — a few MORE than the ${N} I need, so I can curate`
+      : `gather EXACTLY ${scoutN} results (${M} of them SEA-led)`;
+    const promptText = `Read \`10-knowledge/radio-news-antigravity-handoff.md\` in this vault. Scout TODAY-ONLY (published today, not yesterday — this airs same-day) news for category \`${newsCategory}\`, kind \`${kind}\` — ${countClause} — from the anchor outlets first, broadening to ANY reputable non-blacklisted source to fill the count; REJECT pure stock-market churn (daily index/earnings/share-price recaps); word floor ≥180, tiering DOWN (170/160/…) only if same-day supply is short (never relax same-day); tag each piece's \`word_floor\`. Rewrite each piece into Editor Ben's broadcast voice (≥ the piece's \`word_floor\`, ≤ 250 words; rules in that note) — never date events as "today"/"this morning"/"yesterday", tag SEA pieces, and write the result to \`/tmp/railjack-radio-news/latest.json\` in the exact shape shown — \`"rewritten": true\` on every piece. Do not touch any Google Doc.`;
     try {
       await navigator.clipboard.writeText(promptText);
       setError(null);
@@ -2733,7 +2728,6 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
                   onChange={(e) => {
                     setNewsCategory(e.target.value as "global" | "business");
                     setSelectedArticles([]);
-                    setSlicePick(null);
                   }}
                 >
                   <option value="global">GLOBAL</option>
@@ -2844,7 +2838,6 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
                             onClick={() => {
                               setSelectedDoc(doc);
                               setSelectedArticles([]);
-                              setSlicePick(null);
                               setNewsApplyResult(null);
                             }}
                             style={{
@@ -2895,7 +2888,7 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
                     disabled={!selectedDoc || newsCheapScouting}
                     title={
                       selectedDoc
-                        ? `Inject scout for exactly ${cheapCounts.N} results (${cheapCounts.M} SEA, ${cheapCounts.K} slice)`
+                        ? `Inject scout for exactly ${cheapCounts.N} results (${cheapCounts.M} SEA)`
                         : "Pick a script doc first"
                     }
                   >
@@ -2903,7 +2896,7 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
                   </button>
                   <span style={{ color: "var(--color-muted)" }}>
                     {selectedDoc
-                      ? `gather exactly ${cheapCounts.N} · ${cheapCounts.M} SEA · ${cheapCounts.K} slice`
+                      ? `gather exactly ${cheapCounts.N} · ${cheapCounts.M} SEA`
                       : "pick a doc"}
                   </span>
                   <span style={{ color: "var(--color-muted)" }}>→</span>
@@ -2930,7 +2923,7 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
                     📋 COPY ANTIGRAVITY PROMPT
                   </button>
                   <span style={{ color: "var(--color-muted)" }}>
-                    {newsCategory} · {selectedDoc?.kind ?? "weekday"} · {cheapCounts.N}/{cheapCounts.M} SEA/{cheapCounts.K} slice → IDE
+                    {newsCategory} · {selectedDoc?.kind ?? "weekday"} · {cheapCounts.N}/{cheapCounts.M} SEA → IDE
                   </span>
                 </div>
               </div>
@@ -2945,14 +2938,6 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
                     {selectedArticles.length} / {targetHardCount} selected
                   </span>
                 </div>
-                {isWeekdayGlobal && (
-                  <div className="flex items-center gap-1.5">
-                    <span className="label" style={{ color: "var(--color-signal)" }}>SLICE OF LIFE:</span>
-                    <span style={{ color: slicePick ? "var(--color-go)" : "var(--color-hazard)" }}>
-                      {slicePick ? "1 picked" : "0 picked"}
-                    </span>
-                  </div>
-                )}
               </div>
               <div className="ml-auto flex items-center gap-2">
                 {newsFormatResult && (
@@ -2985,7 +2970,7 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
                   className="btn btn--compact btn--signal"
                   onClick={() => void handleNewsApply()}
                   disabled={!isConfirmEnabled}
-                  title={!isConfirmEnabled ? "Target hard picks and required slice pick must be met" : "Apply selected pieces to target document"}
+                  title={!isConfirmEnabled ? "Target hard picks must be met" : "Apply selected pieces to target document"}
                 >
                   {newsApplying ? "APPLYING…" : "CONFIRM & APPLY TO DOC"}
                 </button>
@@ -3120,56 +3105,6 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
                       })}
                     </div>
                   </div>
-
-                  {/* Slice of Life Section (weekday global only) */}
-                  {isWeekdayGlobal && newsReport.slice_of_life && newsReport.slice_of_life.length > 0 && (
-                    <div className="border-t border-edge pt-2">
-                      <span className="label mb-1 block" style={{ color: "var(--color-hazard)" }}>
-                        SLICE OF LIFE (PICK EXACTLY 1)
-                      </span>
-                      <div className="flex flex-col gap-1">
-                        {newsReport.slice_of_life.map((slice) => {
-                          const isPicked = slicePick?.url === slice.url;
-                          return (
-                            <div
-                              key={slice.url}
-                              onClick={() => setSlicePick(isPicked ? null : slice)}
-                              className="mono flex cursor-pointer items-start gap-2 border border-edge px-2 py-1.5"
-                              style={{
-                                background: isPicked
-                                  ? "color-mix(in srgb, var(--color-hazard) 15%, var(--color-panel-2))"
-                                  : "var(--color-panel-2)",
-                                borderColor: isPicked ? "var(--color-hazard)" : "var(--color-edge)",
-                              }}
-                            >
-                              <input
-                                type="radio"
-                                name="slice_pick"
-                                checked={isPicked}
-                                onChange={() => setSlicePick(slice)}
-                                className="mt-1"
-                              />
-                              <div className="flex flex-1 flex-col gap-0.5 min-w-0">
-                                <div className="flex items-center justify-between gap-2">
-                                  <span
-                                    className="font-semibold text-xs truncate"
-                                    style={{
-                                      color: isPicked ? "var(--color-phosphor)" : "var(--color-phosphor-dim)",
-                                    }}
-                                  >
-                                    {slice.title}
-                                  </span>
-                                  <span className="label text-xs shrink-0" style={{ color: "var(--color-muted)", fontSize: "10px" }}>
-                                    {slice.source} · {slice.words}w
-                                  </span>
-                                </div>
-                              </div>
-                            </div>
-                          );
-                        })}
-                      </div>
-                    </div>
-                  )}
                 </div>
               ) : (
                 <div className="flex flex-1 flex-col items-center justify-center gap-2">

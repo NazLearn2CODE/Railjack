@@ -3,7 +3,7 @@ script (``radio_news.py``) in the skill-library repo (synced to ~/.claude/skills
 
 Mirrors ``app/newsroom.py``: the CLI script is the contract (it owns the
 Drive Docs batchUpdate over the 3 radio tabs), this panel only builds argv,
-feeds the write path its pieces/slice on stdin, and surfaces ``_fatal``
+feeds the write path its pieces on stdin, and surfaces ``_fatal``
 (→ 400) vs stderr (→ 502). argv **lists** via
 ``asyncio.create_subprocess_exec`` (never shell).
 """
@@ -120,15 +120,14 @@ async def api_report():
 
 @router.post("/api/newsroom/radio/news/apply")
 async def api_apply(body: dict = Body(...)):
-    """Write path — ``fill`` the picked doc's radio tabs. Pieces + slice go to
+    """Write path — ``fill`` the picked doc's radio tabs. Pieces go to
     the child on stdin; the 180s cap covers a Docs batchUpdate over 3 tabs."""
     doc_id, kind, category = body.get("doc_id"), body.get("kind"), body.get("category")
     if not (doc_id and kind and category):
         raise HTTPException(400, "doc_id, kind and category are required")
     argv = [PY, str(RNEWS), "fill", "--doc", str(doc_id),
             "--kind", str(kind), "--category", str(category)]
-    stdin = json.dumps({"pieces": body.get("pieces", []),
-                        "slice": body.get("slice")}).encode()
+    stdin = json.dumps({"pieces": body.get("pieces", [])}).encode()
     return await _script(argv, timeout=180, stdin=stdin)
 
 

@@ -2,7 +2,7 @@
 title: RADIO — News Fill broadcast rewrite (Editor Ben's voice)
 status: active
 created: 2026-07-28
-updated: 2026-07-30
+updated: 2026-08-18
 tags: [day-job, radio, railjack, gem, news-fill, rewrite, ben]
 ---
 
@@ -106,6 +106,13 @@ article's headline and body. Return a rewritten headline and a broadcast script.
     - **Never invent or guess a rendering.** If the source says สุรศักดิ์ พันธ์เจริญวรกุล and you
       do not confidently know the official English form, output **สุรศักดิ์ พันธ์เจริญวรกุล**
       — not a guessed transliteration, not a made-up English equivalent.
+13. **No day-deictics — never say "today".** The script airs after the events, so nothing
+    is "happening today": strip "today", "this morning", "earlier today", "tonight", and
+    "yesterday" from the source's phrasing — in the lede, the body, AND the title. Anchor
+    time in the verb instead (present-perfect "has launched" / simple past), or use an
+    explicit absolute date only when the source states one and it matters ("on Tuesday",
+    "this week"). Same-day sourcing is the gather gate, not voice; the copy never dates
+    itself.
 
 ### Ben's voice (match it)
 - **The lede turns.** The opening sentence carries the news AND turns on a vivid active

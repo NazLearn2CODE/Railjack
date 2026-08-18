@@ -682,21 +682,12 @@ def test_rn_request_builders_tab_scoped():
         "startIndex": 10, "endIndex": 18, "tabId": "t.1"}
 
 
-def test_rn_slice_leadin_fill():
-    rn = _load_radio_news()
-    out = rn.slice_leadin_fill("X [ARTICLE HEADLINE] Y [SOURCE] Z", "Big News", "Reuters")
-    assert "Big News" in out
-    assert "Reuters" in out
-    assert "[ARTICLE HEADLINE]" not in out
-    assert "[SOURCE]" not in out
-
-
 # --- route tests (always run; _run is monkeypatched) ---
 
 
 def test_rn_report_happy_and_fatal(monkeypatch):
     payload = {"category": "global", "results": [], "count": 0,
-               "slice_of_life": None, "mtime": "2026-07-27T00:00:00Z"}
+               "mtime": "2026-07-27T00:00:00Z"}
     c, _, _ = _rn_client(monkeypatch, out=json.dumps(payload).encode())
     r = c.get("/api/newsroom/radio/news/report")
     assert r.status_code == 200
@@ -765,8 +756,7 @@ def test_rn_apply_argv_and_stdin(monkeypatch):
     c, calls, stdins = _rn_client(monkeypatch, out=b'{"written": [], "skipped": []}')
     body = {"doc_id": "DOC1", "kind": "weekday", "category": "global",
             "pieces": [{"title": "T", "url": "U", "source": "S",
-                        "date": "2026-07-27", "content": "C", "words": 100}],
-            "slice": {"title": "slice title"}}
+                        "date": "2026-07-27", "content": "C", "words": 100}]}
     r = c.post("/api/newsroom/radio/news/apply", json=body)
     assert r.status_code == 200
     argv = calls[0]
@@ -775,7 +765,7 @@ def test_rn_apply_argv_and_stdin(monkeypatch):
     assert argv[2:] == ["fill", "--doc", "DOC1", "--kind", "weekday", "--category", "global"]
     sent = json.loads(stdins[0])
     assert sent["pieces"][0]["title"] == "T"
-    assert sent["slice"]["title"] == "slice title"
+    assert "slice" not in sent  # decommissioned 2026-08-18 — APPLY sends pieces only
 
 
 # --- SEA-lead placement (assign_pieces) + AUTOPILOT autofill ---
@@ -1003,7 +993,6 @@ def test_rn_report_carries_rewritten_and_region(tmp_path, capsys):
             {"title": "plain", "url": "u2", "source": "AP", "date": "2026-07-28",
              "content": "cut2", "words": 210},  # no region/rewritten → defaults
         ],
-        "slice_of_life": [],
     }))
 
     class _Args:
