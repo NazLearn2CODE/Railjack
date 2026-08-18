@@ -281,12 +281,17 @@ interface RecordingPreviewResponse {
   script_doc: string;
   date?: string;
   rundown_name?: string;
+  prompter_name?: string;
+  target_names?: string[];
   rundown_doc?: string;
   prompter_doc?: string;
+  rundown_url?: string;
+  prompter_url?: string;
   eve?: { header: string; lines: string[]; tables: string[] };
   nl?: { header: string; lines: string[]; tables: string[] };
   prompter?: { eve_rows: string[]; nl_rows: string[] };
   errors?: string[];
+  warnings?: string[];
   applied?: boolean;
   renamed_to?: string;
   rundown_tables?: number;
@@ -758,8 +763,6 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
   const [autofillPreview, setAutofillPreview] = useState<ReportAutofillPreviewResponse | null>(null);
   const [manualLinks, setManualLinks] = useState<Record<string, string>>({});
   const [recScriptDoc, setRecScriptDoc] = useState("");
-  const [recRundownDoc, setRecRundownDoc] = useState("");
-  const [recPrompterDoc, setRecPrompterDoc] = useState("");
   const [recPreview, setRecPreview] = useState<RecordingPreviewResponse | null>(null);
   const [recLoading, setRecLoading] = useState(false);
   const [recApplying, setRecApplying] = useState(false);
@@ -1112,8 +1115,6 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
         headers: CT,
         body: JSON.stringify({
           script_doc: recScriptDoc.trim(),
-          rundown_doc: recRundownDoc.trim() || undefined,
-          prompter_doc: recPrompterDoc.trim() || undefined,
         }),
       });
       if (!res.ok) {
@@ -4423,29 +4424,6 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
                 >
                   ↻
                 </button>
-              </div>
-
-              <div className="flex flex-wrap items-center gap-2">
-                <label className="flex items-center gap-2 text-xs mono">
-                  <span className="label shrink-0">RUNDOWN DOC:</span>
-                  <input
-                    value={recRundownDoc}
-                    onChange={(e) => setRecRundownDoc(e.target.value)}
-                    placeholder="default: standing RUNDOWN doc"
-                    className="input mono px-2 py-1 text-xs"
-                    style={{ width: 210 }}
-                  />
-                </label>
-                <label className="flex items-center gap-2 text-xs mono">
-                  <span className="label shrink-0">PROMPTER DOC:</span>
-                  <input
-                    value={recPrompterDoc}
-                    onChange={(e) => setRecPrompterDoc(e.target.value)}
-                    placeholder="default: standing PROMPTER doc"
-                    className="input mono px-2 py-1 text-xs"
-                    style={{ width: 210 }}
-                  />
-                </label>
                 <button
                   className="btn btn--compact btn--signal"
                   onClick={() => void handleRecordingRun("preview")}
@@ -4457,37 +4435,78 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
                   className="btn btn--compact"
                   style={{ borderColor: "var(--color-hazard)", color: "var(--color-hazard)" }}
                   onClick={() => {
-                    if (window.confirm("Rewrite RUNDOWN + PROMPTER docs from this script?\nThe RUNDOWN doc will be renamed (DDMMYY) and both docs' bodies replaced — the Anchor block is preserved."))
+                    if (window.confirm("Copy script doc to RUNDOWN + PROMPTER and trim?\nOld copies with the same names in destination folder will be replaced."))
                       void handleRecordingRun("apply");
                   }}
                   disabled={recApplying || recLoading || !recPreview?.eve?.lines?.length}
-                  title={!recPreview ? "Run PREVIEW first" : "Rename + rewrite both recording docs"}
+                  title={!recPreview ? "Run PREVIEW first" : "Copy script to RUNDOWN + PROMPTER and trim"}
                 >
-                  {recApplying ? "WRITING…" : "✓ APPLY"}
+                  {recApplying ? "APPLYING…" : "✓ APPLY"}
                 </button>
               </div>
 
               {recPreview && (
                 <div className="flex flex-col gap-2 border border-edge p-2" style={{ background: "var(--color-void)" }}>
                   <div className="flex flex-wrap items-center justify-between border-b border-edge-soft pb-1 text-xs mono">
-                    <div className="flex items-center gap-2">
+                    <div className="flex flex-wrap items-center gap-2">
                       <span className="label">DATE:</span>
                       <span style={{ color: "var(--color-phosphor)" }}>{recPreview.date || "?"}</span>
-                      <span className="label">RENAME →</span>
-                      <span style={{ color: "var(--color-signal)" }}>{recPreview.rundown_name || "?"}</span>
-                      {recPreview.renamed_to && (
-                        <span style={{ color: "var(--color-go)" }}>✓ renamed</span>
+                      {recPreview.target_names && recPreview.target_names.length > 0 ? (
+                        <>
+                          <span className="label">TARGETS:</span>
+                          <span style={{ color: "var(--color-signal)" }}>
+                            {recPreview.target_names.join(" · ")}
+                          </span>
+                        </>
+                      ) : (
+                        recPreview.rundown_name && (
+                          <>
+                            <span className="label">TARGET:</span>
+                            <span style={{ color: "var(--color-signal)" }}>{recPreview.rundown_name}</span>
+                          </>
+                        )
                       )}
                       {recPreview.applied && (
-                        <span style={{ color: "var(--color-go)" }}>
-                          ✓ applied ({recPreview.rundown_tables} + {recPreview.prompter_tables} tables)
-                        </span>
+                        <span style={{ color: "var(--color-go)" }}>✓ applied</span>
                       )}
                     </div>
+                    {recPreview.applied && (recPreview.rundown_url || recPreview.prompter_url) && (
+                      <div className="flex items-center gap-3">
+                        {recPreview.rundown_url && (
+                          <a
+                            href={recPreview.rundown_url}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="mono text-xs flex items-center gap-1"
+                            style={{ color: "var(--color-signal)" }}
+                          >
+                            <span>📄</span>
+                            <span>{recPreview.rundown_name || "RUNDOWN DOC"} ↗</span>
+                          </a>
+                        )}
+                        {recPreview.prompter_url && (
+                          <a
+                            href={recPreview.prompter_url}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="mono text-xs flex items-center gap-1"
+                            style={{ color: "var(--color-signal)" }}
+                          >
+                            <span>📄</span>
+                            <span>{recPreview.prompter_name || "PROMPTER DOC"} ↗</span>
+                          </a>
+                        )}
+                      </div>
+                    )}
                   </div>
                   {(recPreview.errors?.length ?? 0) > 0 && (
                     <div className="mono text-[11px]" style={{ color: "var(--color-hazard)" }}>
                       ⚠ {(recPreview.errors ?? []).join(" · ")}
+                    </div>
+                  )}
+                  {(recPreview.warnings?.length ?? 0) > 0 && (
+                    <div className="mono text-[11px]" style={{ color: "var(--color-muted)" }}>
+                      ⚠ {(recPreview.warnings ?? []).join(" · ")}
                     </div>
                   )}
                   {recPreview.eve && recPreview.nl && (

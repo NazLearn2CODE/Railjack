@@ -28,9 +28,8 @@ except ImportError:  # executed as a script (routes shell out like NEWSLINE_REPO
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     from app.newsline_reports import _api, extract_doc_id
 
-# The newsroom's standing recording docs (defaults; editable per-run).
-DEFAULT_RUNDOWN_DOC = "1_aX1eJ9eOBEPAl6ojTqM1HwAa7jF_8GtjH1CEvqrGAY"
-DEFAULT_PROMPTER_DOC = "13XiTeaPqicwbexYwRukEfWWse5krxTZriJ18Ut61rSg"
+# Destination folder for recording docs (default standing docs parent folder)
+DEST_FOLDER = "0ABo_r15naExrUk9PVA"
 
 _THAI_RE = re.compile(r"[฀-๿]")
 _TAG_RE = re.compile(r"^\s*(?:\[[^\]]*\]\s*)+")
@@ -117,6 +116,11 @@ def _style_name(e: dict) -> str:
     return e.get("paragraph", {}).get("paragraphStyle", {}).get("namedStyleType", "NORMAL_TEXT")
 
 
+def _has_chip(e: dict) -> bool:
+    """A dropdown/smart chip renders as a positioned element with NO textRun."""
+    return any("textRun" not in el for el in e.get("paragraph", {}).get("elements", []))
+
+
 def _upper_runs(runs: list[tuple[str, dict]]) -> list[tuple[str, dict]]:
     return [(t.upper(), s) for t, s in runs]
 
@@ -153,22 +157,30 @@ def _table_cell(e: dict) -> list[dict]:
     return [{"runs": _runs(p), "para_style": _para_style(p)} for p in _table_cell_paras(e)]
 
 
+def _wrap_title_text(num: str, raw_text: str) -> str:
+    """Transform title text: strip [tag], uppercase, and midpoint-wrap when > WRAP_AT_WORDS words."""
+    text = re.sub(r"^\s*\d+\.\s*", "", raw_text)
+    text = _TAG_RE.sub("", text).strip()
+    words = text.split()
+    if len(words) <= WRAP_AT_WORDS:
+        return f"{num}. {text.upper()}"
+    mid = (len(words) + 1) // 2
+    while 1 < mid < len(words) - 1 and words[mid - 1].strip(",:;").upper() in _BREAK_STOPWORDS:
+        mid -= 1
+    line1 = f"{num}. {' '.join(words[:mid]).upper()}"
+    line2 = " ".join(words[mid:]).upper()
+    return f"{line1}\n{line2}"
+
+
 def _wrap_title(num: str, runs: list[tuple[str, dict]]) -> list[dict]:
     """Title paragraph runs → one or TWO copyable para-blocks: tag-stripped,
     uppercased, midpoint-wrapped when longer than WRAP_AT_WORDS words (the
     break avoids landing right after a preposition/article). Style copied."""
-    text = re.sub(r"^\s*\d+\.\s*", "", "".join(t for t, _ in runs))  # number comes from _NUM_RE
-    text = _TAG_RE.sub("", text).strip()
+    raw = "".join(t for t, _ in runs)
     style = _dominant_style(runs)
-    words = text.split()
-    if len(words) <= WRAP_AT_WORDS:
-        return [{"kind": "para", "runs": [(f"{num}. {text.upper()}", style)],
-                 "para_style": None}]  # para_style filled by caller
-    mid = (len(words) + 1) // 2
-    while 1 < mid < len(words) - 1 and words[mid - 1].strip(",:;").upper() in _BREAK_STOPWORDS:
-        mid -= 1
-    return [{"kind": "para", "runs": [(f"{num}. {' '.join(words[:mid]).upper()}", style)], "para_style": None},
-            {"kind": "para", "runs": [(" ".join(words[mid:]).upper(), style)], "para_style": None}]
+    wrapped = _wrap_title_text(num, raw)
+    lines = wrapped.split("\n")
+    return [{"kind": "para", "runs": [(line, style)], "para_style": None} for line in lines]
 
 
 # ---------------------------------------------------------------- extraction
@@ -319,8 +331,10 @@ def extract_recording_docs(script_doc_id: str) -> dict:
     if not eve_announcer:
         warnings.append("EVE announcer chips render empty — fill the announcer line by hand")
 
+    rundown_name = f"RUNDOWN NL-NWB {date_ddmmyy}" if date_ddmmyy else ""
+    prompter_name = f"PROMPTER NL-NWB {date_ddmmyy}" if date_ddmmyy else ""
     return {"script_doc": extract_doc_id(script_doc_id), "date": date_iso,
-            "rundown_name": f"RUNDOWN NL-NWB {date_ddmmyy}" if date_ddmmyy else "",
+            "rundown_name": rundown_name, "prompter_name": prompter_name,
             "anchor_name": anchor_name, "eve_announcer": eve_announcer,
             "eve": eve, "nl": nl, "prompter_eve": eve_p, "prompter_nl": nl_p,
             "errors": errors, "warnings": warnings}
@@ -349,14 +363,17 @@ def preview_recording_docs(script_doc_id: str, rundown_doc_id: str | None = None
         + [r["cell"] for r in nl_p["rows"]]
         + ([nl_p["ending"]] if nl_p["ending"] else [])
     )
+    r_name = data.get("rundown_name", "")
+    p_name = data.get("prompter_name", "")
+    target_names = [n for n in (r_name, p_name) if n]
     return {
         "script_doc": data["script_doc"],
         "date": data["date"],
-        "rundown_name": data["rundown_name"],
+        "rundown_name": r_name,
+        "prompter_name": p_name,
+        "target_names": target_names,
         "anchor_name": data.get("anchor_name", ""),
         "eve_announcer": data.get("eve_announcer", ""),
-        "rundown_doc": extract_doc_id(rundown_doc_id) if rundown_doc_id else DEFAULT_RUNDOWN_DOC,
-        "prompter_doc": extract_doc_id(prompter_doc_id) if prompter_doc_id else DEFAULT_PROMPTER_DOC,
         "eve": {"header": data["eve"]["header"],
                 "lines": ["".join(t for t, _ in b["runs"]) for b in data["eve"]["blocks"] if b["kind"] == "para"],
                 "tables": [_cell_text(b["cell"])[:40] for b in data["eve"]["blocks"] if b["kind"] == "table"]},
@@ -477,8 +494,7 @@ def _space_rundown_blocks(blocks: list[dict]) -> list[dict]:
 
 
 def _batch(doc_id: str, requests: list[dict]) -> dict:
-    """batchUpdate with 429 backoff — a full apply is write-heavy (one batch
-    per paragraph/table) and the per-minute write quota bites."""
+    """batchUpdate with 429 backoff."""
     import time as _time
     for attempt in range(4):
         try:
@@ -491,224 +507,429 @@ def _batch(doc_id: str, requests: list[dict]) -> dict:
             raise
 
 
-def _write_para(doc_id: str, at: int, runs: list[tuple[str, dict]], para_style: dict | None) -> int:
-    """One paragraph (runs joined, trailing newline) inserted at ``at``; styles
-    applied per run + paragraph style, all in one batch. Returns index shift."""
-    text = "".join(t for t, _ in runs) or " "
-    req: list[dict] = [{"insertText": {"location": {"index": at}, "text": text + "\n"}}]
-    pos = at
-    for t, s in runs:
-        if t and s:
-            req.append({"updateTextStyle": {
-                "range": {"startIndex": pos, "endIndex": pos + len(t)},
-                "textStyle": s, "fields": ",".join(sorted(s))}})
-        pos += len(t)
-    if para_style:
-        req.append({"updateParagraphStyle": {
-            "range": {"startIndex": at, "endIndex": at + len(text)},
-            "paragraphStyle": para_style, "fields": ",".join(sorted(para_style))}})
-    _batch(doc_id, req)
-    return len(text) + 1
+# ---------------------------------------------------------------- pure edit plans (for tests & batching)
 
+def _classify_prompter_tables(els: list[dict], is_eve: bool = False) -> list[tuple[dict, str]]:
+    """Classify tables in a tab into roles: 'open', 'intro', 'intermission', 'outro', 'ending', 'drop'."""
+    classified: list[tuple[dict, str]] = []
+    pre_story_tables: list[dict] = []
+    first_story_seen = False
+    pending_story = False
+    in_signoff = False
+    outro_seen = False
 
-def _write_table(doc_id: str, at: int, cell: list[dict]) -> int:
-    """One 1x1 table inserted at ``at``, its cell filled with copied paragraphs
-    (each styled run re-applied; paragraphs separated by newlines). Returns
-    the total index shift (structure + cell text)."""
-    _batch(doc_id, [{"insertTable": {"rows": 1, "columns": 1, "location": {"index": at}}}])
-    doc = _api("GET", f"https://docs.googleapis.com/v1/documents/{doc_id}")
-    # the cursor advances forward, so the newest table is the highest-indexed one
-    t_el = max((e for e in doc["body"]["content"] if "table" in e),
-               key=lambda e: e.get("startIndex") or 0)
-    span = t_el["endIndex"] - t_el["startIndex"]
-    pos = t_el["table"]["tableRows"][0]["tableCells"][0]["content"][0]["startIndex"]
-    inserted = 0
-    for i, p in enumerate(cell):
-        text = "".join(t for t, _ in p["runs"])
-        if not text:
-            continue
-        if i > 0:  # paragraph break before this cell paragraph
-            _batch(doc_id, [{"insertText": {"location": {"index": pos}, "text": "\n"}}])
-            pos += 1
-            inserted += 1
-        req: list[dict] = [{"insertText": {"location": {"index": pos}, "text": text}}]
-        rpos = pos
-        for t, s in p["runs"]:
-            if t and s:
-                req.append({"updateTextStyle": {
-                    "range": {"startIndex": rpos, "endIndex": rpos + len(t)},
-                    "textStyle": s, "fields": ",".join(sorted(s))}})
-            rpos += len(t)
-        if p.get("para_style"):
-            req.append({"updateParagraphStyle": {
-                "range": {"startIndex": pos, "endIndex": pos + len(text)},
-                "paragraphStyle": p["para_style"], "fields": ",".join(sorted(p["para_style"]))}})
-        _batch(doc_id, req)
-        pos += len(text)
-        inserted += len(text)
-    return span + inserted
+    for e in els:
+        if "paragraph" in e:
+            txt = _text(e).strip()
+            st = _style_name(e)
+            if st == "HEADING_1":
+                if _NUM_RE.match(txt):
+                    pending_story = True
+                    first_story_seen = True
+                    in_signoff = False
+                elif txt.startswith("ผู้ประกาศพูดลา"):
+                    in_signoff = True
+                    pending_story = False
+        elif "table" in e:
+            if not first_story_seen:
+                pre_story_tables.append(e)
+            elif pending_story:
+                classified.append((e, "intro"))
+                pending_story = False
+            elif in_signoff:
+                if not outro_seen:
+                    classified.append((e, "outro"))
+                    outro_seen = True
+                    in_signoff = False
+                else:
+                    classified.append((e, "drop"))
+            else:
+                # Bare table between stories or after stories
+                classified.append((e, "intermission"))
 
-
-def _write_blocks(doc_id: str, seq: list[dict], keep_anchor: bool = False) -> int:
-    """Replace a doc's body (or everything above the Anchor heading when
-    ``keep_anchor``) with ``seq``, appending FORWARD at one fixed index — the
-    start of the preserved tail paragraph (the Anchor heading, or the doc's
-    final paragraph for a full replace). Every insert lands right before that
-    tail, i.e. after everything inserted before it. Returns tables written."""
-    doc = _api("GET", f"https://docs.googleapis.com/v1/documents/{doc_id}")
-    if keep_anchor:
-        tail = next((e for e in doc["body"]["content"]
-                     if "paragraph" in e and _text(e).strip() == "Anchor"
-                     and _style_name(e).startswith("HEADING")), None)
-        if tail is None:
-            raise RuntimeError("RUNDOWN doc has no 'Anchor' heading to preserve")
-    else:
-        tail = doc["body"]["content"][-1]
-    # whole-element deletion, highest index first in one batch (earlier ranges
-    # stay valid as later ones apply) — never splits a table or paragraph
-    doomed = [e for e in doc["body"]["content"]
-              if e.get("startIndex") is not None and e["startIndex"] < tail["startIndex"]
-              and "sectionBreak" not in e]
-    if doomed:
-        _batch(doc_id, [
-            {"deleteContentRange": {"range": {"startIndex": e["startIndex"], "endIndex": e["endIndex"]}}}
-            for e in reversed(doomed)])
-    def _tail_at() -> int:
-        """Current insert point: right before the preserved tail paragraph.
-        Refetched every block — Docs auto-inserts separator paragraphs around
-        tables, so cursor arithmetic cannot be trusted."""
-        doc = _api("GET", f"https://docs.googleapis.com/v1/documents/{doc_id}")
-        if keep_anchor:
-            return next(e["startIndex"] for e in doc["body"]["content"]
-                        if "paragraph" in e and _text(e).strip() == "Anchor")
-        return doc["body"]["content"][-1]["startIndex"]
-
-    tables = 0
-    for b in seq:
-        at = _tail_at()
-        if b["kind"] in ("table", "runs"):
-            _write_table(doc_id, at, b["cell"])
-            tables += 1
+    # Handle pre-story tables:
+    # In NL: the last pre-story table is "open", all earlier ones are "drop"
+    # In EVE: pre-story tables (like jingle) are "drop"
+    if pre_story_tables:
+        if is_eve:
+            for t in pre_story_tables:
+                classified.insert(0, (t, "drop"))
         else:
-            _write_para(doc_id, at, b["runs"], b.get("para_style"))
-    _cleanup(doc_id, keep_anchor)
-    return tables
+            open_table = pre_story_tables[-1]
+            earlier = pre_story_tables[:-1]
+            for t in reversed(earlier):
+                classified.insert(0, (t, "drop"))
+            classified.insert(len(earlier), (open_table, "open"))
+
+    # Handle trailing intermission table:
+    # If the last non-drop table is "intermission", in NL it's the "ending" table
+    non_drop = [x for x in classified if x[1] != "drop"]
+    if non_drop and non_drop[-1][1] == "intermission":
+        last_t, _ = non_drop[-1]
+        role = "ending" if not is_eve else "intermission"
+        for idx in range(len(classified) - 1, -1, -1):
+            if classified[idx][0] is last_t:
+                classified[idx] = (last_t, role)
+                break
+
+    return classified
 
 
-def _cleanup(doc_id: str, keep_anchor: bool) -> None:
-    """Insertion at the preserved tail's boundary bleeds its style (HEADING_1
-    for the Anchor block) onto auto-inserted separator paragraphs. The empty
-    paragraphs themselves are welcome spacing (the hand-made docs had them
-    too) — only their style needs resetting. No deletions: paragraph deletes
-    near table boundaries are restricted by the API."""
-    doc = _api("GET", f"https://docs.googleapis.com/v1/documents/{doc_id}")
-    if keep_anchor:
-        tail_start = next((e["startIndex"] for e in doc["body"]["content"]
-                           if "paragraph" in e and _text(e).strip() == "Anchor"), None)
-        if tail_start is None:
-            return
-    else:
-        tail_start = doc["body"]["content"][-1]["startIndex"]
-    bleed = [e for e in doc["body"]["content"]
-             if e.get("startIndex") is not None and e["startIndex"] < tail_start
-             and "paragraph" in e and _style_name(e).startswith("HEADING")
-             and _style_name(e) != "TITLE"]
-    if bleed:
-        _batch(doc_id, [
-            {"updateParagraphStyle": {
-                "range": {"startIndex": e["startIndex"], "endIndex": max(e["startIndex"] + 1, e["endIndex"] - 1)},
-                "paragraphStyle": {"namedStyleType": "NORMAL_TEXT"}, "fields": "namedStyleType"}}
-            for e in bleed])
-    # collapse consecutive blank paragraphs to one (auto-separators + our
-    # spacers double up); paragraph-to-paragraph deletes are boundary-safe
-    extra: list[dict] = []
-    prev_blank = False
-    for e in doc["body"]["content"]:
-        is_blank_para = "paragraph" in e and e.get("startIndex") is not None \
-            and e["startIndex"] < tail_start and not _text(e).strip()
-        if is_blank_para:
-            if prev_blank:
-                extra.append(e)
-            prev_blank = True
+def _rundown_edit_requests(
+    tab_elements: list[dict],
+    anchor_name: str = "",
+    tab_id: str | None = None,
+    is_nl: bool = False,
+) -> list[dict]:
+    """Build batchUpdate requests for a single rundown tab snapshot.
+
+    Ranges are RAW snapshot indexes emitted in DESCENDING start order (with a
+    same-start delete before its insert): an edit at a higher index never
+    shifts a lower one, so every request in the one batch stays valid — no
+    delta arithmetic to get wrong."""
+    if not tab_elements:
+        return []
+
+    ops: list[tuple[int, int, str, str]] = []  # (start, end, kind, text)
+
+    if not is_nl:
+        for e in tab_elements:
+            if "paragraph" in e:
+                t = _text(e)
+                if "-- ANCHOR:" in t or "NEWSLINE" in t:
+                    is_nl = True
+                    break
+
+    has_title = any("paragraph" in e and _style_name(e) == "TITLE" for e in tab_elements)
+    started = not has_title
+    in_sb = False
+    end_table_idx: int | None = None
+
+    def add_delete(start: int, end: int):
+        if end > start:
+            ops.append((start, end, "delete", ""))
+
+    def add_insert(pos: int, text: str):
+        if text:
+            ops.append((pos, pos, "insert", text))
+
+    def add_replace(start: int, end: int, new_text: str):
+        if end > start:
+            ops.append((start, end, "delete", ""))
+        if new_text:
+            ops.append((start, start, "insert", new_text))
+
+    for i, e in enumerate(tab_elements):
+        if "paragraph" in e:
+            raw = _text(e)
+            txt = raw.strip()
+            style = _style_name(e)
+
+            if style == "TITLE":
+                started = True
+                if is_nl and anchor_name and not _has_chip(e):
+                    # chips render their own current item — insert the anchor
+                    # name as text only when the dropdown chip is absent
+                    m = re.search(r"-- ANCHOR:[ \t]*", raw)
+                    if m:
+                        to_insert = anchor_name.strip() if m.group(0).endswith(" ") else f" {anchor_name.strip()}"
+                        add_insert(e["startIndex"] + m.end(), to_insert)
+                continue
+
+            if not started or not txt:
+                continue
+
+            if end_table_idx is not None:
+                continue
+
+            # Numbered title paragraph
+            m = _NUM_RE.match(raw)
+            if m:
+                in_sb = False
+                num = m.group(1)
+                new_text = _wrap_title_text(num, raw)
+                old_start = e["startIndex"]
+                old_end = e["endIndex"] - 1
+                add_replace(old_start, old_end, new_text)
+                continue
+
+            # Presenter lines (chips) - keep as-is
+            if txt.startswith("ผู้ประกาศ") or re.match(r"^/+$", txt):
+                in_sb = False
+                continue
+
+            # SB/CG start line
+            if re.match(r"^(SB|CG)\d*", txt):
+                in_sb = True
+                old_text = raw.rstrip("\r\n")
+                new_text = old_text.upper()
+                if new_text != old_text:
+                    add_replace(e["startIndex"], e["startIndex"] + len(old_text), new_text)
+                continue
+
+            # SB/CG continuation line
+            if in_sb and raw[:1] == " " and not _THAI_RE.search(txt):
+                old_text = raw.rstrip("\r\n")
+                new_text = old_text.upper()
+                if new_text != old_text:
+                    add_replace(e["startIndex"], e["startIndex"] + len(old_text), new_text)
+                continue
+
+            # Thai summary lines - delete whole paragraph
+            if _THAI_RE.search(txt):
+                # keep the paragraph mark (endIndex-1): deleting a mark
+                # adjacent to a table is forbidden, and the empty line left
+                # behind is the rundown's own spacing
+                add_delete(e["startIndex"], e["endIndex"] - 1)
+                continue
+
+            # Any other rundown text line
+            old_text = raw.rstrip("\r\n")
+            new_text = old_text.upper()
+            if new_text != old_text:
+                add_replace(e["startIndex"], e["startIndex"] + len(old_text), new_text)
+
+        elif "table" in e and started and end_table_idx is None:
+            cell_text = _table_text(e)
+            if (is_nl and "END CREDIT" in cell_text) or (not is_nl and "โยนเบรค" in cell_text):
+                end_table_idx = i
+
+    # Trim everything after the boundary marker table (stopping at the ⚓
+    # ANCHORS heading when present) — per-element deletes; a paragraph mark
+    # immediately before a table must survive (API rule), so those deletes
+    # keep the mark (endIndex-1), leaving a blank line.
+    if end_table_idx is not None and end_table_idx + 1 < len(tab_elements):
+        doomed = []
+        for e in tab_elements[end_table_idx + 1:]:
+            if "paragraph" in e:
+                t = _text(e).strip()
+                st = _style_name(e)
+                if (t.startswith("⚓") or t.upper().startswith("ANCHOR")) and st.startswith("HEADING"):
+                    break
+            doomed.append(e)
+        for j, e in enumerate(doomed):
+            nxt = doomed[j + 1] if j + 1 < len(doomed) else None
+            before_table = nxt is not None and "table" in nxt
+            last_of_tab = e is tab_elements[-1]
+            end = e["endIndex"] - 1 if (before_table or last_of_tab) else e["endIndex"]
+            add_delete(e["startIndex"], end)
+
+    reqs: list[dict] = []
+    for start, end, kind, text in sorted(
+            ops, key=lambda o: (-o[0], 0 if o[2] == "delete" else 1)):
+        if kind == "delete":
+            rg: dict = {"startIndex": start, "endIndex": end}
+            if tab_id:
+                rg["tabId"] = tab_id
+            reqs.append({"deleteContentRange": {"range": rg}})
         else:
-            prev_blank = False
-    if extra:
-        _batch(doc_id, [
-            {"deleteContentRange": {"range": {"startIndex": e["startIndex"], "endIndex": e["endIndex"]}}}
-            for e in reversed(extra)])
+            loc: dict = {"index": start}
+            if tab_id:
+                loc["tabId"] = tab_id
+            reqs.append({"insertText": {"location": loc, "text": text}})
+    return reqs
+
+
+def _prompter_edit_requests(
+    tab_elements: list[dict],
+    table_roles: list[tuple[dict, str]] | list[dict] | dict,
+    tab_id: str | None = None,
+) -> list[dict]:
+    """Build batchUpdate delete requests for a single prompter tab snapshot.
+    Gap ranges are RAW snapshot indexes emitted in DESCENDING order so no
+    delete shifts a later one's content (no delta arithmetic)."""
+    if not tab_elements:
+        return []
+
+    kept_tables = []
+    if isinstance(table_roles, list):
+        for item in table_roles:
+            if isinstance(item, tuple) and len(item) == 2:
+                t, role = item
+                if role in {"open", "intro", "intermission", "outro", "ending"}:
+                    kept_tables.append(t)
+            elif isinstance(item, dict):
+                role = item.get("role", "intro")
+                t = item.get("element", item)
+                if role != "drop":
+                    kept_tables.append(t)
+    elif isinstance(table_roles, dict):
+        for e in tab_elements:
+            if "table" in e:
+                role = table_roles.get(e.get("startIndex")) or table_roles.get(id(e))
+                if role in {"open", "intro", "intermission", "outro", "ending"}:
+                    kept_tables.append(e)
+
+    kept_tables = sorted(kept_tables, key=lambda t: t.get("startIndex", 0))
+
+    ranges: list[tuple[int, int]] = []
+
+    def add_delete(start: int, end: int):
+        if end > start:
+            ranges.append((start, end))
+
+    tab_start = tab_elements[0].get("startIndex", 1)
+    tab_end = tab_elements[-1].get("endIndex", 1) - 1
+
+    if not kept_tables:
+        if tab_end > tab_start:
+            add_delete(tab_start, tab_end)
+        return _emit_deletes(ranges, tab_id)
+
+    # Gap before first kept table (never delete the mark right before it)
+    if kept_tables[0]["startIndex"] > tab_start:
+        add_delete(tab_start, kept_tables[0]["startIndex"] - 1)
+
+    # Gaps between kept tables (shrink both ends: keep the marks after and
+    # before the tables; leftover marks read as the row separators)
+    for i in range(len(kept_tables) - 1):
+        gap_start = kept_tables[i]["endIndex"] + 1
+        gap_end = kept_tables[i + 1]["startIndex"] - 1
+        if gap_end > gap_start:
+            add_delete(gap_start, gap_end)
+
+    # Gap after last kept table
+    last_end = kept_tables[-1]["endIndex"]
+    if tab_end > last_end:
+        add_delete(last_end + 1, tab_end)
+
+    return _emit_deletes(ranges, tab_id)
+
+
+def _emit_deletes(ranges: list[tuple[int, int]], tab_id: str | None) -> list[dict]:
+    """Delete requests in DESCENDING start order — raw snapshot ranges stay
+    valid because a higher delete never shifts lower content."""
+    reqs: list[dict] = []
+    for start, end in sorted(ranges, key=lambda r: -r[0]):
+        rg: dict = {"startIndex": start, "endIndex": end}
+        if tab_id:
+            rg["tabId"] = tab_id
+        reqs.append({"deleteContentRange": {"range": rg}})
+    return reqs
+
+
+# ---------------------------------------------------------------- copy-based apply
+
+def _ensure_copy(src_doc_id: str, dest_name: str, folder_id: str) -> tuple[str, str]:
+    """Idempotently copy src_doc_id to dest_name in folder_id: trash old copy if exists, then copy fresh."""
+    clean_src = extract_doc_id(src_doc_id)
+    # Check for existing file with same name in folder
+    q = f"name = '{dest_name}' and '{folder_id}' in parents and trashed = false"
+    res = _api(
+        "GET",
+        "https://www.googleapis.com/drive/v3/files",
+        params={
+            "q": q,
+            "supportsAllDrives": "true",
+            "includeItemsFromAllDrives": "true",
+            "fields": "files(id, name)",
+        },
+    )
+    for f in res.get("files", []):
+        _api(
+            "PATCH",
+            f"https://www.googleapis.com/drive/v3/files/{f['id']}",
+            params={"supportsAllDrives": "true"},
+            body={"trashed": True},
+        )
+    # Copy fresh
+    copy_res = _api(
+        "POST",
+        f"https://www.googleapis.com/drive/v3/files/{clean_src}/copy",
+        params={
+            "addParents": folder_id,
+            "supportsAllDrives": "true",
+            "fields": "id,name,webViewLink",
+        },
+        body={"name": dest_name},
+    )
+    new_id = copy_res.get("id", "")
+    url = f"https://docs.google.com/document/d/{new_id}/edit"
+    return new_id, url
 
 
 def apply_recording_docs(script_doc_id: str, rundown_doc_id: str | None = None,
                          prompter_doc_id: str | None = None) -> dict:
+    """Copy-based apply: duplicate script doc to RUNDOWN + PROMPTER and trim in-place."""
     data = extract_recording_docs(script_doc_id)
     fatal = [e for e in data.get("errors", []) if "no " in e]
     if fatal:
         return {"applied": False, "errors": fatal}
-    rundown_id = extract_doc_id(rundown_doc_id) if rundown_doc_id else DEFAULT_RUNDOWN_DOC
-    prompter_id = extract_doc_id(prompter_doc_id) if prompter_doc_id else DEFAULT_PROMPTER_DOC
-    out = {"applied": True, "rundown_doc": rundown_id, "prompter_doc": prompter_id,
-           "rundown_name": data["rundown_name"], "errors": data.get("errors", []),
-           "warnings": data.get("warnings", [])}
 
-    # ── RUNDOWN doc: rename, then replace everything above the Anchor block ──
-    if data["rundown_name"]:
-        cur = _api("GET", f"https://www.googleapis.com/drive/v3/files/{rundown_id}",
-                   params={"fields": "name"})
-        if cur.get("name") != data["rundown_name"]:
-            _api("PATCH", f"https://www.googleapis.com/drive/v3/files/{rundown_id}",
-                 body={"name": data["rundown_name"]})
-            out["renamed_to"] = data["rundown_name"]
-    eve_runs = _strip_break_runs(data["eve"].get("header_runs")) \
-        or [(data["eve"]["header"], _header_text_style(data))]
-    seq: list[dict] = [{"kind": "para", "runs": eve_runs,
-                        "para_style": data["eve"].get("header_style") or {"namedStyleType": "TITLE"}}]
-    eve_blocks = _space_rundown_blocks(data["eve"]["blocks"])
-    if data.get("eve_announcer"):
-        # the bare '/' line between the announcer chips → the chips' current
-        # items (rendered, e.g. 'ผปก. EVE / TikTok: @sandrahanutsaha')
-        for b in eve_blocks:
-            if b["kind"] == "para" and "".join(t for t, _ in b["runs"]).strip() == "/":
-                style = _dominant_style(b["runs"]) or {"bold": True}
-                b["runs"] = [(data["eve_announcer"], style)]
-                break
-    seq += eve_blocks
-    # NL header: source runs verbatim, the anchor name appended in the last run's style
-    nl_runs = _strip_break_runs(data["nl"].get("header_runs"))
-    if data.get("anchor_name"):
-        tail_style = dict(nl_runs[-1][1]) if nl_runs else _header_text_style(data)
-        if nl_runs:
-            nl_runs = nl_runs[:-1] + [(nl_runs[-1][0].rstrip() + f" {data['anchor_name']}", tail_style)]
-        else:
-            nl_runs = [(data["nl"]["header"] + f" {data['anchor_name']}", tail_style)]
-    if not nl_runs:
-        nl_runs = [(data["nl"]["header"], _header_text_style(data))]
-    seq += [{"kind": "para", "runs": nl_runs,
-             "para_style": data["nl"].get("header_style") or {"namedStyleType": "TITLE"}}]
-    seq += _space_rundown_blocks(data["nl"]["blocks"])
-    seq += [{"kind": "para", "runs": [(" ", {})], "para_style": None}]  # spacer
-    try:
-        out["rundown_tables"] = _write_blocks(rundown_id, seq, keep_anchor=True)
-    except RuntimeError as e:
-        return {"applied": False, "errors": [str(e)]}
+    rundown_name = data.get("rundown_name", "")
+    prompter_name = data.get("prompter_name", "")
+    anchor_name = data.get("anchor_name", "")
 
-    # ── PROMPTER doc: full replace ──
-    pseq: list[dict] = [{"kind": "runs", "cell": r["cell"]} for r in data["prompter_eve"]["rows"]]
-    if data["prompter_eve"]["outro"]:
-        pseq.append({"kind": "runs", "cell": data["prompter_eve"]["outro"]})
-    pseq.append({"kind": "para", "runs": [("++++", {"bold": True})], "para_style": None})
-    if data["prompter_nl"]["open"]:
-        pseq.append({"kind": "runs", "cell": data["prompter_nl"]["open"]})
-    pseq += [{"kind": "runs", "cell": r["cell"]} for r in data["prompter_nl"]["rows"]]
-    if data["prompter_nl"]["ending"]:
-        pseq.append({"kind": "runs", "cell": data["prompter_nl"]["ending"]})
-    out["prompter_tables"] = _write_blocks(prompter_id, pseq)
-    return out
+    # 1. RUNDOWN copy & trim
+    rundown_id, rundown_url = _ensure_copy(script_doc_id, rundown_name, DEST_FOLDER)
+    rd_doc = _api(
+        "GET",
+        f"https://docs.googleapis.com/v1/documents/{rundown_id}",
+        params={"includeTabsContent": "true"},
+    )
+    rd_reqs: list[dict] = []
+    tabs = rd_doc.get("tabs", [])
+    if tabs:
+        for tab in tabs:
+            tab_prop = tab.get("tabProperties", {})
+            title = tab_prop.get("title", "")
+            tab_id = tab_prop.get("tabId")
+            body_content = tab.get("documentTab", {}).get("body", {}).get("content", [])
+            if "EVE" in title.upper():
+                reqs = _rundown_edit_requests(body_content, anchor_name="", tab_id=tab_id, is_nl=False)
+                rd_reqs.extend(reqs)
+            elif "NL" in title.upper() and "RUNDOWN" in title.upper():
+                reqs = _rundown_edit_requests(body_content, anchor_name=anchor_name, tab_id=tab_id, is_nl=True)
+                rd_reqs.extend(reqs)
+    else:
+        body_content = rd_doc.get("body", {}).get("content", [])
+        rd_reqs.extend(_rundown_edit_requests(body_content, anchor_name=anchor_name, tab_id=None, is_nl=True))
 
+    if rd_reqs:
+        _batch(rundown_id, rd_reqs)
 
-def _header_text_style(data: dict) -> dict:
-    """The show headers read Tahoma 11 bold (Naz 2026-08-18)."""
-    return {"bold": True, "weightedFontFamily": {"fontFamily": "Tahoma", "weight": 400},
-            "fontSize": {"magnitude": 11, "unit": "PT"}}
+    # 2. PROMPTER copy & trim
+    prompter_id, prompter_url = _ensure_copy(script_doc_id, prompter_name, DEST_FOLDER)
+    p_doc = _api(
+        "GET",
+        f"https://docs.googleapis.com/v1/documents/{prompter_id}",
+        params={"includeTabsContent": "true"},
+    )
+    p_reqs: list[dict] = []
+    ptabs = p_doc.get("tabs", [])
+    if ptabs:
+        for tab in ptabs:
+            tab_prop = tab.get("tabProperties", {})
+            title = tab_prop.get("title", "")
+            tab_id = tab_prop.get("tabId")
+            body_content = tab.get("documentTab", {}).get("body", {}).get("content", [])
+            if "EVE" in title.upper():
+                roles = _classify_prompter_tables(body_content, is_eve=True)
+                reqs = _prompter_edit_requests(body_content, roles, tab_id=tab_id)
+                p_reqs.extend(reqs)
+            elif "NL" in title.upper() and "RUNDOWN" in title.upper():
+                roles = _classify_prompter_tables(body_content, is_eve=False)
+                reqs = _prompter_edit_requests(body_content, roles, tab_id=tab_id)
+                p_reqs.extend(reqs)
+    else:
+        body_content = p_doc.get("body", {}).get("content", [])
+        roles = _classify_prompter_tables(body_content, is_eve=False)
+        p_reqs.extend(_prompter_edit_requests(body_content, roles, tab_id=None))
+
+    if p_reqs:
+        _batch(prompter_id, p_reqs)
+
+    return {
+        "applied": True,
+        "rundown_doc": rundown_id,
+        "prompter_doc": prompter_id,
+        "rundown_url": rundown_url,
+        "prompter_url": prompter_url,
+        "rundown_name": rundown_name,
+        "prompter_name": prompter_name,
+        "errors": data.get("errors", []),
+        "warnings": data.get("warnings", []),
+    }
 
 
 # ---------------------------------------------------------------- CLI
@@ -720,11 +941,12 @@ def main(argv: list[str]) -> None:
         sys.exit(2)
     p = argparse.ArgumentParser(description="RECORDING DOCS builder")
     p.add_argument("--script-doc", required=True, help="Daily script Doc ID or URL")
-    p.add_argument("--rundown-doc", default=None, help="RUNDOWN Doc ID (default: the standing doc)")
-    p.add_argument("--prompter-doc", default=None, help="PROMPTER Doc ID (default: the standing doc)")
+    p.add_argument("--rundown-doc", default=None, help="RUNDOWN Doc ID (legacy/optional)")
+    p.add_argument("--prompter-doc", default=None, help="PROMPTER Doc ID (legacy/optional)")
     args = p.parse_args(argv[1:])
     fn = apply_recording_docs if argv[0] == "apply" else preview_recording_docs
     print(json.dumps(fn(args.script_doc, args.rundown_doc, args.prompter_doc), ensure_ascii=False))
+
 
 
 if __name__ == "__main__":

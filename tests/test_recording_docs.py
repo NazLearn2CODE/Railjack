@@ -156,3 +156,333 @@ def test_row_heads():
         [{"runs": []}],
     ]
     assert rd._row_heads(cells) == ["Hello World", "(empty)"]
+
+
+def _snapshot(elements: list[dict], start_idx: int = 1) -> list[dict]:
+    """Build synthetic elements with valid, contiguous startIndex and endIndex."""
+    import copy
+    out = []
+    idx = start_idx
+    for e in elements:
+        c = copy.deepcopy(e)
+        c["startIndex"] = idx
+        if "paragraph" in c:
+            text = "".join(el.get("textRun", {}).get("content", "") for el in c["paragraph"]["elements"])
+            if not text.endswith("\n"):
+                text += "\n"
+                c["paragraph"]["elements"][-1]["textRun"]["content"] = text
+            idx += len(text)
+        elif "table" in c:
+            idx += 40
+        c["endIndex"] = idx
+        out.append(c)
+    return out
+
+
+def _apply_simulated_reqs(reqs: list[dict], original_elements: list[dict]) -> str:
+    """Apply batchUpdate requests against a simulated string buffer to check delta consistency."""
+    total_len = original_elements[-1]["endIndex"] if original_elements else 0
+    buf = [" "] * (total_len + 10)
+    for e in original_elements:
+        if "paragraph" in e:
+            text = "".join(el.get("textRun", {}).get("content", "") for el in e["paragraph"]["elements"])
+            for offset, ch in enumerate(text):
+                buf[e["startIndex"] + offset] = ch
+        elif "table" in e:
+            t_text = rd._table_text(e) or "[TABLE]"
+            padded = t_text.ljust(e["endIndex"] - e["startIndex"])[:e["endIndex"] - e["startIndex"]]
+            for offset, ch in enumerate(padded):
+                buf[e["startIndex"] + offset] = ch
+
+    s = "".join(buf)
+    for r in reqs:
+        if "deleteContentRange" in r:
+            rg = r["deleteContentRange"]["range"]
+            start, end = rg["startIndex"], rg["endIndex"]
+            assert start >= 0 and end >= start, f"Invalid delete range: {start}..{end}"
+            s = s[:start] + s[end:]
+        elif "insertText" in r:
+            loc = r["insertText"]["location"]
+            idx = loc["index"]
+            text = r["insertText"]["text"]
+            assert idx >= 0, f"Invalid insert index: {idx}"
+            s = s[:idx] + text + s[idx:]
+
+    return s
+
+
+def test_rundown_edit_requests_nl():
+    raw_els = [
+        _para("NEWSLINE 17.AUGUST.2026 -- ANCHOR: ", style="TITLE"),
+        _table([_para("***JINGLE NEWSLINE***")]),
+        _para("1. [ต้นน้ำ] Cabinet Approval Sought to Build 504 km of Southern Double Track Railway"),
+        _para("ทหารไทยเหยียบทุ่นระเบิดช่องอานม้า"),
+        _para("SB1: Prof. Dr. Wilert Puriwat"),
+        _para("        President, Chulalongkorn University"),
+        _table([_para("***END CREDIT***")]),
+        _para("1. Cabinet Approval", style="HEADING_1"),
+        _table([_para("Full story body text...")]),
+        _para(""),
+    ]
+    els = _snapshot(raw_els)
+    reqs = rd._rundown_edit_requests(els, anchor_name="SANDRA H.", tab_id="t.0", is_nl=True)
+
+    # Anchor insertText
+    anchor_req = next((r for r in reqs if "insertText" in r and "SANDRA H." in r["insertText"]["text"]), None)
+    assert anchor_req is not None
+    assert anchor_req["insertText"]["location"]["tabId"] == "t.0"
+
+    # Title replacement
+    title_ins = next((r for r in reqs if "insertText" in r and "CABINET APPROVAL" in r["insertText"]["text"]), None)
+    assert title_ins is not None
+    assert "ต้นน้ำ" not in title_ins["insertText"]["text"]
+    assert "\n" in title_ins["insertText"]["text"]
+
+    # Bulk delete — descending emission puts the highest range first
+    bulk_del = reqs[0]
+    assert "deleteContentRange" in bulk_del
+    assert bulk_del["deleteContentRange"]["range"]["tabId"] == "t.0"
+
+    # Delta consistency
+    simulated_text = _apply_simulated_reqs(reqs, els)
+    assert "NEWSLINE 17.AUGUST.2026 -- ANCHOR: SANDRA H." in simulated_text
+    assert "1. CABINET APPROVAL SOUGHT TO BUILD 504" in simulated_text
+    assert "KM OF SOUTHERN DOUBLE TRACK RAILWAY" in simulated_text
+    assert "SB1: PROF. DR. WILERT PURIWAT" in simulated_text
+    assert "PRESIDENT, CHULALONGKORN UNIVERSITY" in simulated_text
+    assert "ทหารไทย" not in simulated_text
+    assert "Full story body text" not in simulated_text
+
+
+def test_rundown_edit_requests_eve():
+    raw_els = [
+        _para("NBT WORLD BRIEF EVENING / 17.AUGUST.2026", style="TITLE"),
+        _table([_para("***JINGLE NWTB***")]),
+        _para("ผู้ประกาศ:"),
+        _para(" / "),
+        _para("1. Thai Soldier Injured in Landmine Blast in Ubon Ratchathani"),
+        _para("ทหารไทยเหยียบทุ่นระเบิด"),
+        _table([_para("***โยนเบรค/โยนกลับไปผปก.ไทย***")]),
+        _para("Story 1 Full Script", style="HEADING_1"),
+        _para(""),
+    ]
+    els = _snapshot(raw_els)
+    reqs = rd._rundown_edit_requests(els, anchor_name="", tab_id="t.1", is_nl=False)
+
+    simulated_text = _apply_simulated_reqs(reqs, els)
+    assert "ผู้ประกาศ:" in simulated_text
+    assert " / " in simulated_text
+    assert "1. THAI SOLDIER INJURED" in simulated_text
+    assert "ทหารไทย" not in simulated_text
+    assert "Story 1 Full Script" not in simulated_text
+
+
+def test_prompter_edit_requests_nl():
+    raw_els = [
+        _para("NEWSLINE 17.AUGUST.2026 -- ANCHOR: ", style="TITLE"),
+        _table([_para("***JINGLE NEWSLINE ตัวยาว***")]),
+        _table([_para("Show Open Table Content")]),
+        _para("1. PM departs for Sydney", style="HEADING_1"),
+        _table([_para("Story 1 Intro Table Content")]),
+        _para("2. Soldier injured", style="HEADING_1"),
+        _table([_para("Story 2 Intro Table Content")]),
+        _table([_para("*** 1st BREAK ***")]),
+        _para("3. Corgis", style="HEADING_1"),
+        _table([_para("Story 3 Intro Table Content")]),
+        _para("ผู้ประกาศพูดลา แบบจบเบรค", style="HEADING_1"),
+        _table([_para("Outro Table Content")]),
+        _table([_para("Thank you for joining us tonight. ***END CREDIT***")]),
+        _para(""),
+    ]
+    els = _snapshot(raw_els)
+    roles = rd._classify_prompter_tables(els, is_eve=False)
+    role_map = [r for _, r in roles]
+    assert role_map == ["drop", "open", "intro", "intro", "intermission", "intro", "outro", "ending"]
+
+    reqs = rd._prompter_edit_requests(els, roles, tab_id="t.0")
+    simulated_text = _apply_simulated_reqs(reqs, els)
+
+    assert "Show Open Table Content" in simulated_text
+    assert "Story 1 Intro Table Content" in simulated_text
+    assert "Story 2 Intro Table Content" in simulated_text
+    assert "*** 1st BREAK ***" in simulated_text
+    assert "Story 3 Intro Table Content" in simulated_text
+    assert "Outro Table Content" in simulated_text
+    assert "Thank you for joining us tonight" in simulated_text
+
+    assert "NEWSLINE 17.AUGUST.2026" not in simulated_text
+    assert "***JINGLE NEWSLINE ตัวยาว***" not in simulated_text
+    assert "PM departs for Sydney" not in simulated_text
+    assert "Soldier injured" not in simulated_text
+    assert "Corgis" not in simulated_text
+    assert "ผู้ประกาศพูดลา" not in simulated_text
+
+
+def test_prompter_edit_requests_eve():
+    raw_els = [
+        _para("NBT WORLD BRIEF EVENING / 17.AUGUST.2026", style="TITLE"),
+        _table([_para("***JINGLE NWTB***")]),
+        _para("1. Soldier Injured", style="HEADING_1"),
+        _table([_para("EVE Story 1 Intro Content")]),
+        _para("ผู้ประกาศพูดลา", style="HEADING_1"),
+        _table([_para("EVE Outro Content")]),
+        _para(""),
+    ]
+    els = _snapshot(raw_els)
+    roles = rd._classify_prompter_tables(els, is_eve=True)
+    role_map = [r for _, r in roles]
+    assert role_map == ["drop", "intro", "outro"]
+
+    reqs = rd._prompter_edit_requests(els, roles, tab_id="t.1")
+    simulated_text = _apply_simulated_reqs(reqs, els)
+
+    assert "***JINGLE NWTB***" not in simulated_text
+    assert "EVE Story 1 Intro Content" in simulated_text
+    assert "EVE Outro Content" in simulated_text
+
+
+def test_preview_recording_docs_target_names(monkeypatch):
+    def mock_extract(script_doc_id):
+        return {
+            "script_doc": "doc123",
+            "date": "2026-08-17",
+            "rundown_name": "RUNDOWN NL-NWB 170826",
+            "prompter_name": "PROMPTER NL-NWB 170826",
+            "anchor_name": "SANDRA H.",
+            "eve_announcer": "ผปก. EVE",
+            "eve": {"header": "EVE HEADER", "blocks": []},
+            "nl": {"header": "NL HEADER", "blocks": []},
+            "prompter_eve": {"rows": [], "outro": None},
+            "prompter_nl": {"rows": [], "open": None, "ending": None},
+            "errors": [],
+            "warnings": [],
+        }
+
+    monkeypatch.setattr(rd, "extract_recording_docs", mock_extract)
+    res = rd.preview_recording_docs("doc123")
+    assert res["target_names"] == ["RUNDOWN NL-NWB 170826", "PROMPTER NL-NWB 170826"]
+    assert "rundown_doc" not in res
+    assert "prompter_doc" not in res
+
+
+def test_rundown_edit_requests_with_anchors_section_preserved():
+    raw_els = [
+        _para("NEWSLINE 17.AUGUST.2026 -- ANCHOR: ", style="TITLE"),
+        _para("1. First Story"),
+        _table([_para("***END CREDIT***")]),
+        _para("Story Body Text (to be deleted)", style="HEADING_1"),
+        _para("⚓ ANCHORS", style="HEADING_1"),
+        _para("Anchor Bio and Line"),
+        _para(""),
+    ]
+    els = _snapshot(raw_els)
+    reqs = rd._rundown_edit_requests(els, anchor_name="", tab_id="t.0", is_nl=True)
+
+    simulated_text = _apply_simulated_reqs(reqs, els)
+    assert "1. FIRST STORY" in simulated_text
+    assert "***END CREDIT***" in simulated_text
+    assert "Story Body Text" not in simulated_text
+    assert "⚓ ANCHORS" in simulated_text
+    assert "Anchor Bio and Line" in simulated_text
+
+
+def test_ensure_copy_idempotency(monkeypatch):
+    calls = []
+
+    def mock_api(method, url, body=None, params=None, headers=None, raw_response=False):
+        calls.append((method, url, body, params))
+        if method == "GET" and "drive/v3/files" in url:
+            return {"files": [{"id": "old_file_id", "name": "RUNDOWN NL-NWB 170826"}]}
+        if method == "PATCH" and "drive/v3/files/old_file_id" in url:
+            return {"id": "old_file_id", "trashed": True}
+        if method == "POST" and "copy" in url:
+            return {"id": "new_copy_id", "name": "RUNDOWN NL-NWB 170826"}
+        raise RuntimeError(f"Unexpected call: {method} {url}")
+
+    monkeypatch.setattr(rd, "_api", mock_api)
+    doc_id, url = rd._ensure_copy("source_doc_123", "RUNDOWN NL-NWB 170826", "folder_456")
+
+    assert doc_id == "new_copy_id"
+    assert url == "https://docs.google.com/document/d/new_copy_id/edit"
+    # Verify old file was trashed
+    assert any(c[0] == "PATCH" and "old_file_id" in c[1] and c[2] == {"trashed": True} for c in calls)
+    # Verify copy was called with addParents
+    copy_call = next(c for c in calls if c[0] == "POST" and "copy" in c[1])
+    assert copy_call[3].get("addParents") == "folder_456"
+    assert copy_call[2] == {"name": "RUNDOWN NL-NWB 170826"}
+
+
+def test_apply_recording_docs_mocked(monkeypatch):
+    def mock_extract(script_doc_id):
+        return {
+            "script_doc": "script_123",
+            "date": "2026-08-17",
+            "rundown_name": "RUNDOWN NL-NWB 170826",
+            "prompter_name": "PROMPTER NL-NWB 170826",
+            "anchor_name": "SANDRA H.",
+            "eve_announcer": "ผปก. EVE",
+            "eve": {"header": "EVE HEADER", "blocks": []},
+            "nl": {"header": "NL HEADER", "blocks": []},
+            "prompter_eve": {"rows": [{"type": "intro"}], "outro": "outro_cell"},
+            "prompter_nl": {"rows": [{"type": "intro"}], "open": "open_cell", "ending": "ending_cell"},
+            "errors": [],
+            "warnings": [],
+        }
+
+    monkeypatch.setattr(rd, "extract_recording_docs", mock_extract)
+
+    copies_created = []
+
+    def mock_ensure_copy(src_doc_id, dest_name, folder_id):
+        new_id = f"id_for_{dest_name.split()[0].lower()}"
+        copies_created.append((dest_name, new_id))
+        return new_id, f"https://docs.google.com/document/d/{new_id}/edit"
+
+    monkeypatch.setattr(rd, "_ensure_copy", mock_ensure_copy)
+
+    mock_batches = []
+
+    def mock_batch(doc_id, requests):
+        mock_batches.append((doc_id, requests))
+        return {}
+
+    monkeypatch.setattr(rd, "_batch", mock_batch)
+
+    def mock_api(method, url, body=None, params=None, headers=None, raw_response=False):
+        if method == "GET" and "documents/" in url:
+            # Return synthetic snapshot with EVE and NL tabs
+            eve_els = _snapshot([
+                _para("NBT WORLD BRIEF EVENING / 17.AUGUST.2026", style="TITLE"),
+                _table([_para("***JINGLE NWTB***")]),
+                _para("1. Story 1"),
+                _table([_para("***โยนเบรค***")]),
+                _para("Script"),
+                _para(""),
+            ])
+            nl_els = _snapshot([
+                _para("NEWSLINE 17.AUGUST.2026 -- ANCHOR: ", style="TITLE"),
+                _table([_para("***JINGLE NEWSLINE***")]),
+                _para("1. Story 1"),
+                _table([_para("***END CREDIT***")]),
+                _para("Script"),
+                _para(""),
+            ])
+            return {
+                "tabs": [
+                    {"tabProperties": {"tabId": "t.eve", "title": "NBTWB EVE RUNDOWN"}, "documentTab": {"body": {"content": eve_els}}},
+                    {"tabProperties": {"tabId": "t.nl", "title": "NL RUNDOWN"}, "documentTab": {"body": {"content": nl_els}}},
+                ]
+            }
+        raise RuntimeError(f"Unexpected api call: {method} {url}")
+
+    monkeypatch.setattr(rd, "_api", mock_api)
+
+    res = rd.apply_recording_docs("script_123")
+    assert res["applied"] is True
+    assert res["rundown_doc"] == "id_for_rundown"
+    assert res["prompter_doc"] == "id_for_prompter"
+    assert res["rundown_url"] == "https://docs.google.com/document/d/id_for_rundown/edit"
+    assert res["prompter_url"] == "https://docs.google.com/document/d/id_for_prompter/edit"
+    assert res["rundown_name"] == "RUNDOWN NL-NWB 170826"
+    assert res["prompter_name"] == "PROMPTER NL-NWB 170826"
+    assert len(mock_batches) == 2

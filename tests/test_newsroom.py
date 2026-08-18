@@ -1821,16 +1821,16 @@ def test_nl_reports_filename_period_prefix():
     # Period 11, August 2026
     c_name = nl_rep.cover_doc_name(11, date(2026, 8, 1), date(2026, 8, 31))
     l_name = nl_rep.log_doc_name(11, date(2026, 8, 1), date(2026, 8, 31))
-    assert c_name == "11 ใบรายงานผลการปฏิบัติงาน แบบ QR Code สิงหาคม 2569 ณอรรฆย์ โรจนสุวรรณ.docx"
-    assert l_name == "11 รายงานผลการปฏิบัติงาน สิงหาคม 2569.docx"
+    assert c_name == "11 ใบรายงานผลการปฏิบัติงาน แบบ QR Code สิงหาคม 2569 ณอรรฆย์ โรจนสุวรรณ"
+    assert l_name == "11 รายงานผลการปฏิบัติงาน สิงหาคม 2569"
     assert c_name.startswith("11 ")
     assert l_name.startswith("11 ")
 
     # String period and whitespace strip
     c_name_str = nl_rep.cover_doc_name(" 5 ", date(2026, 8, 1), date(2026, 8, 31))
     l_name_str = nl_rep.log_doc_name(" 5 ", date(2026, 8, 1), date(2026, 8, 31))
-    assert c_name_str == "5 ใบรายงานผลการปฏิบัติงาน แบบ QR Code สิงหาคม 2569 ณอรรฆย์ โรจนสุวรรณ.docx"
-    assert l_name_str == "5 รายงานผลการปฏิบัติงาน สิงหาคม 2569.docx"
+    assert c_name_str == "5 ใบรายงานผลการปฏิบัติงาน แบบ QR Code สิงหาคม 2569 ณอรรฆย์ โรจนสุวรรณ"
+    assert l_name_str == "5 รายงานผลการปฏิบัติงาน สิงหาคม 2569"
 
 
 def test_nl_reports_build_plan_aug2026():
@@ -1840,8 +1840,8 @@ def test_nl_reports_build_plan_aug2026():
     assert plan["period"] == "5"
     assert plan["fy_be"] == 2569
     assert plan["weekday_count"] == 21
-    assert plan["cover_filename"] == "5 ใบรายงานผลการปฏิบัติงาน แบบ QR Code สิงหาคม 2569 ณอรรฆย์ โรจนสุวรรณ.docx"
-    assert plan["log_filename"] == "5 รายงานผลการปฏิบัติงาน สิงหาคม 2569.docx"
+    assert plan["cover_filename"] == "5 ใบรายงานผลการปฏิบัติงาน แบบ QR Code สิงหาคม 2569 ณอรรฆย์ โรจนสุวรรณ"
+    assert plan["log_filename"] == "5 รายงานผลการปฏิบัติงาน สิงหาคม 2569"
     # First Mon-Fri in Aug 2026 is Mon Aug 3 (Aug 1=Sat, Aug 2=Sun)
     assert plan["rows"][0] == "๓ สิงหาคม ๒๕๖๙  รายการ NEWSLINE"
     assert plan["rows"][-1] == "๓๑ สิงหาคม ๒๕๖๙  รายการ NEWSLINE"
@@ -1871,8 +1871,8 @@ def test_nl_reports_preview_makes_no_network_writes(monkeypatch, capsys):
     assert out["weekday_count"] == 21
     assert len(out["rows"]) == 21
     assert out["created"] == []
-    assert out["cover"]["name"] == "5 ใบรายงานผลการปฏิบัติงาน แบบ QR Code สิงหาคม 2569 ณอรรฆย์ โรจนสุวรรณ.docx"
-    assert out["log"]["name"] == "5 รายงานผลการปฏิบัติงาน สิงหาคม 2569.docx"
+    assert out["cover"]["name"] == "5 ใบรายงานผลการปฏิบัติงาน แบบ QR Code สิงหาคม 2569 ณอรรฆย์ โรจนสุวรรณ"
+    assert out["log"]["name"] == "5 รายงานผลการปฏิบัติงาน สิงหาคม 2569"
 
 
 def test_nl_reports_generate_idempotent_skips_duplicates(monkeypatch, capsys):
@@ -2691,8 +2691,8 @@ def test_main_report_fill_requests():
 
     reqs_11 = nl_rep.build_main_report_fill_requests(11, 2569)
 
-    # 1. deleteContentRange at 208..418
-    assert reqs_11[0]["deleteContentRange"]["range"] == {"startIndex": 208, "endIndex": 418}
+    # 1. deleteContentRange at 208..417
+    assert reqs_11[0]["deleteContentRange"]["range"] == {"startIndex": 208, "endIndex": 417}
 
     # 2. insertText at 208
     assert reqs_11[1]["insertText"]["location"]["index"] == 208
@@ -2748,8 +2748,8 @@ def test_build_docgen_plan():
     assert p1["month_thai"] == "ตุลาคม"
     assert p1["cal_be_year"] == 2568
     assert len(p1["docs"]) == 3
-    assert p1["docs"][0]["name"] == "01 ใบรายงานผลการปฏิบัติงาน แบบ QR Code ตุลาคม 2568 ณอรรฆย์ โรจนสุวรรณ.docx"
-    assert p1["docs"][1]["name"] == "01 รายงานผลการปฏิบัติงาน ตุลาคม 2568.docx"
+    assert p1["docs"][0]["name"] == "01 ใบรายงานผลการปฏิบัติงาน แบบ QR Code ตุลาคม 2568 ณอรรฆย์ โรจนสุวรรณ"
+    assert p1["docs"][1]["name"] == "01 รายงานผลการปฏิบัติงาน ตุลาคม 2568"
     assert p1["docs"][2]["name"] == "01 รันดาวน์ ตุลาคม 2568"
 
     # Period 11: Aug 2569
@@ -2757,8 +2757,8 @@ def test_build_docgen_plan():
     assert p11["period"] == "11"
     assert p11["month_thai"] == "สิงหาคม"
     assert p11["cal_be_year"] == 2569
-    assert p11["docs"][0]["name"] == "11 ใบรายงานผลการปฏิบัติงาน แบบ QR Code สิงหาคม 2569 ณอรรฆย์ โรจนสุวรรณ.docx"
-    assert p11["docs"][1]["name"] == "11 รายงานผลการปฏิบัติงาน สิงหาคม 2569.docx"
+    assert p11["docs"][0]["name"] == "11 ใบรายงานผลการปฏิบัติงาน แบบ QR Code สิงหาคม 2569 ณอรรฆย์ โรจนสุวรรณ"
+    assert p11["docs"][1]["name"] == "11 รายงานผลการปฏิบัติงาน สิงหาคม 2569"
     assert p11["docs"][2]["name"] == "11 รันดาวน์ สิงหาคม 2569"
 
     # Total 36 docs
@@ -2781,7 +2781,7 @@ def test_docgen_preview_and_generate_mocked(monkeypatch):
     # Mock folder containing some existing files (e.g. 11 รันดาวน์ สิงหาคม 2569)
     existing_sample = [
         {"id": "file_1", "name": "11 รันดาวน์ สิงหาคม 2569", "webViewLink": "https://doc/1"},
-        {"id": "file_2", "name": "11 รายงานผลการปฏิบัติงาน สิงหาคม 2569.docx", "webViewLink": "https://doc/2"},
+        {"id": "file_2", "name": "11 รายงานผลการปฏิบัติงาน สิงหาคม 2569", "webViewLink": "https://doc/2"},
     ]
     monkeypatch.setattr(nl_rep, "find_existing_files", lambda folder_id: existing_sample)
 
@@ -2828,7 +2828,7 @@ def test_docgen_preview_and_generate_mocked(monkeypatch):
     assert len(filled) == 23
     skipped_names = [s["name"] for s in res["skipped"]]
     assert "11 รันดาวน์ สิงหาคม 2569" in skipped_names
-    assert "11 รายงานผลการปฏิบัติงาน สิงหาคม 2569.docx" in skipped_names
+    assert "11 รายงานผลการปฏิบัติงาน สิงหาคม 2569" in skipped_names
 
 
 def test_newsline_docgen_routes(monkeypatch):

@@ -113,10 +113,14 @@ def google_token() -> str:
     return _TOKEN  # type: ignore[return-value]
 
 
-def _api(method: str, url: str, body=None, params=None, headers=None, raw_response: bool = False):
-    """Drive REST helper (stdlib urllib): JSON in, JSON/bytes out."""
+import random
+import time
+
+def _api(method: str, url: str, body=None, params=None, headers=None, raw_response: bool = False, max_retries: int = 5):
+    """Drive REST helper (stdlib urllib): JSON in, JSON/bytes out with 429/5xx retry backoff."""
+    full_url = url
     if params:
-        url += ("&" if "?" in url else "?") + urllib.parse.urlencode(params)
+        full_url += ("&" if "?" in full_url else "?") + urllib.parse.urlencode(params)
     data = None
     h = {
         "Authorization": f"Bearer {google_token()}",
@@ -130,22 +134,41 @@ def _api(method: str, url: str, body=None, params=None, headers=None, raw_respon
             data = json.dumps(body).encode("utf-8")
             if "Content-Type" not in h:
                 h["Content-Type"] = "application/json"
-    req = urllib.request.Request(url, data=data, method=method, headers=h)
-    try:
-        with urllib.request.urlopen(req, timeout=90) as r:
-            raw = r.read()
-    except urllib.error.HTTPError as e:
-        detail = ""
+
+    backoff = 2.0
+    for attempt in range(max_retries + 1):
+        req = urllib.request.Request(full_url, data=data, method=method, headers=h)
         try:
-            detail = e.read().decode(errors="replace")[:200]
-        except Exception:
-            pass
-        _fatal(f"Drive {method} failed: {e.code} {e.reason} {detail}".strip())
-    except Exception as e:
-        _fatal(f"Drive {method} failed: {e}")
-    if raw_response:
-        return raw
-    return json.loads(raw.decode("utf-8")) if raw else {}
+            with urllib.request.urlopen(req, timeout=90) as r:
+                raw = r.read()
+            if raw_response:
+                return raw
+            return json.loads(raw.decode("utf-8")) if raw else {}
+        except urllib.error.HTTPError as e:
+            detail = ""
+            try:
+                detail = e.read().decode(errors="replace")[:200]
+            except Exception:
+                pass
+            if (e.code == 429 or 500 <= e.code < 600) and attempt < max_retries:
+                retry_after = e.headers.get("Retry-After") if hasattr(e, "headers") else None
+                if retry_after and str(retry_after).isdigit():
+                    sleep_time = float(retry_after) + 0.5
+                else:
+                    sleep_time = backoff + random.uniform(0.1, 0.5)
+                    backoff *= 2.0
+                sys.stderr.write(f"Google API {method} returned {e.code}. Retrying in {sleep_time:.1f}s (attempt {attempt + 1}/{max_retries})...\n")
+                sys.stderr.flush()
+                time.sleep(sleep_time)
+                h["Authorization"] = f"Bearer {google_token()}"
+                continue
+            _fatal(f"Drive {method} failed: {e.code} {e.reason} {detail}".strip())
+        except Exception as e:
+            if attempt < max_retries:
+                time.sleep(backoff)
+                backoff *= 2.0
+                continue
+            _fatal(f"Drive {method} failed: {e}")
 
 
 # --- Thai date formatting helpers ----------------------------------------
@@ -1770,13 +1793,13 @@ def build_main_report_fill_requests(period: int, fy_be: int) -> list[dict]:
     fy_th = to_thai_digits(fy_be)
     target_range_th = format_main_report_range(start_d, end_d)
 
-    # 1. Delete sample day slots (indices 208..418)
+    # 1. Delete sample day slots (indices 208..417)
     requests: list[dict] = [
         {
             "deleteContentRange": {
                 "range": {
                     "startIndex": 208,
-                    "endIndex": 418,
+                    "endIndex": 417,
                 }
             }
         }
