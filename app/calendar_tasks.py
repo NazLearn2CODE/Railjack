@@ -9,9 +9,13 @@ from __future__ import annotations
 
 import calendar
 import datetime
+import logging
 import os
 import re
+import subprocess
 import tempfile
+import threading
+import time
 from pathlib import Path
 from typing import Any, Literal
 
@@ -26,6 +30,13 @@ router = APIRouter(prefix="/api/calendar", tags=["calendar"])
 _DEFAULT_VAULT = Path.home() / "Cephalon"
 _LOCAL_FALLBACK = Path.home() / ".config" / "railjack"
 
+logger = logging.getLogger(__name__)
+
+_AUTOSYNC_MSG = "data(calendar): auto-sync"
+_SYNC_LOCK = threading.Lock()
+_READ_SYNC_INTERVAL = 60.0  # seconds between background syncs on read endpoints
+_last_read_sync = 0.0
+
 
 def get_data_path() -> Path:
     vault_override = os.environ.get("CEPHALON_VAULT_PATH")
@@ -38,6 +49,92 @@ def get_data_path() -> Path:
         return vault_path
     _LOCAL_FALLBACK.mkdir(parents=True, exist_ok=True)
     return _LOCAL_FALLBACK / "working-calendar-data.md"
+
+
+def _find_repo_root(data_path: Path) -> Path | None:
+    """Nearest ancestor of data_path that is a git work tree."""
+    for cand in data_path.resolve().parents:
+        if (cand / ".git").exists():
+            return cand
+    return None
+
+
+def _git(repo: Path, *args: str) -> tuple[int, str]:
+    """Run a git command in repo; returns (returncode, combined output).
+
+    Hooks are bypassed (core.hooksPath=/dev/null): the vault's post-commit
+    hook re-indexes RAG (uv + Ollama embeddings — tens of seconds), which
+    would stall every calendar tick and blow the 10s timeout below. Those
+    hooks still fire on normal session commits/pulls; the calendar data file
+    is machine-parsed app data, not RAG material. This also covers the vault
+    pre-commit's vault-check gate and the pull-time telegram-bot restart,
+    which a scoped data sync must not trigger.
+    """
+    try:
+        proc = subprocess.run(
+            ["git", "-c", "core.hooksPath=/dev/null", "-C", str(repo), *args],
+            capture_output=True, text=True, timeout=10,
+        )
+    except subprocess.TimeoutExpired:
+        return 124, "git timed out"
+    out = f"{proc.stdout.strip()} {proc.stderr.strip()}".strip()
+    return proc.returncode, out
+
+
+def _read_sync_due() -> bool:
+    """True at most once per _READ_SYNC_INTERVAL (throttle for read endpoints)."""
+    global _last_read_sync
+    now = time.monotonic()
+    if now - _last_read_sync < _READ_SYNC_INTERVAL:
+        return False
+    _last_read_sync = now
+    return True
+
+
+def vault_sync() -> dict[str, Any]:
+    """Sync the calendar data file with its vault remote: commit → pull → push.
+
+    Scoped to working-calendar-data.md only — unrelated dirty vault files are
+    never staged. Soft-fails everywhere (offline, diverged, no repo): returns
+    a status dict instead of raising, so calendar reads/writes never break.
+    """
+    resolved = get_data_path().resolve()
+    repo = _find_repo_root(resolved)
+    if repo is None:
+        return {"status": "no-repo", "detail": "calendar file is not inside a git repo"}
+    rel = resolved.relative_to(repo).as_posix()
+    result: dict[str, Any] = {"status": "ok", "committed": False, "pulled": False, "pushed": False, "detail": ""}
+
+    with _SYNC_LOCK:
+        rc, out = _git(repo, "add", "--", rel)
+        if rc != 0:
+            return {**result, "status": "error", "detail": f"git add: {out}"}
+        rc, out = _git(repo, "diff", "--cached", "--quiet")
+        if rc != 0:
+            rc, out = _git(repo, "commit", "-m", _AUTOSYNC_MSG)
+            if rc != 0:
+                return {**result, "status": "error", "detail": f"git commit: {out}"}
+            result["committed"] = True
+
+        rc, out = _git(repo, "pull", "--ff-only")
+        if rc != 0:
+            # Both sides advanced: replay our data commit on top. On conflict,
+            # abort and keep the local commit — rare (one user, two machines);
+            # the session-end ritual resolves it.
+            rc, out = _git(repo, "pull", "--rebase", "--autostash")
+            if rc != 0:
+                _git(repo, "rebase", "--abort")
+                logger.warning("calendar sync conflict, rebase aborted: %s", out)
+                return {**result, "status": "conflict", "detail": f"pull: {out}"}
+        result["pulled"] = True
+
+        rc, out = _git(repo, "push")
+        if rc != 0:
+            logger.warning("calendar sync push failed (local commit kept): %s", out)
+            return {**result, "status": "local-only", "detail": f"push: {out}"}
+        result["pushed"] = True
+
+    return result
 
 
 class TaskItem(BaseModel):
@@ -247,6 +344,9 @@ def get_month_overview(year: int | None = None, month: int | None = None) -> dic
     y = year or today.year
     m = month or today.month
 
+    if _read_sync_due():
+        vault_sync()
+
     _fm, recurring, dated = parse_calendar_file()
 
     num_days = calendar.monthrange(y, m)[1]
@@ -308,6 +408,9 @@ def get_day_tasks(date: str | None = None) -> dict[str, Any]:
         target_date = datetime.date.fromisoformat(target_str)
     except ValueError:
         raise HTTPException(status_code=400, detail="Invalid date format (expected YYYY-MM-DD)")
+
+    if _read_sync_due():
+        vault_sync()
 
     _fm, recurring, dated = parse_calendar_file()
 
@@ -388,7 +491,7 @@ def create_task(body: TaskCreateBody) -> dict[str, Any]:
         dated.append(item)
 
     save_calendar_file(fm, recurring, dated)
-    return {"status": "ok", "task": item}
+    return {"status": "ok", "task": item, "sync": vault_sync()}
 
 
 @router.patch("/task/{task_id}/status")
@@ -425,7 +528,7 @@ def update_task_status(task_id: str, body: StatusUpdateBody) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
 
     save_calendar_file(fm, recurring, dated)
-    return {"status": "ok", "id": task_id, "new_status": body.status}
+    return {"status": "ok", "id": task_id, "new_status": body.status, "sync": vault_sync()}
 
 
 @router.delete("/task/{task_id}")
@@ -443,7 +546,13 @@ def delete_task(task_id: str) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
 
     save_calendar_file(fm, recurring, dated)
-    return {"status": "ok", "deleted_id": task_id}
+    return {"status": "ok", "deleted_id": task_id, "sync": vault_sync()}
+
+
+@router.post("/sync")
+def sync_calendar() -> dict[str, Any]:
+    """Force a full vault sync now (the calendar panel's SYNC button)."""
+    return vault_sync()
 
 
 @router.post("/task/{task_id}/dispatch")

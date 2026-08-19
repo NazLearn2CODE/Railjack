@@ -25,8 +25,10 @@ import {
   updateCalendarTaskStatus,
   deleteCalendarTask,
   dispatchCalendarPrompt,
+  syncCalendar,
   type MonthOverview,
   type CalendarTask,
+  type CalendarSyncResult,
 } from "../api";
 
 export default function CalendarPanel() {
@@ -57,6 +59,17 @@ export default function CalendarPanel() {
   // Visual feedback states
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [dispatchedId, setDispatchedId] = useState<string | null>(null);
+
+  // Vault sync state (badge + SYNC button)
+  const [syncing, setSyncing] = useState<boolean>(false);
+  const [syncResult, setSyncResult] = useState<CalendarSyncResult | null>(null);
+  const [syncTime, setSyncTime] = useState<string>("");
+
+  const applySyncResult = (res: CalendarSyncResult | undefined) => {
+    if (!res) return;
+    setSyncResult(res);
+    if (res.status === "ok") setSyncTime(new Date().toLocaleTimeString());
+  };
 
   const loadMonth = useCallback(async (y: number, m: number) => {
     try {
@@ -118,7 +131,8 @@ export default function CalendarPanel() {
   const handleToggleStatus = async (task: CalendarTask) => {
     const nextStatus = task.status === "completed" ? "pending" : "completed";
     try {
-      await updateCalendarTaskStatus(task.id, nextStatus);
+      const res = await updateCalendarTaskStatus(task.id, nextStatus);
+      applySyncResult(res.sync);
       await loadDay(selectedDate);
       await loadMonth(currentYear, currentMonth);
     } catch (e) {
@@ -129,11 +143,26 @@ export default function CalendarPanel() {
   const handleDelete = async (taskId: string) => {
     if (!confirm("Delete this calendar entry?")) return;
     try {
-      await deleteCalendarTask(taskId);
+      const res = await deleteCalendarTask(taskId);
+      applySyncResult(res.sync);
       await loadDay(selectedDate);
       await loadMonth(currentYear, currentMonth);
     } catch (e) {
       alert("Failed to delete task: " + (e instanceof Error ? e.message : String(e)));
+    }
+  };
+
+  const handleSync = async () => {
+    setSyncing(true);
+    try {
+      const res = await syncCalendar();
+      applySyncResult(res);
+      await loadDay(selectedDate);
+      await loadMonth(currentYear, currentMonth);
+    } catch (e) {
+      setSyncResult({ status: "error", detail: e instanceof Error ? e.message : String(e) });
+    } finally {
+      setSyncing(false);
     }
   };
 
@@ -187,7 +216,7 @@ export default function CalendarPanel() {
         target_repo: addTargetRepo.trim() || undefined,
         prompt: addPrompt.trim() || undefined,
         cron: cronValue,
-      });
+      }).then((res) => applySyncResult(res.sync));
 
       setShowAddModal(false);
       setAddTitle("");
@@ -208,6 +237,15 @@ export default function CalendarPanel() {
   const insertToken = (token: string) => {
     setAddPrompt((prev) => prev + token);
   };
+
+  // Vault-sync badge presentation
+  const syncBadge = syncing
+    ? { cls: "bg-white/10 text-neutral-300 border-white/20", label: "Syncing…" }
+    : syncResult == null || syncResult.status === "ok"
+    ? { cls: "bg-emerald-500/10 text-emerald-400 border-emerald-500/30", label: syncTime ? `Synced ${syncTime}` : "Vault Sync" }
+    : syncResult.status === "local-only" || syncResult.status === "no-repo"
+    ? { cls: "bg-amber-500/10 text-amber-400 border-amber-500/30", label: syncResult.status === "no-repo" ? "No Repo" : "Local Only" }
+    : { cls: "bg-red-500/10 text-red-400 border-red-500/30", label: syncResult.status === "conflict" ? "Sync Conflict" : "Sync Error" };
 
   // Calendar Grid Calculation
   const firstDayOfMonth = new Date(currentYear, currentMonth - 1, 1);
@@ -253,8 +291,11 @@ export default function CalendarPanel() {
           <div>
             <h1 className="text-sm font-semibold tracking-wider uppercase text-amber-300 flex items-center gap-2">
               Working Calendar & Prompt Launcher
-              <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 font-mono">
-                ● Cephalon Vault Sync
+              <span
+                className={`text-[10px] px-2 py-0.5 rounded-full border font-mono ${syncBadge.cls}`}
+                title={syncResult?.detail || "Cephalon vault sync — commits calendar data, pulls remote changes, pushes"}
+              >
+                ● {syncBadge.label}
               </span>
             </h1>
             <p className="text-xs text-neutral-400">
@@ -264,6 +305,15 @@ export default function CalendarPanel() {
         </div>
 
         <div className="flex items-center gap-2">
+          <button
+            onClick={handleSync}
+            disabled={syncing}
+            title="Sync with the Cephalon vault: commit calendar changes, pull remote, push"
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 text-neutral-200 font-mono text-xs transition-all disabled:opacity-50"
+          >
+            <RotateCw className={`w-4 h-4 ${syncing ? "animate-spin" : ""}`} />
+            <span>SYNC</span>
+          </button>
           <button
             onClick={() => {
               setAddDate(selectedDate);

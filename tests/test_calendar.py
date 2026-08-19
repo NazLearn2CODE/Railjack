@@ -1,4 +1,5 @@
 import datetime
+import subprocess
 import pytest
 from pathlib import Path
 from fastapi.testclient import TestClient
@@ -7,6 +8,55 @@ from app.main import app
 from app import calendar_tasks
 
 client = TestClient(app)
+
+_GIT_CAL_MD = """---
+title: Git Sync Calendar
+updated: 2026-08-18
+category: project
+---
+
+# Recurring Schedules
+[]
+
+# Dated Tasks
+- id: task-1
+  date: 2026-08-18
+  type: reminder
+  title: Check deployment
+  status: pending
+  tags: [ops]
+"""
+
+
+def _run_git(cwd, *args):
+    argv = ["git"]
+    if cwd is not None:
+        argv += ["-C", str(cwd)]
+    argv += list(args)
+    proc = subprocess.run(argv, capture_output=True, text=True)
+    assert proc.returncode == 0, f"git {args} failed: {proc.stdout}{proc.stderr}"
+    return proc
+
+
+@pytest.fixture
+def git_vault(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """A real git 'vault' (clone + bare remote) with the API pointed at its data file."""
+    remote = tmp_path / "CephalonVoid.git"
+    _run_git(None, "init", "--bare", str(remote))
+    clone = tmp_path / "office" / "Cephalon"
+    clone.mkdir(parents=True)
+    _run_git(None, "clone", str(remote), str(clone))
+    _run_git(clone, "config", "user.email", "tawhan@test")
+    _run_git(clone, "config", "user.name", "Tawhan Test")
+    data_dir = clone / "20-projects"
+    data_dir.mkdir()
+    data_file = data_dir / "working-calendar-data.md"
+    data_file.write_text(_GIT_CAL_MD, encoding="utf-8")
+    _run_git(clone, "add", "-A")
+    _run_git(clone, "commit", "-m", "init calendar data")
+    _run_git(clone, "push", "-u", "origin", "HEAD")
+    monkeypatch.setattr(calendar_tasks, "get_data_path", lambda: data_file)
+    return {"remote": remote, "clone": clone, "file": data_file}
 
 
 @pytest.fixture
@@ -184,3 +234,82 @@ def test_dispatch_multiline_prompt_collapsed(temp_calendar_file, monkeypatch):
     assert len(dispatched) == 1
     assert "\n" not in dispatched[0]
     assert "Generate report for August 2026" in dispatched[0]
+
+
+def test_write_syncs_to_remote(git_vault):
+    before = _run_git(git_vault["remote"], "rev-parse", "HEAD").stdout.strip()
+    res = client.patch("/api/calendar/task/task-1/status", json={"status": "completed"})
+    assert res.status_code == 200
+    sync = res.json()["sync"]
+    assert sync["status"] == "ok"
+    assert sync["committed"] is True
+    assert sync["pushed"] is True
+    after = _run_git(git_vault["remote"], "rev-parse", "HEAD").stdout.strip()
+    assert after != before
+    subject = _run_git(git_vault["remote"], "log", "-1", "--format=%s").stdout.strip()
+    assert subject == "data(calendar): auto-sync"
+
+
+def test_sync_pulls_remote_changes(git_vault, tmp_path):
+    # Simulate the other machine: clone, add a task, push.
+    other = tmp_path / "somatic" / "Cephalon"
+    other.mkdir(parents=True)
+    _run_git(None, "clone", str(git_vault["remote"]), str(other))
+    _run_git(other, "config", "user.email", "tasai@test")
+    _run_git(other, "config", "user.name", "Tasai Test")
+    other_file = other / "20-projects" / "working-calendar-data.md"
+    other_file.write_text(
+        _GIT_CAL_MD
+        + "- id: task-9\n"
+        "  date: 2026-08-21\n"
+        "  type: reminder\n"
+        "  title: Remote-added task\n"
+        "  status: pending\n",
+        encoding="utf-8",
+    )
+    _run_git(other, "add", "-A")
+    _run_git(other, "commit", "-m", "office-side add")
+    _run_git(other, "push")
+
+    res = client.post("/api/calendar/sync")
+    assert res.status_code == 200
+    assert res.json()["status"] == "ok"
+
+    day = client.get("/api/calendar/day?date=2026-08-21")
+    assert day.status_code == 200
+    ids = [t["id"] for t in day.json()["tasks"]]
+    assert "task-9" in ids
+
+
+def test_sync_conflict_aborts_rebase_and_keeps_local(git_vault, tmp_path):
+    # Other machine flips task-1 to in_progress and pushes.
+    other = tmp_path / "somatic" / "Cephalon"
+    other.mkdir(parents=True)
+    _run_git(None, "clone", str(git_vault["remote"]), str(other))
+    _run_git(other, "config", "user.email", "tasai@test")
+    _run_git(other, "config", "user.name", "Tasai Test")
+    other_file = other / "20-projects" / "working-calendar-data.md"
+    other_file.write_text(_GIT_CAL_MD.replace("status: pending", "status: in_progress"), encoding="utf-8")
+    _run_git(other, "add", "-A")
+    _run_git(other, "commit", "-m", "office-side flip")
+    _run_git(other, "push")
+
+    # Local divergent edit to the same region: PATCH commits, pull rebases,
+    # conflicts, aborts — and must leave the repo clean, change kept locally.
+    res = client.patch("/api/calendar/task/task-1/status", json={"status": "completed"})
+    assert res.status_code == 200
+    assert res.json()["sync"]["status"] == "conflict"
+
+    assert not (git_vault["clone"] / ".git" / "rebase-merge").exists()
+    assert not (git_vault["clone"] / ".git" / "rebase-apply").exists()
+    _fm, _rec, dated = calendar_tasks.parse_calendar_file()
+    assert any(t["id"] == "task-1" and t["status"] == "completed" for t in dated)
+
+
+def test_sync_without_repo_soft_fails(temp_calendar_file):
+    res = client.post("/api/calendar/sync")
+    assert res.status_code == 200
+    assert res.json()["status"] == "no-repo"
+    # reads still work
+    day = client.get("/api/calendar/day?date=2026-08-18")
+    assert day.status_code == 200

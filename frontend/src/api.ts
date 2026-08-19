@@ -88,6 +88,14 @@ export interface DayTasksResponse {
   tasks: CalendarTask[];
 }
 
+export interface CalendarSyncResult {
+  status: "ok" | "local-only" | "conflict" | "error" | "no-repo";
+  committed?: boolean;
+  pulled?: boolean;
+  pushed?: boolean;
+  detail?: string;
+}
+
 export async function fetchMonthOverview(year?: number, month?: number): Promise<MonthOverview> {
   const params = new URLSearchParams();
   if (year) params.append("year", String(year));
@@ -110,7 +118,7 @@ export async function createCalendarTask(body: {
   target_repo?: string;
   prompt?: string;
   cron?: string;
-}): Promise<{ status: string; task: CalendarTask }> {
+}): Promise<{ status: string; task: CalendarTask; sync?: CalendarSyncResult }> {
   return fetchJSON("/api/calendar/task", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -121,7 +129,7 @@ export async function createCalendarTask(body: {
 export async function updateCalendarTaskStatus(
   taskId: string,
   status: "pending" | "in_progress" | "completed" | "snoozed"
-): Promise<{ status: string; id: string; new_status: string }> {
+): Promise<{ status: string; id: string; new_status: string; sync?: CalendarSyncResult }> {
   return fetchJSON(`/api/calendar/task/${taskId}/status`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
@@ -129,10 +137,14 @@ export async function updateCalendarTaskStatus(
   });
 }
 
-export async function deleteCalendarTask(taskId: string): Promise<{ status: string; deleted_id: string }> {
+export async function deleteCalendarTask(taskId: string): Promise<{ status: string; deleted_id: string; sync?: CalendarSyncResult }> {
   return fetchJSON(`/api/calendar/task/${taskId}`, {
     method: "DELETE",
   });
+}
+
+export function syncCalendar(): Promise<CalendarSyncResult> {
+  return fetchJSON("/api/calendar/sync", { method: "POST" });
 }
 
 export async function dispatchCalendarPrompt(
