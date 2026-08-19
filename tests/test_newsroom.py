@@ -619,7 +619,7 @@ def _load_radio_news():
 
 def test_rn_build_slotmap_sizes():
     rn = _load_radio_news()
-    assert len(rn.build_slotmap("global", "weekday")) == 10
+    assert len(rn.build_slotmap("global", "weekday")) == 11  # 10+1 slice fold (2026-08-18), AM4 restored (2026-08-19)
     assert len(rn.build_slotmap("global", "weekend")) == 7
     assert len(rn.build_slotmap("business", "weekday")) == 10
     assert len(rn.build_slotmap("business", "weekend")) == 6
@@ -775,14 +775,14 @@ def test_rn_assign_pieces_sea_leads_each_broadcast():
     rn = _load_radio_news()
     slotmap = rn.build_slotmap("global", "weekday")  # slot-1 at AM/MIDDAY/EVE
     pieces = ([{"title": "sea%d" % i, "region": "SEA"} for i in range(3)]
-              + [{"title": "g%d" % i} for i in range(7)])
+              + [{"title": "g%d" % i} for i in range(8)])
     a = rn.assign_pieces(slotmap, pieces, "global")
     for tab in ("AM", "MIDDAY", "EVE"):  # every broadcast lead is a SEA piece
         assert a[(tab, 1)]["region"] == "SEA"
     # non-lead slots are the non-SEA remainder, newest-first into earliest slot
     assert a[("AM", 2)]["title"] == "g0"
     assert all(a[k].get("region") != "SEA" for k in a if k[1] != 1)
-    assert len(a) == len(slotmap) == 10
+    assert len(a) == len(slotmap) == 11
 
 
 def test_rn_assign_pieces_business_sequential_ignores_region():
