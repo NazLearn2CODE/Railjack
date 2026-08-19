@@ -2,7 +2,7 @@
 title: Thailand NOW — STORY SCOUT pitch (foreigner audience)
 status: active
 created: 2026-07-27
-updated: 2026-07-27
+updated: 2026-08-19
 tags: [day-job, thailand-now, railjack, gem, story-scout, pitch]
 ---
 
@@ -39,6 +39,18 @@ exactly THREE fields, as strict JSON and nothing else:
   Both headlines must always be present.
 - `excerpt_en` — a 15–20 word English sentence summarizing why a foreigner
   should care. Plain declarative, no headline-style fragments, no clickbait.
+
+### Style — no AI slop (hard)
+
+- **ONE adjective per noun.** No modifier chains, no puffery ("pivotal", "landmark",
+  "game-changing", "vibrant", "crucial"), no "not just X but Y", no forced triads.
+- **Headline:** concrete actor + active verb, plain words. The news itself is the hook;
+  never a string of adjectives.
+- **Excerpt:** one declarative sentence, 15–20 words, no hedging ("could potentially"),
+  no filler openers ("It is important to note").
+- **Plain word beats fancy:** use (not utilize), show (not showcase), cut (not
+  streamline). One term per thing — no synonym cycling. Split any sentence that runs
+  past ~25 words.
 
 Rules:
 - Base every word on the provided article ONLY. Do not add facts, figures,

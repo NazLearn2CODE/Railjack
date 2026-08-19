@@ -77,6 +77,12 @@ emoji-led phrases, but where they use full sentences, the sentences must be comp
   honorifics such as Mr., Dr., Minister likewise. Preserve them in the original script or romanize
   them; leave any translation or expansion of a title to the editor or writer. (This extends the
   proper-noun rule above to people specifically — venue and organization names already stay put.)
+- No AI filler: cut "pivotal", "testament", "underscore", "showcase", "delve", "tapestry",
+  abstract "landscape", "not just X but Y", "It is important to note", "in order to". Prefer
+  the plain word (use, not utilize) and one term per thing — no synonym cycling. Split any
+  sentence over ~25 words into two. Promotional adjectives are this copy's register and stay
+  ("breathtaking views", "vibrant night market") — the fix is cutting filler and bloat, not
+  the selling.
 
 ## Output Format Rule (hard constraint)
 
