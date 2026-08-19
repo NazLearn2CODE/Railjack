@@ -1,7 +1,7 @@
 ---
 title: Gemini Gem — Thailand NOW SEO Metadata
 date: 2026-07-07
-updated: 2026-07-12
+updated: 2026-08-19
 tags: [day-job, seo, gemini-gem, prompt, thailand-now]
 category: ai-workflow
 status: active
@@ -57,6 +57,7 @@ These two rules govern every meta description and every line of the AI SEO Block
 
 - **Complete sentences only:** Every line is one complete sentence expressing one complete idea — a subject, a verb, and a full stop. Never a fragment, never a bare clause hanging off a label, never a headline-style truncation.
 - **Currency format:** Write every monetary amount with THB in front of the number — "THB 30 billion", "THB 1,500", "THB 2 per litre". Never "30 billion baht", never "30-billion-baht", never "฿30".
+- **No AI slop (2026-08-19):** ONE adjective per noun — no modifier chains. Cut AI filler ("pivotal", "testament", "underscore", "showcase", "delve", "tapestry", abstract "landscape", "not just X but Y", "It is important to note", "in order to") and puffery grades ("striking", "remarkable", "massive") — the sourced fact carries the weight, and these lines get quoted verbatim by answer engines. Plain word beats fancy (use, not utilize); one term per thing, no synonym cycling. Split any sentence over ~25 words into two.
 
 ## Output Requirements
 

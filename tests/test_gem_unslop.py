@@ -51,3 +51,16 @@ def test_publicity_gem_language_subset_keeps_promo_register():
     assert "No AI filler" in g
     # Promotional adjectives are deliberately allowed in publicity copy.
     assert "Promotional adjectives are this copy's register and stay" in g
+
+
+def test_seo_gem_has_antislop_subset_and_matches_vault_canonical():
+    g = _gem("gemini-gem-thailandnow-seo.md")
+    assert "No AI slop" in g
+    assert "ONE adjective per noun" in g
+    assert "25 words" in g
+    # newsroom.py's SEO lane loads the VAULT copy, thailandnow.py loads this app
+    # copy — drift between them ships different copy per lane (found 2026-08-19:
+    # vault was a stale 2026-07-07 v2 while the app copy was v3).
+    vault = Path.home() / "Cephalon" / "10-knowledge" / "ai-workflow" / "gemini-gem-thailandnow-seo.md"
+    if vault.exists():  # machine without the vault: app copy still guards the clause
+        assert vault.read_text(encoding="utf-8") == g
