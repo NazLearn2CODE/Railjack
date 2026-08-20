@@ -61,6 +61,7 @@ export default function CockpitControls() {
   const [mcpSel, setMcpSel] = useState("");
   const [restarting, setRestarting] = useState(false);
   const [handoffTo, setHandoffTo] = useState("Tasai");
+  const [copiedLabel, setCopiedLabel] = useState<string | null>(null);
 
   // Theme toggle — flips data-theme on <html> and persists to localStorage.
   // index.html sets it pre-paint from localStorage so a reload is flash-free;
@@ -78,27 +79,22 @@ export default function CockpitControls() {
 
   const { data: catalog, refetch: refetchCatalog } = usePolling<Catalog>("/api/catalog", 60_000);
 
-  const insert = async (text: string): Promise<boolean> => {
+  const copyToClipboard = async (text: string, label?: string): Promise<boolean> => {
     try {
-      await fetchJSON("/api/terminal/insert", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ text }),
-      });
-      const tmux = useStore.getState().config?.modules.find((m) => m.id === "tmux");
-      if (tmux) useStore.getState().setActive(tmux.id);
+      await navigator.clipboard.writeText(text);
+      if (label) {
+        setCopiedLabel(label);
+        setTimeout(() => setCopiedLabel(null), 1500);
+      }
       return true;
     } catch (e) {
-      console.error("terminal insert failed", e);
+      console.error("clipboard copy failed", e);
       return false;
     }
   };
 
   // Re-read the machine YAML on the server (buttons/modules) AND rescan the
-  // catalog (skills / marketplace / MCP) — no F5, no uvicorn restart. Unlike the
-  // buttons above, this one does NOT type into the terminal; it just reloads.
-  // The catalog reload busts the server-side 60 s cache so a skill/plugin/MCP
-  // added since startup appears in the dropdowns right away.
+  // catalog (skills / marketplace / MCP) — no F5, no uvicorn restart.
   const [reloading, setReloading] = useState(false);
   const reloadConfig = async () => {
     setReloading(true);
@@ -115,9 +111,6 @@ export default function CockpitControls() {
   };
 
   // Restart the railjack server itself (load new backend code after an edit).
-  // The endpoint returns fast, then a detached `sleep 1 && systemctl restart`
-  // kills these workers ~1 s later — so we expect the connection to drop and
-  // poll /api/health until the service is back, then reload the page.
   const restartServer = async () => {
     if (!confirm("Restart railjack now? Loads new backend code — ~2 s downtime.")) return;
     setRestarting(true);
@@ -137,7 +130,7 @@ export default function CockpitControls() {
         const r = await fetch("/api/health");
         if (r.ok) {
           clearInterval(tick);
-          location.reload(); // pick up any frontend rebuild too
+          location.reload();
         }
       } catch {
         /* still restarting */
@@ -149,7 +142,7 @@ export default function CockpitControls() {
 1. Append a full, self-contained replicate/implement prompt under the "## Sister handoffs (ack-by-deleting)" section in ~/Cephalon/readme-naz.md. Match the format of the existing entries there exactly: a ### heading, a dash-bracket todo line, a fenced self-contained prompt block, and a ctx: line of wikilinks to the design note.
 2. Add a one-line pointer under the "Pending sister handoffs" block in ~/Cephalon/hot.md.
 3. git pull --ff-only first, preserve frontmatter, commit and push both files, and append a one-line entry to ~/Cephalon/logs/memory-log.md.
-If it is ambiguous what feature just finished, ask me before writing. The recipient is ${recipient}.`.replace(/\s+/g, " ").trim();
+If it is ambiguous what feature just finished, ask me before writing. The recipient is ${recipient}.`;
 
   const skills = grouped(catalog?.skills ?? []);
   const mktSkills = grouped(catalog?.marketplace_skills ?? []);
@@ -164,13 +157,13 @@ If it is ambiguous what feature just finished, ask me before writing. The recipi
         onChange={(e) => {
           const v = e.target.value;
           if (v) {
-            void insert(v);
+            void copyToClipboard(v, "SKILL");
             setSkillSel("");
           }
         }}
       >
         <option value="" disabled>
-          SKILLS
+          {copiedLabel === "SKILL" ? "✓ COPIED!" : "SKILLS"}
         </option>
         {skills.map((g) => (
           <OptGroup key={g.name} {...g} />
@@ -185,13 +178,13 @@ If it is ambiguous what feature just finished, ask me before writing. The recipi
           onChange={(e) => {
             const v = e.target.value;
             if (v) {
-              void insert(v);
+              void copyToClipboard(v, "MARKETPLACE");
               setMktSel("");
             }
           }}
         >
           <option value="" disabled>
-            MARKETPLACE
+            {copiedLabel === "MARKETPLACE" ? "✓ COPIED!" : "MARKETPLACE"}
           </option>
           {mktSkills.map((g) => (
             <OptGroup key={g.name} {...g} />
@@ -206,13 +199,13 @@ If it is ambiguous what feature just finished, ask me before writing. The recipi
         onChange={(e) => {
           const v = e.target.value;
           if (v) {
-            void insert(v);
+            void copyToClipboard(v, "MCP");
             setMcpSel("");
           }
         }}
       >
         <option value="" disabled>
-          MCP
+          {copiedLabel === "MCP" ? "✓ COPIED!" : "MCP"}
         </option>
         {mcps.map((g) => (
           <OptGroup key={g.name} {...g} />
@@ -220,8 +213,8 @@ If it is ambiguous what feature just finished, ask me before writing. The recipi
       </select>
 
       {buttons.map((b) => (
-        <button key={b.label} className="btn btn--signal btn--compact" onClick={() => void insert(b.insert)}>
-          {b.label}
+        <button key={b.label} className="btn btn--signal btn--compact" onClick={() => void copyToClipboard(b.insert, b.label)}>
+          {copiedLabel === b.label ? "✓ COPIED!" : b.label}
         </button>
       ))}
 
@@ -255,13 +248,12 @@ If it is ambiguous what feature just finished, ask me before writing. The recipi
 
       <button
         className="btn btn--compact"
-        onClick={async () => {
-          if (!(await insert(handoffMeta(handoffTo))))
-            alert("✍ HANDOFF failed to type into the terminal — is the tmux pane open? (see browser console)");
+        onClick={() => {
+          void copyToClipboard(handoffMeta(handoffTo), "HANDOFF");
         }}
-        title="Type a prompt into the terminal that tells the agent to write a port/implementation handoff to the selected sister and file it in readme-naz.md + hot.md"
+        title="Copy prompt to clipboard for writing a port/implementation handoff to the selected sister in readme-naz.md + hot.md"
       >
-        ✍ HANDOFF
+        {copiedLabel === "HANDOFF" ? "✓ COPIED!" : "✍ HANDOFF"}
       </button>
 
       <button
