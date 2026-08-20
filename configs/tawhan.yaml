@@ -1,6 +1,12 @@
 machine: tawhan
 hostnames: [bazzite]          # `hostname -s` on the Tawhan (home) machine
 modules:
+  - id: dsh
+    title: DSH
+    kind: iframe        # DeepSeek Harness agent UI; models via OmniRoute (api: anthropic-messages)
+    url: http://127.0.0.1:3080
+    health: { type: http, url: "http://127.0.0.1:3080/" }
+    manage: { type: systemd-user, unit: dsh-web.service }
   - id: tmux
     title: TERMINAL
     kind: iframe
@@ -107,12 +113,6 @@ modules:
     title: CALENDAR
     kind: panel          # working calendar + prompt launcher (app/calendar_tasks.py)
     panel: calendar      # parses 20-projects/working-calendar-data.md from the Cephalon vault
-  - id: dsh
-    title: DSH
-    kind: iframe        # DeepSeek Harness agent UI; models via OmniRoute (api: anthropic-messages)
-    url: http://127.0.0.1:3080
-    health: { type: http, url: "http://127.0.0.1:3080/" }
-    manage: { type: systemd-user, unit: dsh-web.service }
 # Phase F: always-visible bottom terminal dock. Same ttyd URL as the TERMINAL
 # module → both attach to the one tmux session (tmux new -A -s main); typing in
 # the dock mirrors in TERMINAL and vice versa. Optional; omit `dock:` to hide.
