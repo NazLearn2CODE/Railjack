@@ -144,6 +144,14 @@ export default function CockpitControls() {
 3. git pull --ff-only first, preserve frontmatter, commit and push both files, and append a one-line entry to ~/Cephalon/logs/memory-log.md.
 If it is ambiguous what feature just finished, ask me before writing. The recipient is ${recipient}.`;
 
+  // Learning layer (see ~/Cephalon/10-knowledge/practices.md): one prompt, the
+  // agent files the lesson into the vault staging areas. Solution-vs-practice
+  // is the agent's judgment, stated in the entry.
+  const lessonMeta = `File a lesson from this session into the Cephalon vault (~/Cephalon). First decide its TYPE:
+- PRACTICE (how we work — a repeatable rule for building/operating): append ONE line to 00-raw_ideas/practices-pending.md matching the entry format shown at the top of that file (date | one-line rule | scope | evidence).
+- SOLUTION (what we know — reusable knowledge worth a note): create a draft note in 00-raw_ideas/knowledge-drafts/ (kebab-case filename, YAML frontmatter with title/date/tags/category, one idea per note) and list it in 00-raw_ideas/raw_ideas-index.md under the staging Subdirectory entry.
+Rules: evidence-backed (cite what happened this session), one idea per entry, redact secrets and personal data, never restate something already in naz-profile.md § Working Agreements or an existing vault note — search first, link instead. Do not modify 10-knowledge/practices.md or promote anything — promotion happens at the next vault session start. If no genuine lesson emerged this session, say so and write nothing.`;
+
   const skills = grouped(catalog?.skills ?? []);
   const mktSkills = grouped(catalog?.marketplace_skills ?? []);
   const mcps = grouped(catalog?.mcps ?? []);
@@ -254,6 +262,16 @@ If it is ambiguous what feature just finished, ask me before writing. The recipi
         title="Copy prompt to clipboard for writing a port/implementation handoff to the selected sister in readme-naz.md + hot.md"
       >
         {copiedLabel === "HANDOFF" ? "✓ COPIED!" : "✍ HANDOFF"}
+      </button>
+
+      <button
+        className="btn btn--compact"
+        onClick={() => {
+          void copyToClipboard(lessonMeta, "LESSON");
+        }}
+        title="Copy prompt to clipboard for filing a lesson (solution or practice) into the Cephalon learning-layer staging areas"
+      >
+        {copiedLabel === "LESSON" ? "✓ COPIED!" : "🧠 LESSON"}
       </button>
 
       <button
