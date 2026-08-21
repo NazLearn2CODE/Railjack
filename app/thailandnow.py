@@ -5167,7 +5167,10 @@ async def traffic_apply(req: TrafficApplyReq) -> dict:
             try:
                 rng = urllib.parse.quote(f"{tab}!A{w.row}:F{w.row}")
                 f_cell = w.daily_new if w.daily_new is not None else w.daily_old
-                values = [["", _traffic_iso_to_serial(w.date), w.day,
+                # B as ISO date (USER_ENTERED re-parses to the same serial but
+                # keeps date rendering; a bare serial int displays as a plain
+                # number — the Aug 20–21 bug).
+                values = [["", w.date, w.day,
                            w.target_old if w.target_old is not None else "",
                            w.actual_new, f_cell if f_cell is not None else ""]]
                 r = await c.put(f"{base}/{rng}?valueInputOption=USER_ENTERED",
@@ -5188,7 +5191,7 @@ async def traffic_apply(req: TrafficApplyReq) -> dict:
         appended = 0
         items = req.appends[:92]  # matches the 92-dates run cap (validator caveat)
         if items:
-            rows = [["", _traffic_iso_to_serial(a.date), a.day,
+            rows = [["", a.date, a.day,  # ISO date keeps date rendering (see apply note)
                      a.target if a.target is not None else "",
                      a.actual_new, a.daily_new if a.daily_new is not None else ""]
                     for a in items]
