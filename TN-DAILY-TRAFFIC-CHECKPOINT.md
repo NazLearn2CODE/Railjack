@@ -14,12 +14,12 @@ hub op (Railjack repo) + app (new repo `~/Coding Projects/tn-daily-traffic`).
 | 0 | Grill-me design (10 Q, 2 rounds) | ✅ DONE 2026-08-21 | service account / both outputs / one-liner / on-demand+range picker / preview-every-diff / auto-append / TRAFFIC sub-tab / app full parity |
 | 1 | Brief + checkpoint written | ✅ DONE | this file + TN-DAILY-TRAFFIC-ADW-BRIEF.md |
 | 2 | Railjack baseline gates | ✅ DONE | 414 pytest + tsc green; pyjwt 2.13 installed in .venv |
-| 3 | Hub op build (agy) | ✅ BUILT | 660 insertions, all gates green (414 pytest · tsc · build · self-check · ruff=baseline · free-first) |
-| 4 | Hub op validator (independent subagent) | 🔁 FAIL→FIXED (host) | blocker: year-boundary append (clash-scan reordered after append branch) + never-green self-check assert + 92-dates alignment; regression assert (f) day-366 added; all gates re-green. NITs accepted+documented: text/append target mismatch, daily asymmetry edge, C-formula blanking, silent cap truncation, frontend day-count summary. Re-verify: next validator pass |
-| 5 | Android app tn-daily-traffic (agy) | ✅ BUILT | repo created; 10/10 node tests (host-verified); tsc+vite+cap copy green; APK deferred (ga.json pending) |
-| 6 | App validator | 🔄 RUNNING | dispatched 11:10, cross-parity vs hub `_traffic_proposed_writes` focus |
-| 7 | Live verify | 🔒 BLOCKED on Naz | (a) GA service account JSON → `~/.config/railjack/ga.json`, (b) Ben shares "Analytics & Boosting" sheet to SA email |
-| 8 | Vault: project note + hot.md + memory-log + Somatic handoff | ⏳ | |
+| 3 | Hub op build (agy) | ✅ SHIPPED `f8216ea` | gates green; hub restarted, endpoint live (503 hint until ga.json) |
+| 4 | Hub op validator | ✅ PASS (after host fix) | year-boundary append blocker + never-green assert fixed; append cap raised to 92 |
+| 5 | Android app tn-daily-traffic (agy) | ✅ SHIPPED `b2fb5bd` | 17/17 tests (host-verified); tsc+vite+cap copy green; no creds in git (verified) |
+| 6 | App validator | ✅ PASS (after correction round) | parity re-diff clean both directions; NITs: cellInt `+n` edge, pre-contract throw |
+| 7 | Live verify + APK | 🔒 BLOCKED on Naz | (a) GA SA key JSON → `~/.config/railjack/ga.json` (+property_id/sheet_id/tab/contract_start fields), (b) Ben shares sheet to SA email; then hub RUN live test + `npm run apk` + install to Ben/Nat |
+| 8 | Vault: project note + hot.md + memory-log + Somatic handoff | ✅ DONE | note `20-projects/thailandnow-daily-traffic-op.md`; Somatic port left to Tasai via hot.md |
 
 ## Key facts (compact-proof)
 
