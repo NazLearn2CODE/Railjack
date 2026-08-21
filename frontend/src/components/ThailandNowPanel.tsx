@@ -1116,19 +1116,19 @@ interface TrafficWrite {
   row: number;
   date: string;
   day: number;
-  target_old: number | null;
+  target_old: number | string | null; // echoed verbatim (formula or number)
   actual_old: number | null;
   actual_new: number;
-  daily_old: number | string | null;
+  daily_old: number | string | null; // echoed verbatim (formula or number)
   daily_new: number | null;
   daily_is_formula: boolean;
 }
 interface TrafficAppend {
   date: string;
   day: number;
-  target: number | null;
+  target: number | string | null; // shifted formula, plain number, or null
   actual_new: number;
-  daily_new: number | null;
+  daily_new: number | string | null; // shifted formula or computed diff
 }
 interface TrafficAnalyze {
   rows: TrafficWrite[];
@@ -1279,9 +1279,11 @@ function TrafficSubTab() {
               <div key={`${w.date}-${w.row}`} className="mono text-xs">
                 {trafficLabel(w.date)} Day {w.day} — Actual: {trafficNum(w.actual_old)} →{" "}
                 {w.actual_new.toLocaleString("en-US")}
-                {" · Daily: "}{trafficNum(w.daily_old)} → {trafficSigned(w.daily_new)}
-                {w.daily_is_formula && (
-                  <span className="ml-1" style={{ color: "var(--color-muted)" }}>(E=formula, untouched)</span>
+                {" · Daily: "}{trafficNum(w.daily_old)}
+                {w.daily_is_formula ? (
+                  <span className="ml-1" style={{ color: "var(--color-muted)" }}>(formula, untouched)</span>
+                ) : (
+                  <> → {trafficSigned(w.daily_new)}</>
                 )}
               </div>
             ))}
@@ -1289,7 +1291,7 @@ function TrafficSubTab() {
               <div key={a.date} className="mono text-xs">
                 <span style={{ color: "var(--color-signal)" }}>NEW ROW</span>{" "}
                 {trafficLabel(a.date)} Day {a.day} — Actual: → {a.actual_new.toLocaleString("en-US")}
-                {" · Daily: "}{trafficSigned(a.daily_new)}
+                {" · Daily: "}{typeof a.daily_new === "number" ? trafficSigned(a.daily_new) : trafficNum(a.daily_new)}
               </div>
             ))}
           </div>

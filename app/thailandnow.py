@@ -4836,86 +4836,168 @@ def _traffic_cell_int(v) -> int | None:
         return None
 
 
-_TRAFFIC_MD_RE = re.compile(r"^([A-Za-z]{3})\s+(\d{1,2})$")
+_TRAFFIC_SERIAL_EPOCH = datetime(1899, 12, 30)  # sheet serial 0 (1900 date system)
 
 
-def _traffic_row_md(a) -> tuple[str, int] | None:
-    """(month_lower, day) from a sheet A cell like 'Aug 21'; None if unparseable."""
-    if not isinstance(a, str):
-        return None
-    m = _TRAFFIC_MD_RE.match(a.strip())
-    return (m.group(1).lower(), int(m.group(2))) if m else None
+def _traffic_serial_to_iso(serial: int) -> str:
+    return (_TRAFFIC_SERIAL_EPOCH + timedelta(days=int(serial))).strftime("%Y-%m-%d")
+
+
+def _traffic_iso_to_serial(date_iso: str) -> int:
+    return (datetime.strptime(date_iso[:10], "%Y-%m-%d") - _TRAFFIC_SERIAL_EPOCH).days
+
+
+def _traffic_columns(sheet_rows: list[list]) -> tuple[int, dict[str, int]]:
+    """(header_row_number_1based, {name: 0-based col index}). The header row is the
+    first row within the first ~50 rows containing a trimmed case-insensitive 'Day'
+    cell (rows 2-6 hold phase metadata — ignored); column names matched by prefix
+    (Date/Day/Target Traffic/Actual Traffic/Daily Traffic — Date lives at B).
+    HTTPException(502) when the layout isn't recognized."""
+    for i, r in enumerate(sheet_rows or []):
+        if i >= 50:
+            break
+        cells = [str(c).strip().lower() for c in (r or [])]
+        if "day" not in cells:
+            continue
+        cols: dict[str, int] = {}
+        for j, c in enumerate(cells):
+            if c == "day":
+                cols.setdefault("day", j)
+            elif c.startswith("date"):
+                cols.setdefault("date", j)
+            elif c.startswith("target"):
+                cols.setdefault("target", j)
+            elif c.startswith("actual"):
+                cols.setdefault("actual", j)
+            elif c.startswith("daily"):
+                cols.setdefault("daily", j)
+        if {"date", "day", "actual"} <= set(cols):
+            return i + 1, cols
+    raise HTTPException(
+        502, "traffic sheet layout unrecognized — no header row with Date/Day/Target "
+             "Traffic/Actual Traffic/Daily Traffic in the first 50 rows",
+    )
+
+
+# late-phase Target/Daily formula shapes (early `=$I$3*C10` targets don't shift — blank+warn)
+_TRAFFIC_D_FORMULA_RE = re.compile(r"^=D(\d+)\+(\$[A-Z]\$\d+)$")
+_TRAFFIC_F_FORMULA_RE = re.compile(r"^=E(\d+)-E(\d+)$")
 
 
 def _traffic_proposed_writes(sheet_rows: list[list], dates: list[str], ga: dict[str, int],
-                             contract_start_iso: str) -> dict:
-    """THE CORE (pure). ``sheet_rows`` = raw values from the tab (header at row 1;
-    A Date 'Mmm D', B Day, C Target, D Actual, E Daily; rows may be ragged).
-    Per-date cumulative GA totals in ``ga`` (NOT summed dailies).
+                             contract_start_iso: str, header_row: int,
+                             columns: dict[str, int]) -> dict:
+    """THE CORE (pure). ``sheet_rows`` = raw values of the tab (rows 2-6 are a
+    phase-metadata block — ignored; the real header row is found by
+    ``_traffic_columns``, its indexes passed here). Layout below the header:
+    A empty, B serial date (45996 = 2025-12-05), C Day (1-based), D Target
+    (formula), E Actual (plain — the ONLY column we write), F Daily (formula);
+    rows may be ragged; future rows exist with D/F prefilled and E empty.
 
-    Row matching: expected Day number (from the date) against column B as the
-    primary key; month+day (A) as sanity check — a row that labels the date but
-    whose B disagrees → warning + skip. Dates past the last matching row land in
-    appends (target copied from the last row's C when it's a plain number).
-    daily_new is only proposed when the existing E cell is NOT a formula string
-    (formulas are left alone); the daily chain uses the previous day's actual
-    from the sheet OR from this run's writes/appends (GA value as yesterday)."""
+    Row matching: expected Day number (from the date) against the Day column as
+    primary key; the serial date as exact sanity check — a row holding that date
+    whose Day disagrees → warning + skip. Day-1 anchor sanity: the Day-1 row's
+    serial must equal the contract start's serial, else warning. Dates past the
+    last prefilled row land in appends (D/F formulas shifted from the last row
+    when they match the known patterns). daily_new is only proposed when the
+    Daily cell is NOT a formula string (formulas are left alone); the daily
+    chain uses the previous day's actual from the sheet OR this run's writes."""
     writes: list[dict] = []
     appends: list[dict] = []
     warnings: list[str] = []
+    ci_date, ci_day = columns["date"], columns["day"]
+    ci_actual = columns["actual"]
+    # target/daily optional (header may lack them — degrade like the app does)
+    ci_target, ci_daily = columns.get("target"), columns.get("daily")
 
-    data = [(i + 1, r) for i, r in enumerate(sheet_rows or []) if i > 0 and r]
+    def cell(r: list, idx: int | None):
+        if idx is None:
+            return None
+        return r[idx] if idx < len(r) else None
+
+    data = [(i + 1, r) for i, r in enumerate(sheet_rows or [])
+            if i + 1 > header_row and r]
     by_day: dict[int, int] = {}
+    by_serial: dict[str, int] = {}
     actuals: dict[int, int] = {}
     max_day = 0
+    last_rn = 0
     last_row: list | None = None
+    start_serial = _traffic_iso_to_serial(contract_start_iso)
+    anchor_checked = False
     for rn, r in data:
-        b = _traffic_cell_int(r[1]) if len(r) > 1 else None
+        b = _traffic_cell_int(cell(r, ci_day))
         if b is None:
             continue
         by_day.setdefault(b, rn)
-        d = _traffic_cell_int(r[3]) if len(r) > 3 else None
+        serial = _traffic_cell_int(cell(r, ci_date))
+        if serial is not None:
+            by_serial.setdefault(_traffic_serial_to_iso(serial), rn)
+            if b == 1 and not anchor_checked:
+                anchor_checked = True
+                if serial != start_serial:
+                    warnings.append(
+                        f"Day-1 anchor mismatch: sheet serial {serial} "
+                        f"({_traffic_serial_to_iso(serial)}) != contract start "
+                        f"{contract_start_iso} (serial {start_serial})"
+                    )
+        d = _traffic_cell_int(cell(r, ci_actual))
         if d is not None:
             actuals[b] = d
         max_day = max(max_day, b)
-        last_row = r
+        last_rn, last_row = rn, r
 
     for date in dates:
         day = _traffic_day(date, contract_start_iso)
         total = int(ga.get(date, 0))
-        dd = datetime.strptime(date[:10], "%Y-%m-%d")
-        want_md = (dd.strftime("%b").lower(), dd.day)
         rn = by_day.get(day)
         if rn is None:
-            # past the sheet's last row → append FIRST (a year-boundary month+day
-            # clash with a 365-days-ago row must NOT block the append)
+            clash_rn = by_serial.get(date)
+            if clash_rn is not None:
+                warnings.append(
+                    f"{date}: sheet row {clash_rn} holds that date (serial) but its "
+                    f"Day column disagrees (expected {day}) — skipped"
+                )
+                continue
             if day > max_day:
+                # append past the last prefilled row; shift D/F formulas from it
+                new_rn = last_rn + len(appends) + 1
                 target = None
+                daily = None
                 if last_row is not None:
-                    t = _traffic_cell_int(last_row[2]) if len(last_row) > 2 else None
-                    if t is not None:
-                        target = t
+                    d_cell, f_cell = cell(last_row, ci_target), cell(last_row, ci_daily)
+                    if isinstance(d_cell, str) and d_cell.strip().startswith("="):
+                        m = _TRAFFIC_D_FORMULA_RE.match(d_cell.strip())
+                        if m:
+                            target = f"=D{int(m.group(1)) + (new_rn - last_rn)}+{m.group(2)}"
+                        else:
+                            warnings.append(f"{date}: last row's Target formula unrecognized — append Target left blank")
                     else:
-                        warnings.append(f"{date}: last row's Target is not a plain number — append target left blank")
-                prev = actuals.get(day - 1)
-                daily = total if (day == 1 or prev is None) else total - prev
+                        t = _traffic_cell_int(d_cell)
+                        if t is not None:
+                            target = t
+                        else:
+                            warnings.append(f"{date}: last row's Target is not a plain number — append Target left blank")
+                    if isinstance(f_cell, str) and f_cell.strip().startswith("="):
+                        m = _TRAFFIC_F_FORMULA_RE.match(f_cell.strip())
+                        if m:
+                            shift = new_rn - last_rn
+                            daily = f"=E{int(m.group(1)) + shift}-E{int(m.group(2)) + shift}"
+                        else:
+                            warnings.append(f"{date}: last row's Daily formula unrecognized — append Daily left blank")
+                if daily is None:
+                    prev = actuals.get(day - 1)
+                    daily = total if (day == 1 or prev is None) else total - prev
                 appends.append({"date": date, "day": day, "target": target,
                                 "actual_new": total, "daily_new": daily})
                 actuals[day] = total
                 max_day = day
                 continue
-            clash = [r for _, r in data if _traffic_row_md(r[0] if r else None) == want_md]
-            if clash:
-                warnings.append(
-                    f"{date}: a sheet row labels {want_md[0].title()} {want_md[1]} but its "
-                    f"Day column disagrees (expected {day}) — skipped"
-                )
-                continue
             warnings.append(f"{date}: no sheet row for Day {day} (sheet has Days up to {max_day}) — skipped")
             continue
         r = sheet_rows[rn - 1]
-        e = r[4] if len(r) > 4 else None
-        is_formula = isinstance(e, str) and e.strip().startswith("=")
+        f = cell(r, ci_daily)
+        is_formula = isinstance(f, str) and f.strip().startswith("=")
         prev = actuals.get(day - 1)
         if day == 1:
             daily = total  # first contract day: Daily = Total
@@ -4926,10 +5008,10 @@ def _traffic_proposed_writes(sheet_rows: list[list], dates: list[str], ga: dict[
             daily = total - prev
         writes.append({
             "row": rn, "date": date, "day": day,
-            "target_old": _traffic_cell_int(r[2]) if len(r) > 2 else None,
-            "actual_old": _traffic_cell_int(r[3]) if len(r) > 3 else None,
+            "target_old": cell(r, ci_target),  # echoed verbatim (formula or number)
+            "actual_old": _traffic_cell_int(cell(r, ci_actual)),
             "actual_new": total,
-            "daily_old": e if is_formula else _traffic_cell_int(e),
+            "daily_old": f if is_formula else _traffic_cell_int(f),
             "daily_new": None if is_formula else daily,
             "daily_is_formula": is_formula,
         })
@@ -4962,9 +5044,9 @@ async def _traffic_ga_totals(token: str, property_id: str, dates: list[str],
 
 
 async def _traffic_sheet_read(token: str, sheet_id: str, tab: str) -> list[list]:
-    """Raw values of the tab (A1:E5000, FORMULA render so E formulas are visible)."""
+    """Raw values of the tab (A1:F5000, FORMULA render so D/F formulas are visible)."""
     hdr = {"Authorization": f"Bearer {token}"}
-    rng = urllib.parse.quote(f"{tab}!A1:E5000")
+    rng = urllib.parse.quote(f"{tab}!A1:F5000")
     url = (f"https://sheets.googleapis.com/v4/spreadsheets/{sheet_id}/values/{rng}"
            "?valueRenderOption=FORMULA")
     async with httpx.AsyncClient(timeout=30) as c:
@@ -4972,11 +5054,6 @@ async def _traffic_sheet_read(token: str, sheet_id: str, tab: str) -> list[list]
         if r.status_code != 200:
             raise HTTPException(502, f"Sheet read failed: {r.status_code} {r.text[:200]}")
         return r.json().get("values", [])
-
-
-def _traffic_date_label(date_iso: str) -> str:
-    d = datetime.strptime(date_iso[:10], "%Y-%m-%d")
-    return f"{d.strftime('%b')} {d.day}"
 
 
 class TrafficAnalyzeReq(BaseModel):
@@ -4990,10 +5067,10 @@ class TrafficWriteItem(BaseModel):
     row: int
     date: str
     day: int
-    target_old: int | None = None
+    target_old: str | float | int | None = None  # echoed verbatim (formula or number)
     actual_old: int | None = None
     actual_new: int
-    daily_old: str | int | None = None
+    daily_old: str | float | int | None = None  # echoed verbatim (formula or number)
     daily_new: int | None = None
     daily_is_formula: bool = False
 
@@ -5001,9 +5078,9 @@ class TrafficWriteItem(BaseModel):
 class TrafficAppendItem(BaseModel):
     date: str
     day: int
-    target: int | None = None
+    target: str | float | int | None = None  # shifted formula, plain number, or None
     actual_new: int
-    daily_new: int | None = None
+    daily_new: str | float | int | None = None  # shifted formula or computed diff
 
 
 class TrafficApplyReq(BaseModel):
@@ -5027,18 +5104,31 @@ async def traffic_analyze(req: TrafficAnalyzeReq) -> dict:
     token = await _sa_google_token(_TRAFFIC_SCOPES)
     ga = await _traffic_ga_totals(token, cfg["property_id"], dates, cfg["contract_start"])
     sheet_rows = await _traffic_sheet_read(token, cfg["sheet_id"], cfg["tab"])
-    prop = _traffic_proposed_writes(sheet_rows, dates, ga, cfg["contract_start"])
-    # text lines recompute the daily chain over the sheet + this run's totals
+    header_row, columns = _traffic_columns(sheet_rows)
+    prop = _traffic_proposed_writes(sheet_rows, dates, ga, cfg["contract_start"],
+                                    header_row, columns)
+    # text lines recompute the daily chain over the sheet + this run's totals.
+    # Targets live behind D formulas (FORMULA render shows the formula) — one
+    # extra UNFORMATTED_VALUE read gets their computed numbers (app mirrors
+    # this in sheets.ts); on failure the text just omits Target/Δ.
+    ci_day, ci_actual = columns["day"], columns["actual"]
+    ci_target = columns.get("target")  # optional column — text omits Target/Δ without it
+    rng = urllib.parse.quote(f"{cfg['tab']}!A1:F5000")
+    vurl = (f"https://sheets.googleapis.com/v4/spreadsheets/{cfg['sheet_id']}/values/{rng}"
+            "?valueRenderOption=UNFORMATTED_VALUE")
+    async with httpx.AsyncClient(timeout=30) as c:
+        vr = await c.get(vurl, headers={"Authorization": f"Bearer {token}"})
+    value_rows = vr.json().get("values", []) if vr.status_code == 200 else []
     actuals: dict[int, int] = {}
     targets: dict[int, int] = {}
-    for r in sheet_rows[1:]:
-        b = _traffic_cell_int(r[1]) if len(r) > 1 else None
+    for r in value_rows[header_row:]:
+        b = _traffic_cell_int(r[ci_day]) if len(r) > ci_day else None
         if b is None:
             continue
-        d = _traffic_cell_int(r[3]) if len(r) > 3 else None
+        d = _traffic_cell_int(r[ci_actual]) if len(r) > ci_actual else None
         if d is not None:
             actuals[b] = d
-        t = _traffic_cell_int(r[2]) if len(r) > 2 else None
+        t = _traffic_cell_int(r[ci_target]) if ci_target is not None and len(r) > ci_target else None
         if t is not None:
             targets[b] = t
     text_rows: list[dict] = []
@@ -5059,9 +5149,10 @@ async def traffic_analyze(req: TrafficAnalyzeReq) -> dict:
 @router.post("/api/thailandnow/traffic/apply")
 async def traffic_apply(req: TrafficApplyReq) -> dict:
     """TRAFFIC — write what the client echoed back from analyze (shapes
-    re-validated, unknown keys ignored, capped 92 writes + 92 appends). Each
-    write updates the FULL row A–E (ragged rows get healed; E keeps its formula
-    when daily_new is None); appends ride one values.append call."""
+    re-validated, unknown keys ignored, capped 92 writes + 50 appends). Each
+    write updates the FULL row A–F echoing every non-written column verbatim
+    (A "", B serial recomputed from the date, C day, D/F formulas) — ONLY E
+    (Actual) changes. Appends ride one values.append call."""
     cfg = _ga_config()
     tab = cfg["tab"]
     token = await _sa_google_token("https://www.googleapis.com/auth/spreadsheets")
@@ -5074,11 +5165,11 @@ async def traffic_apply(req: TrafficApplyReq) -> dict:
         async def one(w: TrafficWriteItem) -> None:
             nonlocal written
             try:
-                rng = urllib.parse.quote(f"{tab}!A{w.row}:E{w.row}")
-                e = w.daily_new if w.daily_new is not None else w.daily_old
-                values = [[_traffic_date_label(w.date), w.day,
+                rng = urllib.parse.quote(f"{tab}!A{w.row}:F{w.row}")
+                f_cell = w.daily_new if w.daily_new is not None else w.daily_old
+                values = [["", _traffic_iso_to_serial(w.date), w.day,
                            w.target_old if w.target_old is not None else "",
-                           w.actual_new, e if e is not None else ""]]
+                           w.actual_new, f_cell if f_cell is not None else ""]]
                 r = await c.put(f"{base}/{rng}?valueInputOption=USER_ENTERED",
                                 headers=hdr, json={"values": values})
                 if r.status_code >= 400:
@@ -5097,7 +5188,7 @@ async def traffic_apply(req: TrafficApplyReq) -> dict:
         appended = 0
         items = req.appends[:92]  # matches the 92-dates run cap (validator caveat)
         if items:
-            rows = [[_traffic_date_label(a.date), a.day,
+            rows = [["", _traffic_iso_to_serial(a.date), a.day,
                      a.target if a.target is not None else "",
                      a.actual_new, a.daily_new if a.daily_new is not None else ""]
                     for a in items]
@@ -6664,40 +6755,71 @@ if __name__ == "__main__":
     assert _tl[1] == "Dec 5 · Day 1 · Total 4,211 · Daily +4,211", _tl[1]  # missing target omitted
     assert _tl[2] == ("Aug 20 · Day 259 · Total 231,278 · Daily +0 · "
                       "Target 210,000 (Δ +21,278)"), _tl[2]  # zero daily → +0
-    # proposed writes: (a) overwrite w/ plain E, (b) formula E untouched,
-    # (c) stale +0 daily corrected, (d) past-last-row append w/ target copy,
-    # (e) Day-mismatch row → warning + skip.
+    # proposed writes — REAL sheet layout: phase-metadata rows above a header
+    # found by detection (A empty, B serial date, C Day, D Target formula,
+    # E Actual plain, F Daily formula). Cases: (a) overwrite w/ plain F,
+    # (b) formula D/F echoed untouched, (c) stale +0 daily corrected,
+    # (d) past-last-row append w/ shifted D/F formulas, (e) serial-date clash
+    # w/ Day mismatch → warning + skip, (f) year-boundary append.
+    assert _traffic_serial_to_iso(45996) == "2025-12-05", "Day-1 serial anchor"
+    assert _traffic_iso_to_serial("2025-12-05") == 45996
+    assert _traffic_serial_to_iso(_traffic_iso_to_serial("2026-08-21")) == "2026-08-21"
     _sheet = [
-        ["Date", "Day", "Target", "Actual", "Daily"],
-        ["Aug 20", 259, 210000, 231278, 1212],
-        ["Aug 21", 260, 211258, 232278, 0],          # (a)+(c): stale 0 daily, plain E
-        ["Aug 22", 261, 211800, 232950, "=D4-C4"],   # (b): formula E
+        ["", "Phase 1", "Days", 45996, 46225, 900000, ""],   # phase metadata — ignored
+        ["", "Phase 2", "Days", 46226, 46361, 1800000, ""],
+        ["", "", "", "", "", "", ""],
+        ["", "", "", "", "", "", ""],
+        ["", "Date", "Day", "Target Traffic", "Actual Traffic", "Daily Traffic"],  # header, row 5
+        ["", 46254, 259, 210000, 231278, 1212],             # row 6 (Aug 20)
+        ["", 46255, 260, "=D6+$I$6", 232278, 0],            # row 7: (a)+(c) stale 0 daily, plain F
+        ["", 46256, 261, "=D7+$I$6", 232950, "=E8-E7"],     # row 8: (b) formula D+F
     ]
+    _hr, _cols = _traffic_columns(_sheet)
+    assert _hr == 5 and _cols == {"date": 1, "day": 2, "target": 3, "actual": 4, "daily": 5}, (_hr, _cols)
     _ga = {"2026-08-21": 233320, "2026-08-22": 234000, "2026-08-23": 235000}
     _pw = _traffic_proposed_writes(_sheet, ["2026-08-21", "2026-08-22", "2026-08-23"],
-                                   _ga, "2025-12-05")
+                                   _ga, "2025-12-05", _hr, _cols)
     _w21 = next(w for w in _pw["writes"] if w["date"] == "2026-08-21")
-    assert _w21["row"] == 3 and _w21["actual_new"] == 233320 and _w21["daily_old"] == 0
+    assert _w21["row"] == 7 and _w21["actual_new"] == 233320 and _w21["daily_old"] == 0
     assert _w21["daily_new"] == 233320 - 231278 == 2042, _w21  # (c) stale corrected
+    assert _w21["target_old"] == "=D6+$I$6", _w21  # D formula echoed verbatim
     _w22 = next(w for w in _pw["writes"] if w["date"] == "2026-08-22")
     assert _w22["daily_new"] is None and _w22["daily_is_formula"], _w22  # (b)
-    assert _w22["daily_old"] == "=D4-C4", _w22  # formula preserved for the full-row write
+    assert _w22["daily_old"] == "=E8-E7", _w22  # F formula preserved for the full-row write
     assert len(_pw["appends"]) == 1, _pw  # (d)
     _ap = _pw["appends"][0]
-    assert _ap["date"] == "2026-08-23" and _ap["day"] == 262 and _ap["target"] == 211800, _ap
-    assert _ap["daily_new"] == 235000 - 234000 == 1000, _ap  # prev = this run's Aug-22 total
+    assert _ap["date"] == "2026-08-23" and _ap["day"] == 262, _ap
+    assert _ap["target"] == "=D8+$I$6", _ap  # D formula shifted to the new row 9
+    assert _ap["daily_new"] == "=E9-E8", _ap  # F formula shifted likewise
+    assert _ap["actual_new"] == 235000, _ap
     assert _pw["warnings"] == [], _pw
-    _pe = _traffic_proposed_writes(
-        [["Date", "Day", "Target", "Actual", "Daily"], ["Aug 24", 300, 1, 1, 1]],
-        ["2026-08-24"], {"2026-08-24": 5}, "2025-12-05")
-    assert _pe["writes"] == [] and _pe["appends"] == [] and len(_pe["warnings"]) == 1, _pe  # (e)
-    # (f) year-boundary: day 366 appends even though "Dec 5" month+day clashes
-    # with the day-1 row a year earlier (validator blocker regression)
-    _yb_sheet = [["Date", "Day", "Target", "Actual", "Daily"]] + [
-        ["d", b, 1, b * 10, 10] for b in range(1, 366)
+    # (e) serial-date clash: row holds the date but its Day disagrees → skip
+    _pe_sheet = [
+        ["", "Date", "Day", "Target Traffic", "Actual Traffic", "Daily Traffic"],
+        ["", 46257, 300, 1, 1, 1],  # holds 2026-08-23 but Day says 300
     ]
+    _peh, _pec = _traffic_columns(_pe_sheet)
+    _pe = _traffic_proposed_writes(_pe_sheet, ["2026-08-23"], {"2026-08-23": 5},
+                                   "2025-12-05", _peh, _pec)
+    assert _pe["writes"] == [] and _pe["appends"] == [], _pe
+    assert any("disagrees" in w for w in _pe["warnings"]), _pe  # (e)
+    # Day-1 anchor sanity: sheet's Day-1 serial must equal contract start's
+    _anchor = [
+        ["", "Phase 1", "Days", 45996, 46361, 900000, ""],
+        ["", "Date", "Day", "Target Traffic", "Actual Traffic", "Daily Traffic"],
+        ["", 46000, 1, 1000, 500, "=E3"],  # wrong serial for Day 1
+    ]
+    _ah, _ac = _traffic_columns(_anchor)
+    _pan = _traffic_proposed_writes(_anchor, [], {}, "2025-12-05", _ah, _ac)
+    assert any("anchor mismatch" in w for w in _pan["warnings"]), _pan
+    # (f) year-boundary: day 366 appends even though the date shares month+day
+    # with the day-1 row a year earlier (serial dates can never clash)
+    _yb_sheet = [["", "Date", "Day", "Target Traffic", "Actual Traffic", "Daily Traffic"]] + [
+        ["", 45996 + k - 1, k, 1, k * 10, 10] for k in range(1, 366)
+    ]
+    _ybh, _ybc = _traffic_columns(_yb_sheet)
     _yb = _traffic_proposed_writes(_yb_sheet, ["2026-12-05"], {"2026-12-05": 9999},
-                                   "2025-12-05")
+                                   "2025-12-05", _ybh, _ybc)
     assert len(_yb["appends"]) == 1 and _yb["appends"][0]["day"] == 366, _yb
     assert _yb["warnings"] == [], _yb
-    print("OK traffic: day/dates/text lines/writes+appends+warnings")
+    print("OK traffic: day/dates/text/serial+header detect/writes+appends+warnings")
