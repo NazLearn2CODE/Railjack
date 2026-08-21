@@ -164,7 +164,7 @@ interface FiresideEditNotesResp {
 
 // SEO HEALTH report (THAILAND NOW → SEO tab → HEALTH)
 interface HealthSource { from: string; from_id?: number; from_title?: string }
-interface HealthSuggestion { link: string; title: string }
+interface HealthSuggestion { link: string; title: string; id?: number }
 interface HealthOrphan { id?: number; link: string; title: string; suggested: HealthSuggestion[] }
 interface HealthReport {
   post_count: number; page_count: number; event_count: number; other_cpt_count?: number; valid_paths: number;
@@ -371,12 +371,37 @@ interface SeoFixItem {
   target: string;
 }
 
+/** Orphan un-orphan flow (inbound direction): ANALYZE a suggested host → anchor
+ *  candidates from the orphan's title → pick one → preview/confirm insert. */
+interface AnchorData {
+  hostId: number;
+  orphanLink: string;
+  loading: boolean;
+  error?: string;
+  candidates: { phrase: string; count: number; snippet: string }[];
+}
+
+interface InsertPreview {
+  key: string;
+  hostId: number;
+  phrase: string;
+  href: string;
+  loading: boolean;
+  data?: { matches: number; before: string; after: string };
+  error?: string;
+  applied?: boolean;
+}
+
 function PreviewBlock({
   activePreview,
+  confirmLabel = "CONFIRM REMOVE",
+  appliedLabel = "✓ Removed from WP content!",
   onApply,
   onClose,
 }: {
   activePreview: ActivePreview;
+  confirmLabel?: string;
+  appliedLabel?: string;
   onApply: () => void;
   onClose: () => void;
 }) {
@@ -389,7 +414,7 @@ function PreviewBlock({
       {activePreview.error && <div className="mono text-xs" style={{ color: "var(--color-critical)" }}>{activePreview.error}</div>}
       {activePreview.applied && (
         <div className="mono text-xs font-bold" style={{ color: "var(--color-go)" }}>
-          ✓ Removed from WP content! Re-scan to update report.
+          {appliedLabel} Re-scan to update report.
         </div>
       )}
       {!activePreview.loading && !activePreview.applied && activePreview.data && (
@@ -423,7 +448,7 @@ function PreviewBlock({
               disabled={activePreview.loading || activePreview.data.matches === 0}
               onClick={onApply}
             >
-              CONFIRM REMOVE
+              {confirmLabel}
             </button>
             <button className="btn" onClick={onClose}>
               CANCEL
@@ -512,6 +537,12 @@ function HealthSubTab() {
   const [bulkConfirmSection, setBulkConfirmSection] = useState<string | null>(null);
   const [bulkProgress, setBulkProgress] = useState<string | null>(null);
 
+  // Orphan un-orphan flow (inbound): expand a row → ANALYZE a host → pick an
+  // anchor phrase → preview insert → CONFIRM INSERT (link TO the orphan).
+  const [expandedOrphan, setExpandedOrphan] = useState<string | null>(null);
+  const [anchorData, setAnchorData] = useState<AnchorData | null>(null);
+  const [insertPreview, setInsertPreview] = useState<InsertPreview | null>(null);
+
   const trimFixedFromReport = useCallback(
     (fixes: { post_id: number; kind: "link" | "image"; target: string; removed: boolean }[]) =>
       setReport((prev) => (prev ? trimFixed(prev, fixes) : prev)),
@@ -544,6 +575,60 @@ function HealthSubTab() {
       }
     } else {
       setActivePreview((prev) => prev ? { ...prev, loading: false, error: res.error || "Failed to apply fix" } : null);
+    }
+  };
+
+  const handleAnalyze = async (hostId: number, orphanTitle: string, orphanLink: string) => {
+    setInsertPreview(null);
+    setAnchorData({ hostId, orphanLink, loading: true, candidates: [] });
+    const res = await post<{ candidates: { phrase: string; count: number; snippet: string }[] }>(
+      "/api/thailandnow/seo/analyze-anchors",
+      { host_id: hostId, orphan_title: orphanTitle, orphan_link: orphanLink },
+    );
+    if (res.ok && res.data) {
+      setAnchorData({ hostId, orphanLink, loading: false, candidates: res.data.candidates });
+    } else {
+      setAnchorData({ hostId, orphanLink, loading: false, error: res.error || "Failed to analyze", candidates: [] });
+    }
+  };
+
+  const handlePreviewInsert = async (key: string, hostId: number, phrase: string, href: string) => {
+    setInsertPreview({ key, hostId, phrase, href, loading: true });
+    const res = await post<{ matches: number; before: string; after: string }>(
+      "/api/thailandnow/seo/preview-insert",
+      { host_id: hostId, phrase, href },
+    );
+    if (res.ok && res.data) {
+      setInsertPreview({ key, hostId, phrase, href, loading: false, data: res.data });
+    } else {
+      setInsertPreview({ key, hostId, phrase, href, loading: false, error: res.error || "Failed to load preview" });
+    }
+  };
+
+  const handleApplyInsert = async () => {
+    if (!insertPreview || !insertPreview.data) return;
+    const { hostId, phrase, href } = insertPreview;
+    const orphanLink = anchorData?.orphanLink;
+    setInsertPreview((prev) => prev ? { ...prev, loading: true } : null);
+    const res = await post<{ ok: boolean; matches: number }>("/api/thailandnow/seo/apply-insert", {
+      host_id: hostId, phrase, href,
+    });
+    if (res.ok) {
+      if ((res.data?.matches ?? 0) > 0) {
+        setReport((prev) => prev && orphanLink
+          ? { ...prev, orphans: prev.orphans.filter((o) => o.link !== orphanLink) }
+          : prev);
+        setAnchorData(null);
+        setInsertPreview(null);
+        setExpandedOrphan(null);
+      } else {
+        setInsertPreview((prev) => prev ? {
+          ...prev, loading: false,
+          error: "no valid spot found — nothing inserted (content may have changed since preview)",
+        } : null);
+      }
+    } else {
+      setInsertPreview((prev) => prev ? { ...prev, loading: false, error: res.error || "Failed to apply insert" } : null);
     }
   };
 
@@ -612,25 +697,89 @@ function HealthSubTab() {
           </div>
 
           <HealthList title="ORPHAN ARTICLES" count={r.orphans.length} accent="var(--color-critical)"
-            hint="zero inbound internal links — the SEO priority. ✎ opens the editor to un-orphan by hand; link with a suggested target.">
-            {r.orphans.map((o) => (
-              <div key={o.link} className="text-sm mt-1">
-                <a href={o.link} target="_blank" rel="noreferrer" style={{ color: "var(--color-phosphor)" }}>{o.title || o.link}</a>
-                <WpEdit id={o.id} link={o.link} />
-                {o.suggested.length > 0 && (
-                  <span className="mono text-xs" style={{ color: "var(--color-muted)" }}>
-                    {" — link with: "}
-                    {o.suggested.map((s, i) => (
-                      <span key={s.link}>
-                        {i > 0 && " · "}
-                        <a href={s.link} target="_blank" rel="noreferrer" title={s.link}
-                          style={{ color: "var(--color-phosphor-dim)" }}>{s.title}</a>
+            hint="zero inbound internal links — the SEO priority. ✎ opens the editor to un-orphan by hand; click an article to analyze where to embed an inbound link.">
+            {r.orphans.map((o) => {
+              const expanded = expandedOrphan === o.link;
+              return (
+                <div key={o.link} className="text-sm mt-1 flex flex-col gap-0.5">
+                  <div>
+                    <a href={o.link} target="_blank" rel="noreferrer" style={{ color: "var(--color-phosphor)" }}
+                      onClick={(e) => { e.preventDefault(); setExpandedOrphan(expanded ? null : o.link); }}>
+                      {expanded ? "▾ " : "▸ "}{o.title || o.link}
+                    </a>
+                    <a href={o.link} target="_blank" rel="noreferrer" title="open article"
+                      className="mono text-xs ml-1" style={{ color: "var(--color-muted)" }}>↗</a>
+                    <WpEdit id={o.id} link={o.link} />
+                    {o.suggested.length > 0 && (
+                      <span className="mono text-xs" style={{ color: "var(--color-muted)" }}>
+                        {" — link with: "}
+                        {o.suggested.map((s, i) => (
+                          <span key={s.link}>
+                            {i > 0 && " · "}
+                            <a href={s.link} target="_blank" rel="noreferrer" title={s.link}
+                              style={{ color: "var(--color-phosphor-dim)" }}>{s.title}</a>
+                          </span>
+                        ))}
                       </span>
-                    ))}
-                  </span>
-                )}
-              </div>
-            ))}
+                    )}
+                  </div>
+                  {expanded && o.suggested.map((s) => {
+                    const analyzing = !!anchorData && !!s.id && anchorData.hostId === s.id && anchorData.orphanLink === o.link;
+                    return (
+                      <div key={s.link} className="flex flex-col gap-0.5 pl-3">
+                        <div className="mono text-xs flex items-center gap-1" style={{ color: "var(--color-muted)" }}>
+                          <span>▸ {s.title}</span>
+                          {s.id && (
+                            <button className="btn btn--compact" onClick={() => handleAnalyze(s.id!, o.title, o.link)}>
+                              ANALYZE
+                            </button>
+                          )}
+                        </div>
+                        {analyzing && anchorData!.loading && (
+                          <div className="mono text-xs" style={{ color: "var(--color-muted)" }}>Analyzing…</div>
+                        )}
+                        {analyzing && anchorData!.error && (
+                          <div className="mono text-xs" style={{ color: "var(--color-critical)" }}>{anchorData!.error}</div>
+                        )}
+                        {analyzing && !anchorData!.loading && !anchorData!.error && anchorData!.candidates.length === 0 && (
+                          <div className="mono text-xs" style={{ color: "var(--color-muted)" }}>no anchor candidates found</div>
+                        )}
+                        {analyzing && anchorData!.candidates.map((c) => {
+                          const ipKey = `${o.link}|${s.link}|${c.phrase}`;
+                          return (
+                            <div key={c.phrase} className="flex flex-col gap-0.5 pl-3">
+                              <button className="btn btn--compact mono text-xs"
+                                onClick={() => handlePreviewInsert(ipKey, s.id!, c.phrase, o.link)}>
+                                {c.phrase} ×{c.count}
+                              </button>
+                              <div className="mono text-xs" style={{ color: "var(--color-muted)" }}>{c.snippet}</div>
+                              {insertPreview && insertPreview.key === ipKey && (
+                                <PreviewBlock
+                                  activePreview={{
+                                    key: insertPreview.key,
+                                    postId: insertPreview.hostId,
+                                    kind: "link",
+                                    target: insertPreview.phrase,
+                                    loading: insertPreview.loading,
+                                    data: insertPreview.data,
+                                    error: insertPreview.error,
+                                    applied: insertPreview.applied,
+                                  }}
+                                  confirmLabel="CONFIRM INSERT"
+                                  appliedLabel="✓ Link inserted in WP content!"
+                                  onApply={handleApplyInsert}
+                                  onClose={() => setInsertPreview(null)}
+                                />
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    );
+                  })}
+                </div>
+              );
+            })}
           </HealthList>
 
           <HealthList title="BROKEN INTERNAL LINKS" count={r.broken_internal_links.length} accent="var(--color-hazard)"

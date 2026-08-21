@@ -4170,9 +4170,12 @@ async def _flow_seo_health(job: "TnJob") -> None:
     # orphan suggestions: top-3 by title-token overlap (exclude the orphan itself)
     titles = [(p.get("link", ""), (p.get("title") or {}).get("rendered", ""))
               for p in (posts + events + other_cpts) if p.get("link")]
+    link_ids = {p.get("link", ""): p.get("id") for p in (posts + events + other_cpts)}
     for o in rep["orphans"]:
         cands = [(l, t) for (l, t) in titles if l != o["link"]]
         o["suggested"] = _seo_suggest(o["title"], cands, n=3)
+        for s in o["suggested"]:  # host id → anchor ANALYZE endpoint
+            s["id"] = link_ids.get(s["link"])
     job.progress = 50
     # HTTP-verify external links/images, internal image candidates, AND internal
     # link candidates (Fix 1). Internal links use authed probe (Sucuri bypass).
@@ -4366,6 +4369,122 @@ def _seo_strip_target(html: str, kind: str, target: str) -> tuple[str, int, str,
     return new_html, matches, snippet_before, snippet_after
 
 
+# regions invalid for anchor insertion: inside <a>/<h1-6>/<pre>/<code> (flat scan —
+# no nesting paranoia; enough for WP content)
+_SEO_INVALID_REGION_RE = re.compile(
+    r"<a\b.*?</a\s*>|<h[1-6]\b.*?</h[1-6]\s*>|<pre\b.*?</pre\s*>|<code\b.*?</code\s*>",
+    re.IGNORECASE | re.DOTALL,
+)
+# any complete tag — its INTERIOR (attributes) is never a valid anchor spot
+# (e.g. alt="Khon Kaen Street Food" must not be wrapped); quoted segments may
+# contain a literal ">" so skip them when scanning for the tag end
+_SEO_ANY_TAG_RE = re.compile(r"<[a-zA-Z/!?](?:\"[^\"]*\"|'[^']*'|[^>])*>")
+
+
+def _seo_valid_regions(html: str) -> list[tuple[int, int]]:
+    """Pure: index ranges of html outside <a>/<h1-6>/<pre>/<code> content AND
+    outside every tag interior (attributes are not prose). Case-insensitive,
+    DOTALL. ponytail: a single unclosed <a>/<pre> makes its span scan run to
+    EOF (O(n) per unclosed tag, so O(n^2) worst case on corrupted HTML) —
+    fine for WP-sized posts; upgrade path = a real HTML tokenizer."""
+    if not html:
+        return []
+    spans = [m.span() for m in _SEO_INVALID_REGION_RE.finditer(html)]
+    spans += [m.span() for m in _SEO_ANY_TAG_RE.finditer(html)]
+    spans.sort()
+    out: list[tuple[int, int]] = []
+    pos = 0
+    for s, e in spans:
+        if s > pos:
+            out.append((pos, s))
+        pos = max(pos, e)
+    if pos < len(html):
+        out.append((pos, len(html)))
+    return out
+
+
+def _seo_anchor_phrases(orphan_title: str) -> list[str]:
+    """Pure: candidate anchor phrases from the orphan title — the full
+    whitespace-normalized title plus every contiguous token n-gram of length
+    >= 2 (Thai titles are one long token, so the full title covers Thai).
+    Drops stopword-only phrases (per _SEO_STOP; phrases with no latin tokens,
+    i.e. Thai, are kept) and phrases shorter than 4 chars. Deduped, longest-first."""
+    title = " ".join((orphan_title or "").split())
+    if not title:
+        return []
+    tokens = title.split()
+    phrases = [title] + [
+        " ".join(tokens[i:i + n])
+        for n in range(2, len(tokens) + 1)
+        for i in range(0, len(tokens) - n + 1)
+    ]
+    seen: set[str] = set()
+    out: list[str] = []
+    for p in phrases:
+        toks = re.findall(r"[a-z0-9]+", p.lower())
+        if toks and all(t in _SEO_STOP for t in toks):
+            continue
+        if len(p) < 4 or p in seen:
+            continue
+        seen.add(p)
+        out.append(p)
+    out.sort(key=len, reverse=True)
+    return out
+
+
+def _seo_anchor_candidates(orphan_title: str, host_html: str, cap: int = 8) -> list[dict]:
+    """Pure: phrases from _seo_anchor_phrases with >=1 case-insensitive occurrence
+    at a valid position in host_html. Returns [{"phrase", "count", "snippet"}]
+    (~60-char context around the first valid occurrence), longest-first, capped."""
+    regions = _seo_valid_regions(host_html)
+    out: list[dict] = []
+    for phrase in _seo_anchor_phrases(orphan_title):
+        # offsets come from re on the ORIGINAL region text: no lower() index
+        # drift (some chars change length when lowered) and non-overlapping
+        # counts by finditer's default advance
+        pat = re.compile(re.escape(phrase), re.IGNORECASE)
+        count = 0
+        first = -1
+        for start, end in regions:
+            for m in pat.finditer(host_html, start, end):
+                if first == -1:
+                    first = m.start()
+                count += 1
+        if count == 0:
+            continue
+        snippet = host_html[max(0, first - 30):min(len(host_html), first + len(phrase) + 30)]
+        out.append({"phrase": phrase, "count": count, "snippet": snippet})
+        if len(out) >= cap:
+            break
+    return out
+
+
+def _seo_insert_link(html: str, phrase: str, href: str) -> tuple[str, int, str, str]:
+    """Pure, mirrors _seo_strip_target: wrap the FIRST case-insensitive occurrence
+    of phrase at a valid position as <a href="{href}">{original_text}</a> (original
+    casing preserved). Returns (new_html, matches, snippet_before, snippet_after)
+    with ~40-char context around the match. 0 valid occurrences -> (html, 0, "", "")."""
+    if not html or not phrase:
+        return html, 0, "", ""
+    pat = re.compile(re.escape(phrase), re.IGNORECASE)  # offsets on original html
+    for start, end in _seo_valid_regions(html):
+        m = pat.search(html, start, end)
+        if not m:
+            continue
+        s, e = m.start(), m.end()
+        wrapped = f'<a href="{href}">{html[s:e]}</a>'
+        new_html = html[:s] + wrapped + html[e:]
+        ctx_s = max(0, s - 40)
+        ctx_e = min(len(html), e + 40)
+        return (
+            new_html,
+            1,
+            html[ctx_s:ctx_e],
+            html[ctx_s:s] + wrapped + html[e:ctx_e],
+        )
+    return html, 0, "", ""
+
+
 class SeoFixReq(BaseModel):
     post_id: int
     kind: str  # "link" | "image"
@@ -4374,6 +4493,18 @@ class SeoFixReq(BaseModel):
 
 class SeoApplyFixBulkReq(BaseModel):
     items: list[SeoFixReq]
+
+
+class SeoAnchorAnalyzeReq(BaseModel):
+    host_id: int
+    orphan_title: str
+    orphan_link: str
+
+
+class SeoInsertReq(BaseModel):
+    host_id: int
+    phrase: str
+    href: str
 
 
 @router.post("/api/thailandnow/seo/scan")
@@ -4485,6 +4616,99 @@ async def seo_apply_fix_bulk(req: SeoApplyFixBulkReq):
         "noop": noop,            # ok but target not in content (already gone / format mismatch)
         "failed": failed,        # WP error (wrong type 404, perms, etc.)
         "successful": removed,   # honest alias: a real removal (was: any ok, incl. no-ops)
+    }
+
+
+@router.post("/api/thailandnow/seo/analyze-anchors")
+async def seo_analyze_anchors(req: SeoAnchorAnalyzeReq):
+    """Find anchor candidates in a host article's content for an orphan's title
+    (inbound link direction). Validates orphan_link is internal. Reads
+    content.raw; does NOT modify WP. Returns {host_id, orphan_title,
+    orphan_link, candidates}."""
+    if _seo_classify(req.orphan_link, _wp_site_host()) != "internal":
+        raise HTTPException(400, "orphan_link is not an internal site link")
+    rb = await _wp_resolve_rest_base(req.host_id)
+    try:
+        post = await _wp("GET", f"/{rb}/{req.host_id}", {"context": "edit"})
+    except HTTPException as e:
+        if e.status_code in (401, 403):
+            raise HTTPException(403, f"WP edit context permission denied for post {req.host_id}. Verify WP credentials app-password has edit capabilities.")
+        raise
+    if not post or not isinstance(post, dict):
+        raise HTTPException(404, f"WP {rb[:-1] if rb.endswith('s') else rb} {req.host_id} not found")
+
+    raw_content = (post.get("content") or {}).get("raw", "")
+    return {
+        "host_id": req.host_id,
+        "orphan_title": req.orphan_title,
+        "orphan_link": req.orphan_link,
+        "candidates": _seo_anchor_candidates(req.orphan_title, raw_content),
+    }
+
+
+@router.post("/api/thailandnow/seo/preview-insert")
+async def seo_preview_insert(req: SeoInsertReq):
+    """Preview inserting an inbound <a href> around a phrase in a WP post.
+    Validates href is internal. Reads content.raw; does NOT modify WP.
+    Returns {host_id, phrase, href, matches, before, after}."""
+    if _seo_classify(req.href, _wp_site_host()) != "internal":
+        raise HTTPException(400, "href is not an internal site link")
+    rb = await _wp_resolve_rest_base(req.host_id)
+    try:
+        post = await _wp("GET", f"/{rb}/{req.host_id}", {"context": "edit"})
+    except HTTPException as e:
+        if e.status_code in (401, 403):
+            raise HTTPException(403, f"WP edit context permission denied for post {req.host_id}. Verify WP credentials app-password has edit capabilities.")
+        raise
+    if not post or not isinstance(post, dict):
+        raise HTTPException(404, f"WP {rb[:-1] if rb.endswith('s') else rb} {req.host_id} not found")
+
+    raw_content = (post.get("content") or {}).get("raw", "")
+    new_html, matches, before, after = _seo_insert_link(raw_content, req.phrase, req.href)
+    return {
+        "host_id": req.host_id,
+        "phrase": req.phrase,
+        "href": req.href,
+        "matches": matches,
+        "before": before,
+        "after": after,
+    }
+
+
+@router.post("/api/thailandnow/seo/apply-insert")
+async def seo_apply_insert(req: SeoInsertReq):
+    """Apply insert: wrap the first valid occurrence of phrase in a WP post with
+    <a href="{href}">. Validates href is internal. Idempotent: 0 matches ->
+    returns {ok: true, matches: 0} without writing."""
+    if _seo_classify(req.href, _wp_site_host()) != "internal":
+        raise HTTPException(400, "href is not an internal site link")
+    rb = await _wp_resolve_rest_base(req.host_id)
+    try:
+        post = await _wp("GET", f"/{rb}/{req.host_id}", {"context": "edit"})
+    except HTTPException as e:
+        if e.status_code in (401, 403):
+            raise HTTPException(403, f"WP edit context permission denied for post {req.host_id}.")
+        raise
+    if not post or not isinstance(post, dict):
+        raise HTTPException(404, f"WP {rb[:-1] if rb.endswith('s') else rb} {req.host_id} not found")
+
+    raw_content = (post.get("content") or {}).get("raw", "")
+    new_html, matches, _, _ = _seo_insert_link(raw_content, req.phrase, req.href)
+
+    if matches == 0:
+        return {
+            "ok": True,
+            "matches": 0,
+            "post_id": req.host_id,
+            "post_link": post.get("link", ""),
+        }
+
+    await _wp("POST", f"/{rb}/{req.host_id}", json_body={"content": new_html})
+    return {
+        "ok": True,
+        "matches": matches,
+        "post_id": req.host_id,
+        "post_link": post.get("link", ""),
     }
 
 
@@ -5855,6 +6079,56 @@ if __name__ == "__main__":
         ("https://www.thailandnow.in.th/food/", "Best street food"),
     ], n=2)
     assert sugg and sugg[0]["link"].endswith("/khon/") and len(sugg) == 2, sugg
+    # Orphan un-orphan flow: valid regions / anchor phrases / candidates / insert.
+    vr_html = ('<p>eat <a href="/x/">Khon Kaen here</a></p>'
+               '<h2>Khon Kaen head</h2><p>Khon Kaen plain</p>')
+    vr = _seo_valid_regions(vr_html)
+
+    def _vr_ok(i: int) -> bool:
+        return any(a <= i < b for a, b in vr)
+
+    assert not _vr_ok(vr_html.find("Khon Kaen here")), "inside <a> must be invalid"
+    assert not _vr_ok(vr_html.find("Khon Kaen head")), "inside <h2> must be invalid"
+    assert _vr_ok(vr_html.find("Khon Kaen plain")), "plain paragraph must be valid"
+    ap = _seo_anchor_phrases("Khon Kaen Street Food Guide")
+    assert ap and ap[0] == "Khon Kaen Street Food Guide", ap
+    assert ap == sorted(ap, key=len, reverse=True) and all(len(p) >= 4 for p in ap), ap
+    assert _seo_anchor_phrases("How to") == [], "stopword-only phrase dropped"
+    ap_t = _seo_anchor_phrases("เที่ยวขอนแก่น 3 วัน")
+    assert ap_t and ap_t[0] == "เที่ยวขอนแก่น 3 วัน", ap_t  # full Thai title survives
+    host = '<p>Visit Khon Kaen for food.</p><p><a href="/k/">Khon Kaen guide</a></p>'
+    ac = _seo_anchor_candidates("Khon Kaen Street Food Guide", host)
+    assert ac and all(c["count"] >= 1 and c["snippet"] for c in ac), ac
+    assert ac == sorted(ac, key=lambda c: len(c["phrase"]), reverse=True), ac
+    kc = [c for c in ac if c["phrase"] == "Khon Kaen"]
+    assert kc and kc[0]["count"] == 1, ac  # the <a>-wrapped one doesn't count
+    assert len(_seo_anchor_candidates("Khon Kaen Street Food Guide", host, cap=1)) == 1, "cap honored"
+    ih, im, ib, ia = _seo_insert_link("<p>Khon kaen is nice.</p>", "Khon Kaen", "/orphan/")
+    assert im == 1 and '<a href="/orphan/">Khon kaen</a>' in ih, (im, ih)  # casing preserved
+    assert ib and ia and "Khon kaen" in ib, (ib, ia)
+    ih2, im2, _, _ = _seo_insert_link(
+        '<p><a href="/k/">Khon Kaen guide</a> and Khon Kaen plain.</p>', "Khon Kaen", "/o/")
+    assert im2 == 1 and '<a href="/o/">Khon Kaen</a> plain' in ih2, (im2, ih2)
+    assert ih2.count("<a ") == 2, ih2  # the <a>-wrapped occurrence stays untouched
+    iz, izm, _, _ = _seo_insert_link("<p>nothing here</p>", "Khon Kaen", "/o/")
+    assert izm == 0 and iz == "<p>nothing here</p>", (izm, iz)
+    # attribute interiors are NEVER anchor spots (validator blocker: wrapping
+    # inside alt="..." would corrupt markup written to WP)
+    attr_html = '<img src="/x.jpg" alt="Khon Kaen Street Food"> <p>Khon Kaen rocks</p>'
+    attr_regions = _seo_valid_regions(attr_html)
+    assert not any(a <= attr_html.find("Street Food") < b for a, b in attr_regions), \
+        "inside an attribute must be invalid"
+    ah, am, _, _ = _seo_insert_link(attr_html, "Khon Kaen Street Food", "/o/")
+    assert am == 0 and ah == attr_html, f"must not wrap inside a tag: {(am, ah)}"
+    attr_host = '<img src="/x.jpg" alt="Khon Kaen Street Food">'
+    assert _seo_anchor_candidates("Khon Kaen Street Food Guide", attr_host) == [], \
+        "attribute-only occurrences are not candidates"
+    gt_html = '<img alt="a > b" src="/x.jpg"><p>Khon Kaen rocks</p>'
+    gt_regions = _seo_valid_regions(gt_html)
+    assert not any(a <= gt_html.find("src=") < b for a, b in gt_regions), \
+        "tail of a tag with quoted '>' must stay invalid"
+    gh, gm, _, _ = _seo_insert_link(gt_html, "b\" src=\"/x.jpg", "/o/")
+    assert gm == 0, "no wrapping inside a quoted-'>' tag tail"
     # R1: month override
     assert _mon_for("202608") == "AUG"
     assert _mon_for("202613") is None and _mon_for("garbage") is None
