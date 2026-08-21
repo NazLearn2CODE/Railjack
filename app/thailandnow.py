@@ -25,14 +25,16 @@ import urllib.parse
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 import html
 from html.parser import HTMLParser
 from pathlib import Path
 from uuid import uuid4
 
 import httpx
+import jwt
 from fastapi import APIRouter, Body, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from .config import CONFIG
 from .notebooklm import CLI, _cached_notebooks, _run_cli
@@ -4712,6 +4714,403 @@ async def seo_apply_insert(req: SeoInsertReq):
     }
 
 
+# --- TRAFFIC sub-module (daily GA4 cumulative totals → Analytics & Boosting sheet)
+# Replaces the manual ritual: GA4 Total Users (cumulative since contract start)
+# per picked date → diff preview vs the sheet → confirmed apply. Service-account
+# auth (RS256 JWT via pyjwt — stdlib has no RSA), separate from _google_token.
+
+_TRAFFIC_SCOPES = ("https://www.googleapis.com/auth/spreadsheets "
+                   "https://www.googleapis.com/auth/analytics.readonly")
+_GA_CFG_DEFAULTS = {"tab": "2025-26 Web Traffic Report", "contract_start": "2025-12-05"}
+
+
+def _ga_config() -> dict:
+    """GA4 + sheet config for the TRAFFIC tab. ~/.config/railjack/ga.json first,
+    then GA_CLIENT_EMAIL/GA_PRIVATE_KEY/GA_PROPERTY_ID/GA_SHEET_ID in env or the
+    secrets files (mirrors _wp_creds). HTTPException(503) with a human hint when
+    incomplete. The private key is never logged or returned."""
+    cfg = dict(_GA_CFG_DEFAULTS)
+    ga_json_path = Path.home() / ".config" / "railjack" / "ga.json"
+    if ga_json_path.is_file():
+        try:
+            cfg.update({k: v for k, v in json.loads(ga_json_path.read_text()).items() if v})
+        except Exception:
+            pass
+    cfg["client_email"] = cfg.get("client_email") or _secret("GA_CLIENT_EMAIL") or ""
+    cfg["private_key"] = (cfg.get("private_key") or _secret("GA_PRIVATE_KEY") or "")
+    cfg["property_id"] = str(cfg.get("property_id") or _secret("GA_PROPERTY_ID") or "")
+    cfg["sheet_id"] = cfg.get("sheet_id") or _secret("GA_SHEET_ID") or ""
+    missing = [k for k in ("client_email", "private_key", "property_id", "sheet_id") if not cfg[k]]
+    if missing:
+        raise HTTPException(
+            503,
+            "GA config incomplete (missing " + ", ".join(missing) + ") — place the "
+            "service-account config at ~/.config/railjack/ga.json (client_email, "
+            "private_key, property_id, sheet_id, tab, contract_start), or set "
+            "GA_CLIENT_EMAIL / GA_PRIVATE_KEY / GA_PROPERTY_ID / GA_SHEET_ID in env "
+            "or the railjack secrets files",
+        )
+    # env vars carry the key with literal \n escapes — pyjwt needs real newlines
+    cfg["private_key"] = cfg["private_key"].replace("\\n", "\n")
+    return cfg
+
+
+_SA_TOKEN_CACHE: dict[str, tuple[str, float]] = {}
+
+
+async def _sa_google_token(scope: str) -> str:
+    """Service-account → Google access token for ``scope`` (space-separated list).
+    RS256 JWT (iss=client_email, aud=token endpoint) exchanged at oauth2.googleapis.
+    Separate from the OAuth ``_google_token`` helper. Last token+exp cached in a
+    module global; re-minted only when expired (60s margin)."""
+    cached = _SA_TOKEN_CACHE.get(scope)
+    if cached and cached[1] > time.time() + 60:
+        return cached[0]
+    cfg = _ga_config()
+    now = int(time.time())
+    claim = {
+        "iss": cfg["client_email"], "scope": scope,
+        "aud": "https://oauth2.googleapis.com/token",
+        "iat": now, "exp": now + 3600,
+    }
+    assertion = jwt.encode(claim, cfg["private_key"], algorithm="RS256")
+    async with httpx.AsyncClient(timeout=20) as c:
+        r = await c.post(
+            "https://oauth2.googleapis.com/token",
+            data={"grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer",
+                  "assertion": assertion},
+        )
+        if r.status_code != 200:
+            raise HTTPException(502, f"Google SA token exchange failed: {r.status_code} {r.text[:200]}")
+        token = r.json()["access_token"]
+    _SA_TOKEN_CACHE[scope] = (token, now + 3600)
+    return token
+
+
+def _traffic_day(date_iso: str, contract_start_iso: str) -> int:
+    """Days since contract start, 1-based (Dec 5 → 1). Pure."""
+    d = datetime.strptime(date_iso[:10], "%Y-%m-%d")
+    s = datetime.strptime(contract_start_iso[:10], "%Y-%m-%d")
+    return (d - s).days + 1
+
+
+def _traffic_dates(from_iso: str, to_iso: str) -> list[str]:
+    """Inclusive ISO dates. Callers pass Asia/Bangkok dates. ValueError on a
+    reversed range or more than 92 dates (keeps the GA query count bounded;
+    92 DATES, matching the app's lane and '≤92 dates per run')."""
+    d1 = datetime.strptime(from_iso[:10], "%Y-%m-%d")
+    d2 = datetime.strptime(to_iso[:10], "%Y-%m-%d")
+    span = (d2 - d1).days
+    if span < 0:
+        raise ValueError(f"from {from_iso} is after to {to_iso}")
+    if span > 91:
+        raise ValueError(f"range too wide: {span + 1} dates (max 92)")
+    return [(d1 + timedelta(days=i)).strftime("%Y-%m-%d") for i in range(span + 1)]
+
+
+def _traffic_text_lines(rows: list[dict]) -> str:
+    """One paste-ready line per day:
+    ``{Mon D} · Day {n} · Total {t:,} · Daily {+d:,} · Target {target:,} (Δ {±gap:,})``
+    Daily 0 → ``+0``; missing target omits the Target and (Δ …) parts. Pure."""
+    lines: list[str] = []
+    for r in rows or []:
+        d = datetime.strptime(r["date"][:10], "%Y-%m-%d")
+        line = (f"{d.strftime('%b')} {d.day} · Day {r['day']} · "
+                f"Total {r['total']:,} · Daily {(r.get('daily') or 0):+,}")
+        t = r.get("target")
+        if t is not None:
+            line += f" · Target {t:,} (Δ {r['total'] - t:+,})"
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def _traffic_cell_int(v) -> int | None:
+    """Sheet cell → int (accepts int/float/numeric string with commas); None otherwise."""
+    if isinstance(v, bool) or v is None or v == "":
+        return None
+    if isinstance(v, (int, float)):
+        return int(v)
+    try:
+        return int(str(v).strip().replace(",", ""))
+    except ValueError:
+        return None
+
+
+_TRAFFIC_MD_RE = re.compile(r"^([A-Za-z]{3})\s+(\d{1,2})$")
+
+
+def _traffic_row_md(a) -> tuple[str, int] | None:
+    """(month_lower, day) from a sheet A cell like 'Aug 21'; None if unparseable."""
+    if not isinstance(a, str):
+        return None
+    m = _TRAFFIC_MD_RE.match(a.strip())
+    return (m.group(1).lower(), int(m.group(2))) if m else None
+
+
+def _traffic_proposed_writes(sheet_rows: list[list], dates: list[str], ga: dict[str, int],
+                             contract_start_iso: str) -> dict:
+    """THE CORE (pure). ``sheet_rows`` = raw values from the tab (header at row 1;
+    A Date 'Mmm D', B Day, C Target, D Actual, E Daily; rows may be ragged).
+    Per-date cumulative GA totals in ``ga`` (NOT summed dailies).
+
+    Row matching: expected Day number (from the date) against column B as the
+    primary key; month+day (A) as sanity check — a row that labels the date but
+    whose B disagrees → warning + skip. Dates past the last matching row land in
+    appends (target copied from the last row's C when it's a plain number).
+    daily_new is only proposed when the existing E cell is NOT a formula string
+    (formulas are left alone); the daily chain uses the previous day's actual
+    from the sheet OR from this run's writes/appends (GA value as yesterday)."""
+    writes: list[dict] = []
+    appends: list[dict] = []
+    warnings: list[str] = []
+
+    data = [(i + 1, r) for i, r in enumerate(sheet_rows or []) if i > 0 and r]
+    by_day: dict[int, int] = {}
+    actuals: dict[int, int] = {}
+    max_day = 0
+    last_row: list | None = None
+    for rn, r in data:
+        b = _traffic_cell_int(r[1]) if len(r) > 1 else None
+        if b is None:
+            continue
+        by_day.setdefault(b, rn)
+        d = _traffic_cell_int(r[3]) if len(r) > 3 else None
+        if d is not None:
+            actuals[b] = d
+        max_day = max(max_day, b)
+        last_row = r
+
+    for date in dates:
+        day = _traffic_day(date, contract_start_iso)
+        total = int(ga.get(date, 0))
+        dd = datetime.strptime(date[:10], "%Y-%m-%d")
+        want_md = (dd.strftime("%b").lower(), dd.day)
+        rn = by_day.get(day)
+        if rn is None:
+            # past the sheet's last row → append FIRST (a year-boundary month+day
+            # clash with a 365-days-ago row must NOT block the append)
+            if day > max_day:
+                target = None
+                if last_row is not None:
+                    t = _traffic_cell_int(last_row[2]) if len(last_row) > 2 else None
+                    if t is not None:
+                        target = t
+                    else:
+                        warnings.append(f"{date}: last row's Target is not a plain number — append target left blank")
+                prev = actuals.get(day - 1)
+                daily = total if (day == 1 or prev is None) else total - prev
+                appends.append({"date": date, "day": day, "target": target,
+                                "actual_new": total, "daily_new": daily})
+                actuals[day] = total
+                max_day = day
+                continue
+            clash = [r for _, r in data if _traffic_row_md(r[0] if r else None) == want_md]
+            if clash:
+                warnings.append(
+                    f"{date}: a sheet row labels {want_md[0].title()} {want_md[1]} but its "
+                    f"Day column disagrees (expected {day}) — skipped"
+                )
+                continue
+            warnings.append(f"{date}: no sheet row for Day {day} (sheet has Days up to {max_day}) — skipped")
+            continue
+        r = sheet_rows[rn - 1]
+        e = r[4] if len(r) > 4 else None
+        is_formula = isinstance(e, str) and e.strip().startswith("=")
+        prev = actuals.get(day - 1)
+        if day == 1:
+            daily = total  # first contract day: Daily = Total
+        elif prev is None:
+            daily = None
+            warnings.append(f"{date}: no previous-day actual in sheet — Daily left blank")
+        else:
+            daily = total - prev
+        writes.append({
+            "row": rn, "date": date, "day": day,
+            "target_old": _traffic_cell_int(r[2]) if len(r) > 2 else None,
+            "actual_old": _traffic_cell_int(r[3]) if len(r) > 3 else None,
+            "actual_new": total,
+            "daily_old": e if is_formula else _traffic_cell_int(e),
+            "daily_new": None if is_formula else daily,
+            "daily_is_formula": is_formula,
+        })
+        actuals[day] = total
+    return {"writes": writes, "appends": appends, "warnings": warnings}
+
+
+async def _traffic_ga_totals(token: str, property_id: str, dates: list[str],
+                             contract_start_iso: str) -> dict[str, int]:
+    """One runReport per date (deterministic, no row-order ambiguity): cumulative
+    totalUsers from contract_start → date. Semaphore(4) + gather; ≤92 dates/run."""
+    sem = asyncio.Semaphore(4)
+    hdr = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    url = f"https://analyticsdata.googleapis.com/v1beta/properties/{property_id}:runReport"
+
+    async with httpx.AsyncClient(timeout=30) as c:
+        async def one(d: str) -> tuple[str, int]:
+            async with sem:
+                r = await c.post(url, headers=hdr, json={
+                    "dateRanges": [{"startDate": contract_start_iso, "endDate": d}],
+                    "metrics": [{"name": "totalUsers"}],
+                })
+            if r.status_code >= 400:
+                raise HTTPException(502, f"GA {d}: {r.status_code} {r.text[:200]}")
+            rows = r.json().get("rows") or []
+            return d, int(rows[0]["metricValues"][0]["value"]) if rows else 0
+
+        pairs = await asyncio.gather(*[one(d) for d in dates])
+    return dict(pairs)
+
+
+async def _traffic_sheet_read(token: str, sheet_id: str, tab: str) -> list[list]:
+    """Raw values of the tab (A1:E5000, FORMULA render so E formulas are visible)."""
+    hdr = {"Authorization": f"Bearer {token}"}
+    rng = urllib.parse.quote(f"{tab}!A1:E5000")
+    url = (f"https://sheets.googleapis.com/v4/spreadsheets/{sheet_id}/values/{rng}"
+           "?valueRenderOption=FORMULA")
+    async with httpx.AsyncClient(timeout=30) as c:
+        r = await c.get(url, headers=hdr)
+        if r.status_code != 200:
+            raise HTTPException(502, f"Sheet read failed: {r.status_code} {r.text[:200]}")
+        return r.json().get("values", [])
+
+
+def _traffic_date_label(date_iso: str) -> str:
+    d = datetime.strptime(date_iso[:10], "%Y-%m-%d")
+    return f"{d.strftime('%b')} {d.day}"
+
+
+class TrafficAnalyzeReq(BaseModel):
+    from_: str | None = Field(default=None, alias="from")
+    to: str | None = None
+
+    model_config = {"populate_by_name": True}
+
+
+class TrafficWriteItem(BaseModel):
+    row: int
+    date: str
+    day: int
+    target_old: int | None = None
+    actual_old: int | None = None
+    actual_new: int
+    daily_old: str | int | None = None
+    daily_new: int | None = None
+    daily_is_formula: bool = False
+
+
+class TrafficAppendItem(BaseModel):
+    date: str
+    day: int
+    target: int | None = None
+    actual_new: int
+    daily_new: int | None = None
+
+
+class TrafficApplyReq(BaseModel):
+    sheet_writes: list[TrafficWriteItem] = []
+    appends: list[TrafficAppendItem] = []
+
+
+@router.post("/api/thailandnow/traffic/analyze")
+async def traffic_analyze(req: TrafficAnalyzeReq) -> dict:
+    """TRAFFIC — diff preview, ZERO writes. Defaults to today (Asia/Bangkok).
+    Flow: config → dates → SA token → GA cumulative totals → sheet read →
+    proposed writes → paste-ready text lines."""
+    cfg = _ga_config()
+    today = datetime.now(ZoneInfo("Asia/Bangkok")).strftime("%Y-%m-%d")
+    frm = (req.from_ or today)[:10]
+    to = (req.to or frm)[:10]
+    try:
+        dates = _traffic_dates(frm, to)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    token = await _sa_google_token(_TRAFFIC_SCOPES)
+    ga = await _traffic_ga_totals(token, cfg["property_id"], dates, cfg["contract_start"])
+    sheet_rows = await _traffic_sheet_read(token, cfg["sheet_id"], cfg["tab"])
+    prop = _traffic_proposed_writes(sheet_rows, dates, ga, cfg["contract_start"])
+    # text lines recompute the daily chain over the sheet + this run's totals
+    actuals: dict[int, int] = {}
+    targets: dict[int, int] = {}
+    for r in sheet_rows[1:]:
+        b = _traffic_cell_int(r[1]) if len(r) > 1 else None
+        if b is None:
+            continue
+        d = _traffic_cell_int(r[3]) if len(r) > 3 else None
+        if d is not None:
+            actuals[b] = d
+        t = _traffic_cell_int(r[2]) if len(r) > 2 else None
+        if t is not None:
+            targets[b] = t
+    text_rows: list[dict] = []
+    for date in dates:
+        day = _traffic_day(date, cfg["contract_start"])
+        total = int(ga.get(date, 0))
+        prev = actuals.get(day - 1)
+        daily = total if (day == 1 or prev is None) else total - prev
+        actuals[day] = total
+        text_rows.append({"date": date, "day": day, "total": total,
+                          "daily": daily, "target": targets.get(day)})
+    return {"rows": prop["writes"], "appends": prop["appends"],
+            "warnings": prop["warnings"], "text": _traffic_text_lines(text_rows),
+            "generated_at": datetime.now(ZoneInfo("Asia/Bangkok")).isoformat(timespec="seconds"),
+            "from": frm, "to": to}
+
+
+@router.post("/api/thailandnow/traffic/apply")
+async def traffic_apply(req: TrafficApplyReq) -> dict:
+    """TRAFFIC — write what the client echoed back from analyze (shapes
+    re-validated, unknown keys ignored, capped 92 writes + 92 appends). Each
+    write updates the FULL row A–E (ragged rows get healed; E keeps its formula
+    when daily_new is None); appends ride one values.append call."""
+    cfg = _ga_config()
+    tab = cfg["tab"]
+    token = await _sa_google_token("https://www.googleapis.com/auth/spreadsheets")
+    hdr = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    base = f"https://sheets.googleapis.com/v4/spreadsheets/{cfg['sheet_id']}/values"
+    failed: list[dict] = []
+    written = 0
+
+    async with httpx.AsyncClient(timeout=30) as c:
+        async def one(w: TrafficWriteItem) -> None:
+            nonlocal written
+            try:
+                rng = urllib.parse.quote(f"{tab}!A{w.row}:E{w.row}")
+                e = w.daily_new if w.daily_new is not None else w.daily_old
+                values = [[_traffic_date_label(w.date), w.day,
+                           w.target_old if w.target_old is not None else "",
+                           w.actual_new, e if e is not None else ""]]
+                r = await c.put(f"{base}/{rng}?valueInputOption=USER_ENTERED",
+                                headers=hdr, json={"values": values})
+                if r.status_code >= 400:
+                    failed.append({"row": w.row, "error": f"{r.status_code} {r.text[:160]}"})
+                else:
+                    written += 1
+            except Exception as e:  # per-write failure, never the whole batch
+                failed.append({"row": w.row, "error": str(e)[:200]})
+
+        results = await asyncio.gather(*[one(w) for w in req.sheet_writes[:92]],
+                                       return_exceptions=True)
+        for res in results:
+            if isinstance(res, Exception):
+                failed.append({"row": -1, "error": str(res)[:200]})
+
+        appended = 0
+        items = req.appends[:92]  # matches the 92-dates run cap (validator caveat)
+        if items:
+            rows = [[_traffic_date_label(a.date), a.day,
+                     a.target if a.target is not None else "",
+                     a.actual_new, a.daily_new if a.daily_new is not None else ""]
+                    for a in items]
+            rng = urllib.parse.quote(f"{tab}!A1")
+            r = await c.post(f"{base}/{rng}:append?valueInputOption=USER_ENTERED",
+                             headers=hdr, json={"values": rows})
+            if r.status_code >= 400:
+                failed.append({"row": -1, "error": f"append failed: {r.status_code} {r.text[:160]}"})
+            else:
+                appended = len(rows)
+    return {"ok": not failed, "written": written, "appended": appended, "failed": failed}
+
+
 # --- WordPress OP (publish-from-card) + Gem SEO -----------------------------
 
 
@@ -6244,3 +6643,61 @@ if __name__ == "__main__":
     _seo_gem_prompt = _get_seo_gem_system_prompt()
     assert "## Role & Purpose" in _seo_gem_prompt or "Role & Purpose" in _seo_gem_prompt
     print("OK WPOP: doc title + gutenberg conversion + text fallback + seo parse + seo best")
+
+    # TRAFFIC OP: day numbering, date caps, paste lines, proposed writes
+    assert _traffic_day("2025-12-05", "2025-12-05") == 1, "contract start day must be 1"
+    assert _traffic_day("2026-08-21", "2025-12-05") == 260
+    assert _traffic_dates("2026-08-01", "2026-08-03") == ["2026-08-01", "2026-08-02", "2026-08-03"]
+    assert len(_traffic_dates("2026-01-01", "2026-04-02")) == 92, "91-day span inclusive = 92 dates (max)"
+    try:
+        _traffic_dates("2026-01-01", "2026-04-03")  # 93 dates → reject
+        raise SystemExit("traffic dates cap failed")
+    except ValueError:
+        pass
+    _tl = _traffic_text_lines([
+        {"date": "2026-08-21", "day": 260, "total": 232299, "daily": 1021, "target": 211258},
+        {"date": "2025-12-05", "day": 1, "total": 4211, "daily": 4211, "target": None},
+        {"date": "2026-08-20", "day": 259, "total": 231278, "daily": 0, "target": 210000},
+    ]).splitlines()
+    assert _tl[0] == ("Aug 21 · Day 260 · Total 232,299 · Daily +1,021 · "
+                      "Target 211,258 (Δ +21,041)"), _tl[0]
+    assert _tl[1] == "Dec 5 · Day 1 · Total 4,211 · Daily +4,211", _tl[1]  # missing target omitted
+    assert _tl[2] == ("Aug 20 · Day 259 · Total 231,278 · Daily +0 · "
+                      "Target 210,000 (Δ +21,278)"), _tl[2]  # zero daily → +0
+    # proposed writes: (a) overwrite w/ plain E, (b) formula E untouched,
+    # (c) stale +0 daily corrected, (d) past-last-row append w/ target copy,
+    # (e) Day-mismatch row → warning + skip.
+    _sheet = [
+        ["Date", "Day", "Target", "Actual", "Daily"],
+        ["Aug 20", 259, 210000, 231278, 1212],
+        ["Aug 21", 260, 211258, 232278, 0],          # (a)+(c): stale 0 daily, plain E
+        ["Aug 22", 261, 211800, 232950, "=D4-C4"],   # (b): formula E
+    ]
+    _ga = {"2026-08-21": 233320, "2026-08-22": 234000, "2026-08-23": 235000}
+    _pw = _traffic_proposed_writes(_sheet, ["2026-08-21", "2026-08-22", "2026-08-23"],
+                                   _ga, "2025-12-05")
+    _w21 = next(w for w in _pw["writes"] if w["date"] == "2026-08-21")
+    assert _w21["row"] == 3 and _w21["actual_new"] == 233320 and _w21["daily_old"] == 0
+    assert _w21["daily_new"] == 233320 - 231278 == 2042, _w21  # (c) stale corrected
+    _w22 = next(w for w in _pw["writes"] if w["date"] == "2026-08-22")
+    assert _w22["daily_new"] is None and _w22["daily_is_formula"], _w22  # (b)
+    assert _w22["daily_old"] == "=D4-C4", _w22  # formula preserved for the full-row write
+    assert len(_pw["appends"]) == 1, _pw  # (d)
+    _ap = _pw["appends"][0]
+    assert _ap["date"] == "2026-08-23" and _ap["day"] == 262 and _ap["target"] == 211800, _ap
+    assert _ap["daily_new"] == 235000 - 234000 == 1000, _ap  # prev = this run's Aug-22 total
+    assert _pw["warnings"] == [], _pw
+    _pe = _traffic_proposed_writes(
+        [["Date", "Day", "Target", "Actual", "Daily"], ["Aug 24", 300, 1, 1, 1]],
+        ["2026-08-24"], {"2026-08-24": 5}, "2025-12-05")
+    assert _pe["writes"] == [] and _pe["appends"] == [] and len(_pe["warnings"]) == 1, _pe  # (e)
+    # (f) year-boundary: day 366 appends even though "Dec 5" month+day clashes
+    # with the day-1 row a year earlier (validator blocker regression)
+    _yb_sheet = [["Date", "Day", "Target", "Actual", "Daily"]] + [
+        ["d", b, 1, b * 10, 10] for b in range(1, 366)
+    ]
+    _yb = _traffic_proposed_writes(_yb_sheet, ["2026-12-05"], {"2026-12-05": 9999},
+                                   "2025-12-05")
+    assert len(_yb["appends"]) == 1 and _yb["appends"][0]["day"] == 366, _yb
+    assert _yb["warnings"] == [], _yb
+    print("OK traffic: day/dates/text lines/writes+appends+warnings")

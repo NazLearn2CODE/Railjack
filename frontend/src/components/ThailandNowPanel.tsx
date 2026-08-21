@@ -1111,8 +1111,214 @@ function HealthSubTab() {
   );
 }
 
+// --- TRAFFIC sub-module (daily GA4 cumulative totals → Analytics & Boosting sheet)
+interface TrafficWrite {
+  row: number;
+  date: string;
+  day: number;
+  target_old: number | null;
+  actual_old: number | null;
+  actual_new: number;
+  daily_old: number | string | null;
+  daily_new: number | null;
+  daily_is_formula: boolean;
+}
+interface TrafficAppend {
+  date: string;
+  day: number;
+  target: number | null;
+  actual_new: number;
+  daily_new: number | null;
+}
+interface TrafficAnalyze {
+  rows: TrafficWrite[];
+  appends: TrafficAppend[];
+  warnings: string[];
+  text: string;
+  generated_at: string;
+  from: string;
+  to: string;
+}
+interface TrafficApplyResp {
+  ok: boolean;
+  written: number;
+  appended: number;
+  failed: { row: number; error: string }[];
+}
+
+/** "Aug 21" label from an ISO date (matches the sheet's A column format). */
+function trafficLabel(date: string): string {
+  const d = new Date(date + "T00:00:00");
+  return `${d.toLocaleString("en-US", { month: "short" })} ${d.getDate()}`;
+}
+function trafficNum(n: number | string | null | undefined): string {
+  if (n === null || n === undefined || n === "") return "—";
+  return typeof n === "number" ? n.toLocaleString("en-US") : n;
+}
+function trafficSigned(n: number | null | undefined): string {
+  if (n === null || n === undefined) return "—";
+  return `${n >= 0 ? "+" : ""}${n.toLocaleString("en-US")}`;
+}
+/** Today as YYYY-MM-DD in the browser's local tz. */
+function localToday(): string {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
+function daysBetween(from: string, to: string): number {
+  return Math.round((new Date(to + "T00:00:00").getTime() - new Date(from + "T00:00:00").getTime()) / 86400000);
+}
+
+function TrafficTab() {
+  return (
+    <>
+      <div className="flex items-center gap-2 mb-2">
+        <span className="label">TRAFFIC</span>
+        <span className="mono" style={{ color: "var(--color-muted)" }}>
+          daily GA4 cumulative totals → sheet diff
+        </span>
+      </div>
+      <TrafficSubTab />
+    </>
+  );
+}
+
+function TrafficSubTab() {
+  const [from, setFrom] = useState(localToday);
+  const [to, setTo] = useState(localToday);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [data, setData] = useState<TrafficAnalyze | null>(null);
+  const [confirming, setConfirming] = useState(false);
+  const [applyRes, setApplyRes] = useState<TrafficApplyResp | null>(null);
+  const [applyErr, setApplyErr] = useState<string | null>(null);
+
+  const run = useCallback(async () => {
+    setErr(null);
+    setApplyRes(null);
+    setConfirming(false);
+    if (daysBetween(from, to) > 91) {
+      setErr("range too wide — pick at most 92 dates");
+      return;
+    }
+    setBusy(true);
+    const r = await post<TrafficAnalyze>("/api/thailandnow/traffic/analyze", { from, to });
+    setBusy(false);
+    if (r.ok && r.data) setData(r.data);
+    else setErr(r.error ?? "analyze failed");
+  }, [from, to]);
+
+  const apply = useCallback(async () => {
+    if (!data) return;
+    setApplyErr(null);
+    const r = await post<TrafficApplyResp>("/api/thailandnow/traffic/apply", {
+      sheet_writes: data.rows,
+      appends: data.appends,
+    });
+    if (r.ok && r.data) {
+      setApplyRes(r.data);
+      setConfirming(false);
+    } else {
+      setApplyErr(r.error ?? "apply failed");
+    }
+  }, [data]);
+
+  // 503 config-missing hint explains ga.json — render verbatim in muted, not as an error
+  const configHint = err !== null && err.includes("ga.json");
+
+  return (
+    <section className="hud hud--bracket reveal reveal-1 p-3 flex flex-col gap-2">
+      <div className="flex flex-wrap items-center gap-2">
+        <input type="date" value={from} max={to} onChange={(e) => setFrom(e.target.value)} />
+        <span className="mono">→</span>
+        <input type="date" value={to} min={from} onChange={(e) => setTo(e.target.value)} />
+        <button className="btn btn--signal" disabled={busy} onClick={run}>
+          {busy ? "RUNNING…" : "RUN"}
+        </button>
+        {data && (
+          <button className="btn" onClick={() => navigator.clipboard.writeText(data.text).catch(() => {})}>
+            COPY TEXT
+          </button>
+        )}
+        {data && (data.rows.length > 0 || data.appends.length > 0) && (
+          <button className="btn btn--signal" onClick={() => setConfirming(true)}>
+            WRITE SHEET
+          </button>
+        )}
+      </div>
+
+      {err && (
+        <div className="mono" style={{ color: configHint ? "var(--color-muted)" : "var(--color-critical)" }}>
+          {err}
+        </div>
+      )}
+
+      {data && (
+        <div className="flex flex-col gap-1">
+          <div className="mono" style={{ color: "var(--color-muted)" }}>
+            {data.rows.length + data.appends.length} days · generated {data.generated_at}
+          </div>
+
+          {confirming && (
+            <div className="p-2 border border-critical bg-shade flex flex-col gap-2 my-1">
+              <div className="mono text-xs font-bold" style={{ color: "var(--color-critical)" }}>
+                CONFIRM SHEET WRITE ({data.rows.length} rows + {data.appends.length} appends)
+              </div>
+              <div className="mono text-xs text-muted">
+                Writes column D (Actual) always and E (Daily) only where the cell has no
+                formula; appends new rows past the sheet's last row.
+              </div>
+              <div className="flex gap-2">
+                <button className="btn btn--crit" onClick={apply}>CONFIRM WRITE</button>
+                <button className="btn" onClick={() => setConfirming(false)}>CANCEL</button>
+              </div>
+            </div>
+          )}
+
+          <div className="scroll-y flex flex-col gap-0.5">
+            {data.rows.map((w) => (
+              <div key={`${w.date}-${w.row}`} className="mono text-xs">
+                {trafficLabel(w.date)} Day {w.day} — Actual: {trafficNum(w.actual_old)} →{" "}
+                {w.actual_new.toLocaleString("en-US")}
+                {" · Daily: "}{trafficNum(w.daily_old)} → {trafficSigned(w.daily_new)}
+                {w.daily_is_formula && (
+                  <span className="ml-1" style={{ color: "var(--color-muted)" }}>(E=formula, untouched)</span>
+                )}
+              </div>
+            ))}
+            {data.appends.map((a) => (
+              <div key={a.date} className="mono text-xs">
+                <span style={{ color: "var(--color-signal)" }}>NEW ROW</span>{" "}
+                {trafficLabel(a.date)} Day {a.day} — Actual: → {a.actual_new.toLocaleString("en-US")}
+                {" · Daily: "}{trafficSigned(a.daily_new)}
+              </div>
+            ))}
+          </div>
+
+          {data.warnings.map((wn, i) => (
+            <div key={i} className="mono text-xs" style={{ color: "var(--color-hazard)" }}>{wn}</div>
+          ))}
+
+          {applyRes && (
+            <div className="mono text-xs font-bold" style={{ color: applyRes.ok ? "var(--color-go)" : "var(--color-critical)" }}>
+              {applyRes.ok
+                ? `✓ ${applyRes.written} written · ${applyRes.appended} appended`
+                : `${applyRes.written} written · ${applyRes.appended} appended · ${applyRes.failed.length} failed`}
+              {applyRes.failed.map((f, i) => (
+                <div key={i} style={{ color: "var(--color-critical)", fontWeight: "normal" }}>
+                  row {f.row}: {f.error}
+                </div>
+              ))}
+            </div>
+          )}
+          {applyErr && <div className="mono text-xs" style={{ color: "var(--color-critical)" }}>{applyErr}</div>}
+        </div>
+      )}
+    </section>
+  );
+}
+
 export default function ThailandNowPanel({ module: _module }: { module: ModuleConfig }) {
-  const [tab, setTab] = useState<"writers" | "events" | "archive" | "seo" | "story-scout" | "wordpress">("writers");
+  const [tab, setTab] = useState<"writers" | "events" | "archive" | "seo" | "traffic" | "story-scout" | "wordpress">("writers");
   const { data, error } = usePolling<DesksResp>("/api/thailandnow/desks", 15000);
 
   return (
@@ -1148,6 +1354,12 @@ export default function ThailandNowPanel({ module: _module }: { module: ModuleCo
         >
           SEO
         </button>
+        <button // NEW: TRAFFIC button
+          className={`btn btn--compact ${tab === "traffic" ? "btn--signal" : ""}`}
+          onClick={() => setTab("traffic")}
+        >
+          TRAFFIC
+        </button>
         <button
           className={`btn btn--compact ${tab === "wordpress" ? "btn--signal" : ""}`}
           onClick={() => setTab("wordpress")}
@@ -1163,6 +1375,7 @@ export default function ThailandNowPanel({ module: _module }: { module: ModuleCo
       {tab === "archive" && <ArchiveTab />} {/* NEW: ArchiveTab render */}
       {tab === "story-scout" && <StoryScoutTab />}
       {tab === "seo" && <SeoTab />}
+      {tab === "traffic" && <TrafficTab />} {/* NEW: TrafficTab render */}
       {tab === "wordpress" && <WpOpTab />}
     </div>
   );
