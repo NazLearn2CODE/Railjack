@@ -1,6 +1,6 @@
 # Daily Traffic OP — BUILD CHECKPOINT (compact/resume anchor)
 
-Updated: 2026-08-21T23:20+07 · Owner: Tawhan (home) · Status: **LIVE-VERIFIED, APK pending cutover**
+Updated: 2026-08-22T00:25+07 · Owner: Tawhan (home) · Status: **APK BUILT (test-copy target), real-doc cutover pends Ben**
 
 Design settled via grill-me (see Final Decision Summary in session + brief).
 Goal armed in DSH (goal-865f5e4f). Briefs: `TN-DAILY-TRAFFIC-ADW-BRIEF.md` (hub) +
@@ -18,7 +18,7 @@ hub op (Railjack repo) + app (new repo `~/Coding Projects/tn-daily-traffic`).
 | 4 | Hub op validator | ✅ PASS (after host fix) | year-boundary append blocker + never-green assert fixed; append cap raised to 92 |
 | 5 | Android app tn-daily-traffic (agy) | ✅ SHIPPED `b2fb5bd` | 17/17 tests (host-verified); tsc+vite+cap copy green; no creds in git (verified) |
 | 6 | App validator | ✅ PASS (after correction round) | parity re-diff clean both directions; NITs: cellInt `+n` edge, pre-contract throw |
-| 7 | Live verify + APK | ✅ LIVE-VERIFIED (test copy) · ⏳ APK pends Ben | GA live ✅ (232,575/232,911) · analyze+apply verified on TEST COPY (row 268/269 written, formulas untouched) · real-layout rewrites both sides, parity 5/5 PASS · hub `c2d2b32`, app `c0a71dd` · production cutover = Ben shares REAL doc to SA + one-line sheet_id swap · APK build (`npm run apk`) after cutover so the embed targets the real sheet |
+| 7 | Live verify + APK | ✅ LIVE-VERIFIED (test copy) · ✅ APK BUILT (test-copy target, 2026-08-22) | GA live ✅ (232,575/232,911) · analyze+apply verified on TEST COPY (row 268/269 written, formulas untouched) · real-layout rewrites both sides, parity 5/5 PASS · hub `c2d2b32`, app `c0a71dd` · production cutover = Ben shares REAL doc to SA + one-line sheet_id swap · APK build (`npm run apk`) after cutover so the embed targets the real sheet |
 | 8 | Vault: project note + hot.md + memory-log + Somatic handoff | ✅ DONE | note `20-projects/thailandnow-daily-traffic-op.md`; Somatic port left to Tasai via hot.md |
 
 ## Key facts (compact-proof)
@@ -33,11 +33,18 @@ hub op (Railjack repo) + app (new repo `~/Coding Projects/tn-daily-traffic`).
 - Panel note: hub restart + fresh report practice applies at ship (practices.md §coding).
 - App: full parity, embedded SA key (read-only GA + sheet write), internal APK (Ben+Nat). WebCrypto RS256 JWT, no backend.
 
+## APK build state (2026-08-22)
+
+- **APK built & verified**: `android/app/build/outputs/apk/debug/app-debug.apk` (4.2 MB), `npm run apk` now runs clean end-to-end. Currently targets the **TEST COPY** sheet — Naz's call: move on with copy doc, rebuild after Ben's go.
+- Build fixes shipped (app `ae55121`): `build` script now `npx cap sync android` (was `cap copy` — missing `capacitor.settings.gradle` broke gradle on fresh checkout); committed the two generated gradle files; `android/local.properties` pins `sdk.dir=/home/NAZ/Android/Sdk` (**SDK actually lives at `~/Android/Sdk`, NOT `~/.local/share/android-sdk`** — old checkpoint path wrong on this machine; local.properties is gitignored).
+- Creds check: zero plaintext `BEGIN PRIVATE KEY` in bundle; SA key is XOR+base64 obfuscated via `ga.embed.obf` (ponytail-marked ceiling, Naz accepted 2026-08-17).
+- adb present but **no device attached** — live install test needs Naz's phone.
+
 ## Resume instruction
 
-Continue at the ⏳ items of phase 7, in this order:
+Continue at the ⏳ items, in this order:
 1. **Cutover** (pends Ben): he shares REAL doc `117ToHtWxtbTcZCxGqO07Qcu1bqMxVGhnrLRRo72hRh8` to the SA email as **Editor** → host swaps `sheet_id` in `~/.config/railjack/ga.json` to the real id → one live analyze+apply (confirm with Naz first; preview will show nat's Aug 21 number vs GA final).
-2. **APK**: in `~/Coding Projects/tn-daily-traffic` run `npm run apk` (embed reads ga.json — must point at REAL sheet first; SDK `$ANDROID_HOME=/home/NAZ/.local/share/android-sdk`); verify no creds in `git ls-files`; hand APK to Ben + Nat.
+2. **Rebuild APK after cutover**: `npm run apk` (embed reads ga.json — must point at REAL sheet first); verify no creds in `git ls-files`; hand APK to Ben + Nat. Optional: `adb install` on Naz's phone for live test.
 3. Close out: checkpoint commit; vault hot.md/memory-log touch if anything material changed; goal-865f5e4f already complete.
 
 Gate commands: `.venv/bin/pytest -q` (414) · `cd frontend && npx tsc --noEmit && npm run build` · `.venv/bin/ruff check` (38 baseline) · `bash scripts/check-free-first.sh` · `.venv/bin/python -m app.thailandnow`. App: `npm test` (21/21) · `npm run build` · `npm run apk`.
