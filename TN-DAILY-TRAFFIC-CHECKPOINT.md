@@ -18,7 +18,7 @@ hub op (Railjack repo) + app (new repo `~/Coding Projects/tn-daily-traffic`).
 | 4 | Hub op validator | ✅ PASS (after host fix) | year-boundary append blocker + never-green assert fixed; append cap raised to 92 |
 | 5 | Android app tn-daily-traffic (agy) | ✅ SHIPPED `b2fb5bd` | 17/17 tests (host-verified); tsc+vite+cap copy green; no creds in git (verified) |
 | 6 | App validator | ✅ PASS (after correction round) | parity re-diff clean both directions; NITs: cellInt `+n` edge, pre-contract throw |
-| 7 | Live verify + APK | 🔄 IN PROGRESS | SA key ✅ · APIs ✅ · SA reads TEST COPY ✅ · real-layout rewrite LANDED BOTH SIDES (correction-2: header detect row 9, B serial, C Day, D/F formulas, only E written; hub text-targets via UNFORMATTED_VALUE read — host fix; gates green; hub restarted; live analyze reaches GA and 403s cleanly) · parity validator round 3 dispatched · ⏳⏳ ONLY Naz's GA property Viewer grant remains |
+| 7 | Live verify + APK | ✅ LIVE-VERIFIED (test copy) · ⏳ APK pends Ben | GA live ✅ (232,575/232,911) · analyze+apply verified on TEST COPY (row 268/269 written, formulas untouched) · real-layout rewrites both sides, parity 5/5 PASS · hub `c2d2b32`, app `c0a71dd` · production cutover = Ben shares REAL doc to SA + one-line sheet_id swap · APK build (`npm run apk`) after cutover so the embed targets the real sheet |
 | 8 | Vault: project note + hot.md + memory-log + Somatic handoff | ✅ DONE | note `20-projects/thailandnow-daily-traffic-op.md`; Somatic port left to Tasai via hot.md |
 
 ## Key facts (compact-proof)
