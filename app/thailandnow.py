@@ -5022,8 +5022,8 @@ def _traffic_proposed_writes(sheet_rows: list[list], dates: list[str], ga: dict[
 async def _traffic_ga_totals(token: str, property_id: str, dates: list[str],
                              contract_start_iso: str) -> dict[str, int]:
     """One runReport per date (deterministic, no row-order ambiguity): cumulative
-    totalUsers from contract_start → date. Semaphore(4) + gather; ≤92 dates/run."""
-    sem = asyncio.Semaphore(4)
+    totalUsers from contract_start → date. Semaphore(2) + gather; ≤92 dates/run."""
+    sem = asyncio.Semaphore(2)
     hdr = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     url = f"https://analyticsdata.googleapis.com/v1beta/properties/{property_id}:runReport"
 
