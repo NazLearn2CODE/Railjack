@@ -8,11 +8,11 @@ modules:
     health: { type: http, url: "http://127.0.0.1:3080/" }
     manage: { type: systemd-user, unit: dsh-web.service }
   - id: custom-gravity
-    title: CUSTOM GRAVITY   # agy cockpit — ADW build harness (branded DSH instance)
+    title: CUSTOM GRAVITY   # agy-native chat UI (Google AI Pro); REPLACED the DSH cockpit 2026-08-22
     kind: iframe
     url: http://127.0.0.1:3081
     health: { type: http, url: "http://127.0.0.1:3081/" }
-    manage: { type: systemd-user, unit: dsh-agy.service }
+    manage: { type: systemd-user, unit: custom-gravity.service }
   - id: tmux
     title: TERMINAL
     kind: iframe
