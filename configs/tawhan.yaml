@@ -7,6 +7,12 @@ modules:
     url: http://127.0.0.1:3080
     health: { type: http, url: "http://127.0.0.1:3080/" }
     manage: { type: systemd-user, unit: dsh-web.service }
+  - id: custom-gravity
+    title: CUSTOM GRAVITY   # agy cockpit — ADW build harness (branded DSH instance)
+    kind: iframe
+    url: http://127.0.0.1:3081
+    health: { type: http, url: "http://127.0.0.1:3081/" }
+    manage: { type: systemd-user, unit: dsh-agy.service }
   - id: tmux
     title: TERMINAL
     kind: iframe
