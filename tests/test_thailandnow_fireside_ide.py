@@ -115,3 +115,80 @@ def test_ide_prompt_degrades_without_registry(monkeypatch):
     out = asyncio.run(fireside_ide_prompt())
     assert "registry unreadable" in out["text"]
     assert out["done_count"] == 0
+
+
+# --- negative-framing screen (home port of Somatic be3fb78) + image IDE convert ---
+
+from app.thailandnow import (  # noqa: E402
+    _is_negative_framing, _screen_negative, scout_images_convert, scout_terminal_report,
+)
+
+
+def test_negative_framing_matches_en_and_th():
+    assert _is_negative_framing("10 Tourist Traps in Thailand to Avoid")
+    assert _is_negative_framing("Police crackdown on foreign vendors")
+    assert _is_negative_framing("กับดักนักท่องเที่ยว ตลาดจตุจักร")
+    assert _is_negative_framing("Normal headline", "…but read this warning for expats")
+    assert not _is_negative_framing("Thailand extends visa-on-arrival for 93 countries")
+    assert not _is_negative_framing("New BTS extension opens December")
+
+
+def test_screen_negative_drops_and_counts():
+    items = [
+        {"title": "5 Places to Avoid in Thailand", "snippet": ""},
+        {"title": "Bangkok rail expansion approved", "snippet": ""},
+        {"title": "MRT news", "snippet": "mistakes to avoid when commuting"},  # snippet hit
+    ]
+    kept, dropped = _screen_negative(items)
+    assert [k["title"] for k in kept] == ["Bangkok rail expansion approved"]
+    assert dropped == 2
+    assert len(items) == 3  # input never mutated
+
+
+def test_terminal_report_screens_negative(monkeypatch, tmp_path):
+    p = tmp_path / "latest.json"
+    p.write_text(json.dumps([
+        {"title": "Tourist traps in Thailand", "url": "https://a.example/1"},
+        {"title": "Visa fee reduction announced", "url": "https://a.example/2"},
+    ]), encoding="utf-8")
+    monkeypatch.setattr(thailandnow, "_SCOUT_HANDOFF", p)
+    out = asyncio.run(scout_terminal_report())
+    assert out["count"] == 1 and out["negative_dropped"] == 1
+    assert out["results"][0]["title"].startswith("Visa")
+
+
+def test_fireside_convert_screens_negative(monkeypatch, tmp_path):
+    p = tmp_path / "latest.json"
+    p.write_text(json.dumps({"topics": [
+        HANDOFF_ROW,
+        {**HANDOFF_ROW, "title": "7 Things to Avoid in Thailand"},
+    ]}), encoding="utf-8")
+    monkeypatch.setattr(thailandnow, "_FIRESIDE_IDE_HANDOFF", p)
+
+    async def no_registry():
+        return []
+    monkeypatch.setattr(thailandnow, "_fireside_registry", no_registry)
+    out = asyncio.run(fireside_ide_convert())
+    assert out["count"] == 1 and out["negative_dropped"] == 1
+
+
+def test_images_convert_soft_fails_and_normalizes(monkeypatch, tmp_path):
+    # missing file → soft-fail with error field (same contract as scout_images)
+    monkeypatch.setattr(thailandnow, "_SCOUT_IMAGES_HANDOFF", tmp_path / "nope.json")
+    out = asyncio.run(scout_images_convert())
+    assert out["error"] and out["tier1"] == []
+    # valid handoff → same shape as scout_images, cross-tier dedup, tier tags
+    p = tmp_path / "latest.json"
+    p.write_text(json.dumps({
+        "url": "https://a.example/story",
+        "tier1": [{"url": "https://img.example/1", "alt": "scene"}],
+        "tier2": [{"url": "https://img.example/1", "alt": "dupe"},
+                  {"url": "https://px.example/2", "alt": "stock"}],
+        "ai_prompts": "single prompt string",
+    }), encoding="utf-8")
+    monkeypatch.setattr(thailandnow, "_SCOUT_IMAGES_HANDOFF", p)
+    out = asyncio.run(scout_images_convert())
+    assert out.get("error") is None
+    assert out["tier1"] == [{"url": "https://img.example/1", "alt": "scene", "tier": 1}]
+    assert [im["url"] for im in out["tier2"]] == ["https://px.example/2"]  # dupe dropped
+    assert out["ai_prompts"] == ["single prompt string"]                    # bare string ok

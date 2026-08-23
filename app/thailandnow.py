@@ -1198,6 +1198,48 @@ def _scout_domain_excluded(domain: str) -> bool:
     return any(domain == ex or domain.endswith("." + ex) for ex in _SCOUT_EXCLUDE_DOMAINS)
 
 
+# --- Negative/controversial FRAMING screen (home port of Tasai's Somatic be3fb78,
+# 2026-08-21 — record: 20-projects/thailand-now-story-scout.md). Deterministic
+# belt-and-braces UNDER the gem rules: drops stories whose title/snippet is framed
+# as a trap / myth-bust / warning / crackdown / skip-avoid piece. The audience
+# wants constructive/neutral framing; fear-framing is Ben's lane, not ours.
+_NEGATIVE_FRAMING_TERMS = (
+    # EN — trap/myth/warning angles
+    "tourist trap", "expat trap", "traps in thailand", "traps to avoid",
+    "myths about", "myth of", "debunk", "warning for", "you've been warned",
+    # crackdown stories
+    "crackdown on", "crackdown targets", "police sweep", "war on tourists",
+    # skip/avoid listicles
+    "avoid in thailand", "avoid these", "places to avoid", "things to avoid",
+    "mistakes to avoid", "never do in", "skip these", "don't do in", "do not do in",
+    "scam alert", "scams to avoid",
+    # TH — same framing families
+    "กับดักนักท่องเที่ยว", "กับดักชาวต่างชาติ", "เมธีเท็จ", "เตือนภัย", "ระวังกับดัก",
+    "อย่าไป", "อย่าทำ", "เลี่ยงที่", "ที่ควรเลี่ยง", "สถานที่ที่ควรหลีกเลี่ยง",
+    "จับกุมนักท่องเที่ยว", "ปราบนักท่องเที่ยว", "มิจฉาชีพหลอก",
+)
+
+
+def _is_negative_framing(title: str, snippet: str = "") -> bool:
+    """True when title+snippet text matches a negative-framing denylist term.
+    Substring match on the lowercased concatenation — Thai terms are case-less."""
+    hay = f"{title} {snippet}".lower()
+    return any(t in hay for t in _NEGATIVE_FRAMING_TERMS)
+
+
+def _screen_negative(items: list, title_key: str = "title", snippet_key: str = "snippet") -> tuple[list, int]:
+    """Deterministic negative-framing filter. Returns (kept, dropped_count) —
+    never mutates the input list."""
+    kept: list = []
+    dropped = 0
+    for it in items:
+        if _is_negative_framing(str(it.get(title_key) or ""), str(it.get(snippet_key) or "")):
+            dropped += 1
+        else:
+            kept.append(it)
+    return kept, dropped
+
+
 def _scout_date_in_range(date_str: str, cutoff_iso: str, today_iso: str) -> bool:
     """True only for a parsed date within [cutoff, today]. Strict policy: undated
     (empty) is False → dropped. Recency is guaranteed; the list is short because
@@ -1461,10 +1503,12 @@ async def _scout_news(query: str | None = None, category: str | None = None, day
                    if _scout_date_in_range(a.get("date") or "", cutoff_iso, today_iso))
 
     ordered = await _scout_rerank(ordered)
+    ordered, neg_dropped = _screen_negative(ordered)
 
     return {
         "results": ordered,
         "count": len(ordered),
+        "negative_dropped": neg_dropped,
         "errors": errors,
         "query": query,
         "category": category,
@@ -1737,6 +1781,61 @@ async def scout_images(payload: dict = Body(default={})):
         return {"tier1": [], "tier2": [], "ai_prompts": [], "url": url, "error": str(e)}
 
 
+# IDE-lane image handoff (📋 IDE IMAGES → Antigravity writes, ⇄ CONVERT reads).
+_SCOUT_IMAGES_HANDOFF = Path("/tmp/railjack-images/latest.json")
+
+
+@router.get("/api/thailandnow/scout/images/convert")
+async def scout_images_convert():
+    """IDE CONVERT — read the image handoff (``_SCOUT_IMAGES_HANDOFF``) and return
+    the SAME shape as ``scout_images`` so the frontend renders it identically.
+    Keyless, no LLM, no stock APIs. Soft-fails to HTTP 200 with ``error`` set."""
+    p = _SCOUT_IMAGES_HANDOFF
+    if not p.exists():
+        return {"tier1": [], "tier2": [], "ai_prompts": [], "url": "",
+                "error": "no IDE image handoff — run 📋 IDE IMAGES first"}
+
+    def _imgs(v) -> list[dict]:
+        rows = v if isinstance(v, list) else []
+        out = []
+        for it in rows:
+            if isinstance(it, str):
+                it = {"url": it}
+            if not isinstance(it, dict):
+                continue
+            u = str(it.get("url") or "").strip()
+            if u:
+                out.append({"url": u, "alt": str(it.get("alt") or "").strip()})
+        return out
+
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except Exception as e:
+        return {"tier1": [], "tier2": [], "ai_prompts": [], "url": "",
+                "error": f"handoff isn't valid JSON: {e}"}
+    if not isinstance(data, dict):
+        return {"tier1": [], "tier2": [], "ai_prompts": [], "url": "",
+                "error": "handoff must be a JSON object"}
+    prompts = data.get("ai_prompts")
+    if not isinstance(prompts, list):
+        prompts = [str(prompts)] if prompts else []
+    tier1, tier2 = _imgs(data.get("tier1")), _imgs(data.get("tier2"))
+    # dedup urls across tiers (tier1 wins)
+    seen = {im["url"] for im in tier1}
+    tier2_dedup: list[dict] = []
+    for im in tier2:
+        if im["url"] not in seen:
+            seen.add(im["url"])
+            tier2_dedup.append(im)
+    tier2 = tier2_dedup
+    return {
+        "tier1": [{**im, "tier": 1} for im in tier1],
+        "tier2": [{**im, "tier": 2} for im in tier2],
+        "ai_prompts": [str(x) for x in prompts if str(x).strip()],
+        "url": str(data.get("url") or "").strip(),
+    }
+
+
 @router.post("/api/thailandnow/scout/wp-media")
 async def scout_wp_media(payload: dict = Body(default={})):
     """SEND TO WP — upload one image to the Media Library with metadata.
@@ -1790,7 +1889,9 @@ async def scout_terminal_report():
         if r["url"] not in seen:
             seen.add(r["url"])
             deduped.append(r)
-    return {"results": deduped, "count": len(deduped), "mtime": p.stat().st_mtime}
+    deduped, neg_dropped = _screen_negative(deduped)
+    return {"results": deduped, "count": len(deduped), "negative_dropped": neg_dropped,
+            "mtime": p.stat().st_mtime}
 
 
 # --- FIRESIDE MODE (Slice 1): Topic Sourcing & Script Edit Notes ---
@@ -2434,6 +2535,10 @@ async def _flow_fireside_source(job: TnJob, seed: str | None, category: str | No
             "hook_unverified": bool(t.get("hook_unverified", False)),
         })
 
+    topics, neg_dropped = _screen_negative(topics)
+    if neg_dropped:
+        job.logs.append(f"negative-framing screen dropped {neg_dropped} topic(s)")
+
     # 6. Set job result
     job.result = {
         "topics": topics,
@@ -2591,7 +2696,9 @@ async def fireside_ide_prompt(seed: str = "", category: str = ""):
         "(3) government policy, (4) ASEAN/regional comparison — the hook is the excuse to talk "
         "about Thailand more broadly. Use real web browsing/search to verify the hooks and gather "
         "2-4 citable source URLs per topic. HARD AVOID (never suggest these topics or their "
-        f"themes): [{done_list}]. ALSO AVOID: Queen-related and Mother's Day topics. "
+        f"themes): [{done_list}]. ALSO AVOID: Queen-related and Mother's Day topics, "
+        "AND negative-framing angles (tourist-trap / myth-bust / warning pieces, crackdown "
+        "stories, skip-avoid listicles) — frame constructively or pick another topic. "
         "Write the result to `/tmp/railjack-fireside/latest.json` in the EXACT JSON shape from "
         "that contract note. Do NOT create or edit any Google Sheet/doc — the hub panel's "
         "CONVERT handles registry coverage flags."
@@ -2642,8 +2749,9 @@ async def fireside_ide_convert():
         if row["covered"]:
             covered += 1
         topics.append(row)
+    topics, neg_dropped = _screen_negative(topics)
     return {"topics": topics, "count": len(topics), "covered": covered,
-            "mtime": p.stat().st_mtime, "errors": []}
+            "negative_dropped": neg_dropped, "mtime": p.stat().st_mtime, "errors": []}
 
 
 

@@ -59,6 +59,10 @@ Rules:
   fabricate.
 - If the article has no Thailand hook, still return the three fields using the
   source as-is; discovery filtering is not your job.
+- NEGATIVE FRAMING (2026-08-23): if the article's angle is fear-framing — a
+  tourist-trap / myth-bust / warning piece, a crackdown story, or a skip-avoid
+  listicle — return `{"skip": "negative-framing", "headline_en": "", "headline_th": "", "excerpt_en": ""}`
+  instead of a pitch. Never reframe such an article positively; skip it.
 - Output ONLY the JSON object. No markdown fences, no commentary, no "Here is…".
   Exact shape: `{"headline_en": "...", "headline_th": "...", "excerpt_en": "..."}`
 
@@ -73,3 +77,9 @@ Rules:
 - Editorial discovery filters (denylists, category tags, promo-exception) are NOT
   in the gem; they live in the `/f5-story-scout` skill and a future Slice 2. This
   gem only writes pitches from whatever article it is handed.
+- **Negative-framing rule (2026-08-23, home port of Somatic be3fb78):** if the
+  article's angle is fear-framing — tourist-trap / myth-bust / warning pieces,
+  crackdown stories, skip-avoid listicles — return
+  `{"skip": "negative-framing", "headline_en": "", "headline_th": "", "excerpt_en": ""}`
+  instead of a pitch. The deterministic `_screen_negative` already drops such
+  stories at discovery; this rule is the LLM-side backstop for ones that slip in.

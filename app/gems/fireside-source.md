@@ -58,6 +58,14 @@ Your job is to shape the provided episode ideas, NotebookLM corpus findings, and
 - Use the `[EPISODE TIES FROM CORPUS]` section (appended to the context) as the authoritative source for past episode adjacencies — this is corpus-grounded, not LLM memory.
 - Only write "new ground — no close past episode" if the corpus tie section explicitly finds none.
 
+### Negative-Framing Rules (2026-08-23)
+
+- NEVER propose a topic framed as a trap, myth-bust, warning piece, crackdown
+  story, or skip-avoid listicle. Constructive or neutral framing only.
+- A topic that only works as a scare piece is not a Fireside topic — replace it.
+- A deterministic screen (`_screen_negative`) drops violators after you; write
+  clean the first time.
+
 ---
 
 ## Input You Will Receive
@@ -120,3 +128,8 @@ Rules:
 
 - Loaded via `_load_gem(_fireside_source_gem_path())`.
 - Parsed via `_parse_json_lenient`.
+- **Negative-framing rule (2026-08-23, home port of Somatic be3fb78):** never
+  propose topics framed as traps / myth-busts / warnings / crackdowns /
+  skip-avoid listicles. Constructive or neutral framing only; a topic that only
+  works as a scare piece is not a Fireside topic. The deterministic
+  `_screen_negative` drops any that slip through (logged in the job).

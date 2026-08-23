@@ -3083,6 +3083,68 @@ function StoryScoutTab() {
     setScoutJobId(null);            // no async job — don't leave a poller hanging
   }, [lastScoutAt, setResults]);
 
+  // 📋 IDE SCOUT (PITCH mode) — copy a paste-ready Antigravity prompt for the discovery
+  // sweep. The IDE writes the SAME handoff file the CLAUDE lane uses, so the existing
+  // CONVERT ◂ JSON reads it back unchanged. Frontend-only; no metered LLM.
+  const [ideScoutCopied, setIdeScoutCopied] = useState(false);
+  const copyIdeScoutPrompt = useCallback(async () => {
+    const q = query.trim();
+    const cat = category.trim();
+    const promptText =
+      "Run a Thailand news story-scout discovery sweep for the foreigner-in-Thailand audience " +
+      "(visa/immigration, property & work permits, business climate, transport, healthcare, cost of living, regulation, ASEAN-with-Thailand-angle). " +
+      (q ? `Topic focus: "${q}". ` : `Category: ${cat || "general"}. `) +
+      `Only stories published within the last ${days} day(s); drop undated/out-of-window items; exclude thailandnow.in.th. ` +
+      "Use real web browsing/search (DDG, Brave, GNews, news sites; Thai-language sources welcome). " +
+      "DROP negative-framing stories (tourist-trap / myth-bust / warning pieces, crackdown stories, skip-avoid listicles) — constructive or neutral framing only. " +
+      "Dedup on URL. Return 5-15 stories. Write ONLY a JSON array to `/tmp/railjack-scout/latest.json`, each item exactly: " +
+      '`{"title": "...", "url": "https://...", "snippet": "≤200 chars", "date": "YYYY-MM-DD", "lang": "en|th", "source": "domain"}`. ' +
+      "No fabricated URLs or dates.";
+    try {
+      await navigator.clipboard.writeText(promptText);
+      setIdeScoutCopied(true);
+      setTimeout(() => setIdeScoutCopied(false), 2000);
+      setErr("Prompt copied — paste into Antigravity, let it finish, then CONVERT ◂ JSON.");
+    } catch {
+      setErr("Clipboard copy failed");
+    }
+  }, [query, category, days]);
+
+  // 📋 IDE IMAGES + ⇄ CONVERT (IMAGE mode) — prompt-out for image tiers on the URL in
+  // the input; convert reads /tmp/railjack-images/latest.json through the backend.
+  const [ideImgCopied, setIdeImgCopied] = useState(false);
+  const copyIdeImagesPrompt = useCallback(async () => {
+    const u = imgUrl.trim();
+    if (!u) { setScoutImgErr("paste the article URL first"); return; }
+    const promptText =
+      `Gather images for this news article: ${u}\n` +
+      "TIER 1: read the article and list its actual images (url + short alt). " +
+      "TIER 2: search free stock libraries (Pexels, Pixabay, Unsplash) for ≥1080p photos matching the article's subject — 5-10 results with url + alt. " +
+      "AI PROMPTS: write 3 text-to-image prompts (English, subject + setting + lighting + style) suitable for illustrating this story. " +
+      'Write ONLY a JSON object to `/tmp/railjack-images/latest.json`, exactly: ' +
+      `{"url": "${u}", "tier1": [{"url": "...", "alt": "..."}], "tier2": [{"url": "...", "alt": "..."}], "ai_prompts": ["...", "...", "..."]}. ` +
+      "No fabricated URLs — every image URL must be real and reachable.";
+    try {
+      await navigator.clipboard.writeText(promptText);
+      setIdeImgCopied(true);
+      setTimeout(() => setIdeImgCopied(false), 2000);
+      setScoutImgErr(null);
+    } catch {
+      setScoutImgErr("Clipboard copy failed");
+    }
+  }, [imgUrl]);
+
+  const convertIdeImages = useCallback(async () => {
+    const res = await fetch("/api/thailandnow/scout/images/convert");
+    const data = (await res.json()) as { tier1: any[]; tier2: any[]; ai_prompts: string[]; url: string; error?: string };
+    if (data.error) {
+      setScoutImgErr(data.error);
+      return;
+    }
+    setScoutImgErr(null);
+    setScoutImgData(data);
+  }, [setScoutImgData]);
+
   const sendSelectedToWp = useCallback(async () => {
     setWpSending(true);
     for (const [url, draft] of Object.entries(selected)) {
@@ -3253,6 +3315,13 @@ function StoryScoutTab() {
               {searching ? "SEARCHING…" : "SEARCH"}
             </button>
             <button className="btn btn--compact" onClick={scoutViaClaude}>SCOUT ▸ CLAUDE</button>
+            <button
+              className="btn btn--compact"
+              onClick={copyIdeScoutPrompt}
+              title="Copy paste-ready discovery prompt for Antigravity IDE (writes the same handoff as SCOUT ▸ CLAUDE)"
+            >
+              {ideScoutCopied ? "COPIED ✓" : "📋 IDE SCOUT"}
+            </button>
             <button className="btn btn--compact" onClick={convertFromClaude}>CONVERT ◂ JSON</button>
           </div>
           <div className="mono text-xs mb-3" style={{ color: "var(--color-muted)" }}>
@@ -3376,6 +3445,21 @@ function StoryScoutTab() {
               onClick={() => fetchScoutImages(imgUrl)}
             >
               {scoutImgLoading ? "FINDING IMAGES…" : "FIND IMAGES"}
+            </button>
+            <button
+              className="btn btn--compact"
+              disabled={!imgUrl.trim()}
+              onClick={copyIdeImagesPrompt}
+              title="Copy paste-ready image-gathering prompt for Antigravity IDE (writes /tmp/railjack-images/latest.json)"
+            >
+              {ideImgCopied ? "COPIED ✓" : "📋 IDE IMAGES"}
+            </button>
+            <button
+              className="btn btn--compact"
+              onClick={convertIdeImages}
+              title="Read the IDE image handoff into the tier cards"
+            >
+              ⇄ CONVERT
             </button>
           </div>
 
