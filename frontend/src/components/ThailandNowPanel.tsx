@@ -133,6 +133,7 @@ interface FiresideTopic {
   visual_style: string;
   why_fresh: string;
   revisit_candidate: boolean;
+  covered?: boolean; // IDE-lane CONVERT flag: slug matches a done/excluded registry topic
 }
 
 interface FiresideFix {
@@ -2386,7 +2387,7 @@ function FiresidePanel() {
   const [seed, setSeed]               = usePersistentState<string>("tn.scout.fireside.seed", "");
   const [category, setCategory]       = usePersistentState<string>("tn.scout.fireside.category", "");
   const [topics, setTopics]           = usePersistentState<FiresideTopic[]>("tn.scout.fireside.topics", []);
-  const [sourceMode, setSourceMode]   = usePersistentState<"notebook" | "web-fallback" | null>(
+  const [sourceMode, setSourceMode]   = usePersistentState<"notebook" | "web-fallback" | "ide" | null>(
     "tn.scout.fireside.mode",
     null
   );
@@ -2394,6 +2395,9 @@ function FiresidePanel() {
   const [searching, setSearching]     = useState(false);
   const [sourceErr, setSourceErr]     = useState<string | null>(null);
   const [copiedTopicIdx, setCopiedTopicIdx] = useState<number | null>(null);
+  // IDE lane state (📋 IDE SOURCE / ⇄ CONVERT — prompt-out + file-in, no metered LLM)
+  const [ideBusy, setIdeBusy]         = useState(false);
+  const [ideCopied, setIdeCopied]     = useState(false);
 
   // EDIT NOTES state
   const [draft, setDraft]             = usePersistentState<string>("tn.scout.fireside.draft", "");
@@ -2465,6 +2469,57 @@ function FiresidePanel() {
     setSourceJobId(r.data!.id);
     setSearching(true);
   }, [seed, category, setTopics, setSourceMode, setSourceJobId]);
+
+  // 📋 IDE SOURCE — fetch the paste-ready Antigravity prompt (done-list inlined from the
+  // registry by the backend) and copy it. Paste in Antigravity; it writes
+  // /tmp/railjack-fireside/latest.json. No metered LLM rides this lane.
+  const copyIdeFiresidePrompt = useCallback(async () => {
+    setSourceErr(null);
+    setIdeBusy(true);
+    const qs = new URLSearchParams();
+    if (seed.trim()) qs.set("seed", seed.trim());
+    if (category.trim()) qs.set("category", category.trim());
+    const suffix = qs.toString() ? `?${qs.toString()}` : "";
+    try {
+      const res = await fetch(`/api/thailandnow/scout/fireside/ide-prompt${suffix}`);
+      if (!res.ok) throw new Error(`ide-prompt → ${res.status}`);
+      const data = (await res.json()) as { text: string };
+      await navigator.clipboard.writeText(data.text);
+      setIdeCopied(true);
+      setTimeout(() => setIdeCopied(false), 2000);
+    } catch (e: unknown) {
+      setSourceErr(e instanceof Error ? e.message : "Failed to build IDE prompt");
+    } finally {
+      setIdeBusy(false);
+    }
+  }, [seed, category]);
+
+  // ⇄ CONVERT — read the IDE handoff back through the backend (coerce + dedup +
+  // registry covered-flags), replacing the topic list like SOURCE does.
+  const convertIdeFireside = useCallback(async () => {
+    setSourceErr(null);
+    setIdeBusy(true);
+    try {
+      const res = await fetch("/api/thailandnow/scout/fireside/convert");
+      if (!res.ok) throw new Error(`convert → ${res.status}`);
+      const data = (await res.json()) as {
+        topics: FiresideTopic[]; count: number; covered: number; errors: string[];
+      };
+      if (data.topics.length === 0) {
+        setSourceErr(data.errors?.[0] || "No topics in the IDE handoff");
+        return;
+      }
+      setTopics(data.topics);
+      setSourceMode("ide");
+      if (data.covered > 0) {
+        setSourceErr(`${data.covered} topic(s) flagged ⚠ COVERED — already done/excluded in the registry`);
+      }
+    } catch (e: unknown) {
+      setSourceErr(e instanceof Error ? e.message : "CONVERT failed");
+    } finally {
+      setIdeBusy(false);
+    }
+  }, [setTopics, setSourceMode]);
 
   const getEditNotes = useCallback(async () => {
     if (!draft.trim() && !url.trim()) {
@@ -2593,6 +2648,22 @@ function FiresidePanel() {
             >
               {searching ? "SOURCING…" : "SOURCE TOPICS"}
             </button>
+            <button
+              className="btn btn--compact"
+              disabled={ideBusy}
+              onClick={copyIdeFiresidePrompt}
+              title="Copy paste-ready Fireside prompt for Antigravity IDE (it writes /tmp/railjack-fireside/latest.json)"
+            >
+              {ideCopied ? "COPIED ✓" : "📋 IDE SOURCE"}
+            </button>
+            <button
+              className="btn btn--compact"
+              disabled={ideBusy}
+              onClick={convertIdeFireside}
+              title="Read the IDE handoff file into topic cards (dedup + registry covered-flags)"
+            >
+              ⇄ CONVERT
+            </button>
           </div>
 
           {/* Results Area */}
@@ -2630,7 +2701,7 @@ function FiresidePanel() {
                       border: `1px solid ${sourceMode === "notebook" ? "var(--color-go)" : "var(--color-hazard)"}`,
                     }}
                   >
-                    {sourceMode === "notebook" ? "NOTEBOOK CORPUS" : "WEB FALLBACK"}
+                    {sourceMode === "notebook" ? "NOTEBOOK CORPUS" : sourceMode === "ide" ? "IDE HANDOFF" : "WEB FALLBACK"}
                   </span>
                 )}
               </div>
@@ -2653,6 +2724,18 @@ function FiresidePanel() {
                         }}
                       >
                         REVISIT CANDIDATE
+                      </span>
+                    )}
+                    {topic.covered && (
+                      <span
+                        className="mono text-xs px-1.5 py-0.5 rounded font-bold"
+                        style={{
+                          background: "color-mix(in srgb, var(--color-critical) 15%, var(--color-surface))",
+                          color: "var(--color-critical)",
+                          border: "1px solid var(--color-critical)",
+                        }}
+                      >
+                        ⚠ COVERED (PAST EP)
                       </span>
                     )}
                   </div>

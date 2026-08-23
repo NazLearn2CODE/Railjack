@@ -2534,6 +2534,118 @@ async def scout_fireside_edit_notes(payload: dict = Body(default={})):
     return await _fireside_edit(draft=draft, url=url, check_coverage=check_coverage)
 
 
+# --- FIRESIDE IDE lane (prompt-out + file-in; contract: 10-knowledge/fireside-ide-handoff.md) ---
+# Same pattern as the EVENTS IDE lane: 📋 copies a paste-ready Antigravity prompt,
+# the IDE agent scouts + writes JSON to _FIRESIDE_IDE_HANDOFF, ⇄ CONVERT reads it back.
+_FIRESIDE_IDE_HANDOFF = Path("/tmp/railjack-fireside/latest.json")
+
+
+def _fireside_topic_row(it: dict) -> dict | None:
+    """Coerce ONE IDE handoff row into the FiresideTopic card shape (or None when
+    unusable). Strings are trimmed/capped; list fields tolerate a single string."""
+    title = str(it.get("title") or "").strip()
+    if not title:
+        return None  # title is the dedup key + React key — must be present
+
+    def _strs(v) -> list[str]:
+        if isinstance(v, list):
+            return [str(x).strip() for x in v if str(x).strip()]
+        s = str(v or "").strip()
+        return [s] if s else []
+
+    return {
+        "title": title[:200],
+        "angle": str(it.get("angle") or "").strip(),
+        "ep_adjacent": _strs(it.get("ep_adjacent")),
+        "source_urls": _strs(it.get("source_urls")),
+        "if_like_a_try_b": str(it.get("if_like_a_try_b") or "").strip(),
+        "visual_style": str(it.get("visual_style") or "").strip(),
+        "why_fresh": str(it.get("why_fresh") or "").strip(),
+        "revisit_candidate": bool(it.get("revisit_candidate", False)),
+    }
+
+
+@router.get("/api/thailandnow/scout/fireside/ide-prompt")
+async def fireside_ide_prompt(seed: str = "", category: str = ""):
+    """📋 IDE SOURCE — build the paste-ready Antigravity prompt. The done-topic list
+    from the registry is INLINED so the IDE run doesn't waste topics on episodes
+    already shipped. Registry failure degrades to the fixed avoids only."""
+    done_topics: list[str] = []
+    try:
+        done_topics, _ = _filter_fireside_registry(await _fireside_registry())
+    except Exception:
+        pass
+    unique_done: list[str] = []
+    for t in reversed(done_topics):
+        clean = t.split(":")[0].split("—")[0].strip()
+        if clean and clean not in unique_done:
+            unique_done.append(clean)
+    done_list = ", ".join(unique_done[:60]) or "(registry unreadable — rely on the fixed avoids)"
+    subject = (seed.strip() or category.strip() or "Thailand living, visas, travel and expat life")
+    prompt = (
+        "Read `10-knowledge/fireside-ide-handoff.md` in this vault. "
+        f"Suggest 3-5 FRESH episode topics on '{subject}' for The Fireside (NBT World's weekly "
+        "two-host YouTube show; audience = foreigners living in or visiting Thailand). Follow Ben "
+        "Rujopakarn's methodology: every topic MUST start from a concrete, real, CURRENT news or "
+        "event hook, then broaden into 3-4 development angles: (1) cultural, (2) industry/economic, "
+        "(3) government policy, (4) ASEAN/regional comparison — the hook is the excuse to talk "
+        "about Thailand more broadly. Use real web browsing/search to verify the hooks and gather "
+        "2-4 citable source URLs per topic. HARD AVOID (never suggest these topics or their "
+        f"themes): [{done_list}]. ALSO AVOID: Queen-related and Mother's Day topics. "
+        "Write the result to `/tmp/railjack-fireside/latest.json` in the EXACT JSON shape from "
+        "that contract note. Do NOT create or edit any Google Sheet/doc — the hub panel's "
+        "CONVERT handles registry coverage flags."
+    )
+    return {"text": prompt, "done_count": len(unique_done)}
+
+
+@router.get("/api/thailandnow/scout/fireside/convert")
+async def fireside_ide_convert():
+    """⇄ CONVERT — read the IDE handoff (``_FIRESIDE_IDE_HANDOFF``), coerce rows to
+    the FiresideTopic shape, dedup on title slug, and mark ``covered: true`` on
+    topics whose slug matches a done/excluded registry topic. Keyless, no LLM.
+    Soft-fails to HTTP 200 ``{topics: [], errors: […]}`` pointing at 📋 IDE SOURCE."""
+    missing = {"topics": [], "count": 0, "covered": 0,
+               "errors": ["no IDE handoff file — run 📋 IDE SOURCE first"]}
+    p = _FIRESIDE_IDE_HANDOFF
+    if not p.exists():
+        return missing
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+        rows = data.get("topics") if isinstance(data, dict) else (data if isinstance(data, list) else [])
+        if not isinstance(rows, list):
+            rows = []
+    except Exception:
+        return {**missing, "errors": ["handoff isn't valid JSON — rerun 📋 IDE SOURCE"]}
+
+    done_slugs: set[str] = set()
+    try:
+        done_topics, _ = _filter_fireside_registry(await _fireside_registry())
+        done_slugs = {s for t in done_topics if (s := _covered_slug(t))}
+    except Exception:
+        pass  # registry down → no covered flags, topics still convert
+
+    seen: set[str] = set()
+    topics: list[dict] = []
+    covered = 0
+    for it in rows:
+        if not isinstance(it, dict):
+            continue
+        row = _fireside_topic_row(it)
+        if not row:
+            continue
+        slug = _covered_slug(row["title"])
+        if not slug or slug in seen:
+            continue
+        seen.add(slug)
+        row["covered"] = slug in done_slugs
+        if row["covered"]:
+            covered += 1
+        topics.append(row)
+    return {"topics": topics, "count": len(topics), "covered": covered,
+            "mtime": p.stat().st_mtime, "errors": []}
+
+
 
 _EVENTS_HANDOFF = Path("/tmp/railjack-events/latest.json")
 
