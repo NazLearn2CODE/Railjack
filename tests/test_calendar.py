@@ -313,3 +313,78 @@ def test_sync_without_repo_soft_fails(temp_calendar_file):
     # reads still work
     day = client.get("/api/calendar/day?date=2026-08-18")
     assert day.status_code == 200
+
+
+def test_delete_recurring_occurrence_only(temp_calendar_file):
+    """DELETE with a date skips just that occurrence; other occurrences survive."""
+    res = client.delete(
+        "/api/calendar/task/rec-daily-sync-2026-08-18?date=2026-08-18"
+    )
+    assert res.status_code == 200
+    assert res.json()["skip_date"] == "2026-08-18"
+
+    # That date no longer materializes the schedule…
+    day = client.get("/api/calendar/day?date=2026-08-18").json()
+    assert not any("daily-sync" in t["id"] for t in day["tasks"])
+    month = client.get("/api/calendar/month?year=2026&month=8").json()
+    assert month["days"]["2026-08-18"]["total"] == 3  # was 4
+
+    # …but the next day still does, and the schedule persists.
+    day_next = client.get("/api/calendar/day?date=2026-08-19").json()
+    assert any("daily-sync" in t["id"] for t in day_next["tasks"])
+    _fm, recurring, _dated = calendar_tasks.parse_calendar_file()
+    rec = next(r for r in recurring if r["id"] == "daily-sync")
+    assert rec["skip_dates"] == ["2026-08-18"]
+
+
+def test_delete_recurring_occurrence_then_all(temp_calendar_file):
+    """Occurrence delete then delete-all removes the schedule entirely."""
+    res = client.delete(
+        "/api/calendar/task/rec-daily-sync-2026-08-18?date=2026-08-18"
+    )
+    assert res.status_code == 200
+
+    all_res = client.delete("/api/calendar/task/daily-sync")
+    assert all_res.status_code == 200
+
+    _fm, recurring, _dated = calendar_tasks.parse_calendar_file()
+    assert not any(r["id"] == "daily-sync" for r in recurring)
+    day = client.get("/api/calendar/day?date=2026-08-19").json()
+    assert not any("daily-sync" in t["id"] for t in day["tasks"])
+
+
+def test_delete_recurring_materialized_instance_scope(temp_calendar_file):
+    """Deleting a completed recurring instance (stored as dated rec-*) with date
+    removes the dated override AND skips the occurrence."""
+    client.patch(
+        "/api/calendar/task/rec-daily-sync-2026-08-18/status",
+        json={"status": "completed"},
+    )
+    res = client.delete("/api/calendar/task/rec-daily-sync-2026-08-18")
+    assert res.status_code == 200
+    # No date param on a rec- id: the embedded date scopes it.
+    assert res.json()["skip_date"] == "2026-08-18"
+    day = client.get("/api/calendar/day?date=2026-08-18").json()
+    assert not any("daily-sync" in t["id"] for t in day["tasks"])
+    day_next = client.get("/api/calendar/day?date=2026-08-19").json()
+    assert any("daily-sync" in t["id"] for t in day_next["tasks"])
+
+
+def test_note_roundtrip(temp_calendar_file):
+    """Optional free-text note persists through the markdown schema."""
+    create = client.post("/api/calendar/task", json={
+        "date": "2026-08-22",
+        "type": "reminder",
+        "title": "Note test",
+        "note": "See https://example.com/wire and www.example.org",
+    })
+    assert create.status_code == 200
+    task_id = create.json()["task"]["id"]
+
+    day = client.get("/api/calendar/day?date=2026-08-22").json()
+    task = next(t for t in day["tasks"] if t["id"] == task_id)
+    assert task["note"] == "See https://example.com/wire and www.example.org"
+
+    _fm, recurring, dated = calendar_tasks.parse_calendar_file()
+    stored = next(t for t in dated if t["id"] == task_id)
+    assert stored["note"].startswith("See https://")

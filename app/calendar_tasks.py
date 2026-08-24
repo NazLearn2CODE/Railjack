@@ -144,9 +144,11 @@ class TaskItem(BaseModel):
     title: str
     status: Literal["pending", "in_progress", "completed", "snoozed"] = "pending"
     tags: list[str] = Field(default_factory=list)
+    note: str | None = None
     target_repo: str | None = None
     prompt: str | None = None
     cron: str | None = None
+    skip_dates: list[str] = Field(default_factory=list)
     is_recurring: bool = False
 
 
@@ -156,6 +158,7 @@ class TaskCreateBody(BaseModel):
     title: str
     status: Literal["pending", "in_progress", "completed", "snoozed"] = "pending"
     tags: list[str] = Field(default_factory=list)
+    note: str | None = None
     target_repo: str | None = None
     prompt: str | None = None
     cron: str | None = None
@@ -209,6 +212,12 @@ def parse_calendar_file(path: Path | None = None) -> tuple[dict[str, Any], list[
                     if isinstance(item, dict) and "date" in item and item["date"] is not None:
                         item["date"] = str(item["date"])
                 if "recurring" in heading:
+                    # skip_dates only exists on recurring schedules — keep the
+                    # dated-task schema clean of empty fields.
+                    for item in parsed:
+                        if isinstance(item, dict):
+                            skips = item.get("skip_dates")
+                            item["skip_dates"] = [str(d) for d in skips] if skips else []
                     recurring_schedules = parsed
                 elif "dated" in heading or "task" in heading:
                     dated_tasks = parsed
@@ -227,6 +236,11 @@ def save_calendar_file(
     """Atomically writes back working-calendar-data.md."""
     p = path or get_data_path()
     p.parent.mkdir(parents=True, exist_ok=True)
+
+    # Keep the persisted schema clean: no empty skip_dates keys.
+    for r in recurring_schedules:
+        if not r.get("skip_dates"):
+            r.pop("skip_dates", None)
 
     frontmatter["updated"] = datetime.date.today().isoformat()
     lines = ["---"]
@@ -337,6 +351,11 @@ def matches_schedule(cron_str: str, d: datetime.date) -> bool:
     return False
 
 
+def _is_skipped(r: dict[str, Any], date_str: str) -> bool:
+    """True if this recurring occurrence was deleted for date_str only."""
+    return date_str in [str(d) for d in r.get("skip_dates") or []]
+
+
 @router.get("/month")
 def get_month_overview(year: int | None = None, month: int | None = None) -> dict[str, Any]:
     """Return task summary counts and status dots for each day in the given month."""
@@ -360,11 +379,13 @@ def get_month_overview(year: int | None = None, month: int | None = None) -> dic
         day_dated = [t for t in dated if t.get("date") == date_str]
         dated_ids = {t.get("id") for t in day_dated}
 
-        # Materialize recurring tasks (excluding ones already stored in dated for this day)
+        # Materialize recurring tasks (excluding ones already stored in dated for this day,
+        # and occurrences deleted for this date only via skip_dates)
         day_recurring = [
             r for r in recurring
             if r.get("cron")
             and matches_schedule(str(r["cron"]), cur_date)
+            and not _is_skipped(r, date_str)
             and f"rec-{r.get('id')}-{date_str}" not in dated_ids
             and r.get("id") not in dated_ids
         ]
@@ -433,6 +454,8 @@ def get_day_tasks(date: str | None = None) -> dict[str, Any]:
         rid = f"rec-{r.get('id')}-{target_str}"
         if rid in existing_ids or r.get("id") in existing_ids:
             continue
+        if _is_skipped(r, target_str):
+            continue
         if r.get("cron") and matches_schedule(str(r["cron"]), target_date):
             item = dict(r)
             item["id"] = rid
@@ -468,6 +491,8 @@ def create_task(body: TaskCreateBody) -> dict[str, Any]:
             "cron": body.cron,
             "tags": body.tags,
         }
+        if body.note:
+            item["note"] = body.note
         if body.target_repo:
             item["target_repo"] = body.target_repo
         if body.prompt:
@@ -484,6 +509,8 @@ def create_task(body: TaskCreateBody) -> dict[str, Any]:
             "status": body.status,
             "tags": body.tags,
         }
+        if body.note:
+            item["note"] = body.note
         if body.target_repo:
             item["target_repo"] = body.target_repo
         if body.prompt:
@@ -532,15 +559,41 @@ def update_task_status(task_id: str, body: StatusUpdateBody) -> dict[str, Any]:
 
 
 @router.delete("/task/{task_id}")
-def delete_task(task_id: str) -> dict[str, Any]:
-    """Delete a task or recurring schedule."""
+def delete_task(task_id: str, date: str | None = None) -> dict[str, Any]:
+    """Delete a task or recurring schedule.
+
+    With `date` (YYYY-MM-DD) on a recurring entry: occurrence-scoped — the date
+    is appended to skip_dates, other occurrences survive. Without `date`: the
+    whole schedule/task is removed as before.
+    """
     fm, recurring, dated = parse_calendar_file()
+
+    # A materialized recurring instance arrives as rec-<orig_id>-<YYYY-MM-DD>
+    orig_id = task_id
+    m = re.match(r"^rec-(.+)-(\d{4}-\d{2}-\d{2})$", task_id)
+    if m:
+        orig_id = m.group(1)
+        date = date or m.group(2)
+
+    if date:
+        date = str(date)
+        # Drop any dated override for this instance, then skip the occurrence.
+        dated = [t for t in dated if t.get("id") != task_id]
+        target = next((r for r in recurring if r.get("id") == orig_id), None)
+        if target is None:
+            raise HTTPException(status_code=404, detail=f"Recurring task {orig_id} not found")
+        skips = [str(d) for d in target.get("skip_dates") or []]
+        if date not in skips:
+            skips.append(date)
+        target["skip_dates"] = skips
+        save_calendar_file(fm, recurring, dated)
+        return {"status": "ok", "deleted_id": task_id, "skip_date": date, "sync": vault_sync()}
 
     orig_len_dated = len(dated)
     orig_len_rec = len(recurring)
 
     dated = [t for t in dated if t.get("id") != task_id]
-    recurring = [r for r in recurring if r.get("id") != task_id]
+    recurring = [r for r in recurring if r.get("id") != orig_id]
 
     if len(dated) == orig_len_dated and len(recurring) == orig_len_rec:
         raise HTTPException(status_code=404, detail=f"Task {task_id} not found")

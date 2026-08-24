@@ -31,6 +31,44 @@ import {
   type CalendarSyncResult,
 } from "../api";
 
+// URL matcher for note linkify: http(s) and bare www. links.
+const _URL_SPLIT_RE = /(https?:\/\/[^\s]+|www\.[^\s]+)/g;
+const _URL_TEST_RE = /^(https?:\/\/[^\s]+|www\.[^\s]+)$/;
+
+/** Render free text as selectable content with clickable, XSS-safe links.
+ *  React escapes all non-JSX text, so link labels are effectively textContent. */
+function NoteText({ text }: { text: string }) {
+  const parts = text.split(_URL_SPLIT_RE);
+  return (
+    <p className="text-xs text-neutral-400 mt-1.5 whitespace-pre-wrap select-text cursor-text leading-relaxed">
+      {parts.map((part, i) =>
+        _URL_TEST_RE.test(part) ? (
+          <a
+            key={i}
+            href={part.startsWith("www.") ? `https://${part}` : part}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-sky-400 hover:text-sky-300 underline underline-offset-2"
+          >
+            {part}
+          </a>
+        ) : (
+          part
+        )
+      )}
+    </p>
+  );
+}
+
+// Cephalon 4-part envelope skeleton — prefilled (overwritable) for new prompt tasks.
+const PROMPT_ENVELOPE = `### GOAL: 
+### GROUND TRUTH: 
+### CONSTRAINTS: 
+### INSTRUCTIONS:
+1. 
+2. 
+3. `;
+
 export default function CalendarPanel() {
   const today = new Date();
   const [currentYear, setCurrentYear] = useState<number>(today.getFullYear());
@@ -51,6 +89,7 @@ export default function CalendarPanel() {
   const [addTitle, setAddTitle] = useState<string>("");
   const [addDate, setAddDate] = useState<string>(selectedDate);
   const [addTags, setAddTags] = useState<string>("");
+  const [addNote, setAddNote] = useState<string>("");
   const [addTargetRepo, setAddTargetRepo] = useState<string>("");
   const [addPrompt, setAddPrompt] = useState<string>("");
   const [addRecurrence, setAddRecurrence] = useState<string>("none");
@@ -140,16 +179,39 @@ export default function CalendarPanel() {
     }
   };
 
-  const handleDelete = async (taskId: string) => {
-    if (!confirm("Delete this calendar entry?")) return;
+  // Two-click arm for delete (native confirm() is blocked in the embedded
+  // cockpit iframe — same root cause as the Somatic SVC button fix).
+  const [armedDeleteId, setArmedDeleteId] = useState<string | null>(null);
+  // Inline scope choice for recurring instances: this-date-only vs delete-all.
+  const [deleteChoice, setDeleteChoice] = useState<{ taskId: string; date: string } | null>(null);
+
+  const armDelete = (taskId: string) => {
+    setArmedDeleteId(taskId);
+    setTimeout(() => setArmedDeleteId((cur) => (cur === taskId ? null : cur)), 3000);
+  };
+
+  const executeDelete = async (taskId: string, date?: string) => {
+    setArmedDeleteId(null);
+    setDeleteChoice(null);
     try {
-      const res = await deleteCalendarTask(taskId);
+      const res = await deleteCalendarTask(taskId, date);
       applySyncResult(res.sync);
       await loadDay(selectedDate);
       await loadMonth(currentYear, currentMonth);
     } catch (e) {
-      alert("Failed to delete task: " + (e instanceof Error ? e.message : String(e)));
+      setError("Failed to delete task: " + (e instanceof Error ? e.message : String(e)));
     }
+  };
+
+  const handleDeleteClick = (task: CalendarTask) => {
+    if (task.is_recurring) {
+      // Recurring: inline scope choice instead of a bare arm.
+      setArmedDeleteId(null);
+      setDeleteChoice({ taskId: task.id, date: selectedDate });
+      return;
+    }
+    if (armedDeleteId === task.id) executeDelete(task.id);
+    else armDelete(task.id);
   };
 
   const handleSync = async () => {
@@ -213,6 +275,7 @@ export default function CalendarPanel() {
         type: addType,
         title: addTitle.trim(),
         tags: tagsList,
+        note: addNote.trim() || undefined,
         target_repo: addTargetRepo.trim() || undefined,
         prompt: addPrompt.trim() || undefined,
         cron: cronValue,
@@ -221,6 +284,7 @@ export default function CalendarPanel() {
       setShowAddModal(false);
       setAddTitle("");
       setAddTags("");
+      setAddNote("");
       setAddPrompt("");
       setAddTargetRepo("");
       setAddRecurrence("none");
@@ -232,10 +296,6 @@ export default function CalendarPanel() {
     } finally {
       setSubmitting(false);
     }
-  };
-
-  const insertToken = (token: string) => {
-    setAddPrompt((prev) => prev + token);
   };
 
   // Vault-sync badge presentation
@@ -570,17 +630,59 @@ export default function CalendarPanel() {
                               ))}
                             </div>
                           )}
+
+                          {/* Free-text note — dimmed, selectable, links clickable */}
+                          {task.note && <NoteText text={task.note} />}
                         </div>
                       </div>
 
-                      {/* Delete */}
-                      <button
-                        onClick={() => handleDelete(task.id)}
-                        className="p-1.5 rounded hover:bg-red-500/20 text-neutral-500 hover:text-red-400 transition-colors"
-                        title="Delete task"
-                      >
-                        <Trash2 className="w-4 h-4" />
-                      </button>
+                      {/* Delete — two-click arm (native confirm() is blocked in
+                          the cockpit iframe); recurring shows a scope choice */}
+                      <div className="flex flex-col items-end gap-1.5">
+                        <button
+                          onClick={() => handleDeleteClick(task)}
+                          className={`p-1.5 rounded transition-colors ${
+                            armedDeleteId === task.id
+                              ? "bg-red-500/30 text-red-300 font-mono text-[10px] px-2"
+                              : "hover:bg-red-500/20 text-neutral-500 hover:text-red-400"
+                          }`}
+                          title="Delete task"
+                        >
+                          {armedDeleteId === task.id ? (
+                            "SURE?"
+                          ) : (
+                            <Trash2 className="w-4 h-4" />
+                          )}
+                        </button>
+
+                        {deleteChoice?.taskId === task.id && (
+                          <div className="flex flex-col items-end gap-1 p-1.5 rounded-lg bg-black/60 border border-red-500/30">
+                            <span className="text-[10px] font-mono text-neutral-400">
+                              Delete recurring:
+                            </span>
+                            <div className="flex items-center gap-1">
+                              <button
+                                onClick={() => executeDelete(task.id, selectedDate)}
+                                className="px-2 py-0.5 rounded bg-red-500/20 hover:bg-red-500/30 text-red-300 border border-red-500/40 text-[10px] font-mono"
+                              >
+                                This date only
+                              </button>
+                              <button
+                                onClick={() => executeDelete(task.id)}
+                                className="px-2 py-0.5 rounded bg-red-500/20 hover:bg-red-500/30 text-red-300 border border-red-500/40 text-[10px] font-mono"
+                              >
+                                All occurrences
+                              </button>
+                              <button
+                                onClick={() => setDeleteChoice(null)}
+                                className="px-2 py-0.5 rounded hover:bg-white/10 text-neutral-400 text-[10px] font-mono"
+                              >
+                                ✕
+                              </button>
+                            </div>
+                          </div>
+                        )}
+                      </div>
                     </div>
 
                     {/* Prompt Box & Action Row for Prompt Tasks */}
@@ -673,7 +775,11 @@ export default function CalendarPanel() {
                 </button>
                 <button
                   type="button"
-                  onClick={() => setAddType("prompt_task")}
+                  onClick={() => {
+                    setAddType("prompt_task");
+                    // Prefill the Cephalon 4-part envelope (overwritable).
+                    if (!addPrompt.trim()) setAddPrompt(PROMPT_ENVELOPE);
+                  }}
                   className={`py-1.5 rounded text-center transition-all ${
                     addType === "prompt_task"
                       ? "bg-violet-500/20 text-violet-300 font-bold border border-violet-500/40"
@@ -759,31 +865,31 @@ export default function CalendarPanel() {
                 )}
               </div>
 
-              {/* Prompt Body & Helper Token Chips */}
+              {/* Note (reminders) */}
+              {addType === "reminder" && (
+                <div>
+                  <label className="block text-xs font-mono text-neutral-400 mb-1">
+                    Note (optional — supports clickable links)
+                  </label>
+                  <textarea
+                    rows={2}
+                    placeholder="Free-text note, e.g. https://example.com/issue or plain remarks"
+                    value={addNote}
+                    onChange={(e) => setAddNote(e.target.value)}
+                    className="w-full px-3 py-2 rounded-lg bg-black/50 border border-white/10 text-neutral-200 text-xs focus:outline-none focus:border-amber-400"
+                  />
+                </div>
+              )}
+
+              {/* Prompt Body — prefilled with the 4-part envelope skeleton */}
               {addType === "prompt_task" && (
                 <div className="space-y-1.5">
-                  <div className="flex items-center justify-between">
-                    <label className="text-xs font-mono text-neutral-400">
-                      Prompt Template (Harness-Agnostic Envelope)
-                    </label>
-                    <div className="flex items-center gap-1">
-                      {["{{TODAY}}", "{{MONTH_NAME}}", "{{YEAR}}", "{{TARGET_REPO}}"].map(
-                        (tok) => (
-                          <button
-                            key={tok}
-                            type="button"
-                            onClick={() => insertToken(tok)}
-                            className="text-[10px] px-1.5 py-0.5 rounded bg-white/5 hover:bg-white/10 text-amber-300 font-mono border border-white/10"
-                          >
-                            + {tok}
-                          </button>
-                        )
-                      )}
-                    </div>
-                  </div>
+                  <label className="text-xs font-mono text-neutral-400">
+                    Prompt Template (Harness-Agnostic Envelope)
+                  </label>
                   <textarea
-                    rows={6}
-                    placeholder={`### GOAL: Generate NEWSLINE report for {{MONTH_NAME}} {{YEAR}}\n### GROUND TRUTH: app/newsline_reports.py\n### CONSTRAINTS: Ponytail rules apply; verify by running.\n### INSTRUCTIONS:\n1. Execute step 1.`}
+                    rows={8}
+                    placeholder={PROMPT_ENVELOPE}
                     value={addPrompt}
                     onChange={(e) => setAddPrompt(e.target.value)}
                     className="w-full px-3 py-2 rounded-lg bg-black/50 border border-white/10 text-neutral-200 font-mono text-xs focus:outline-none focus:border-amber-400"

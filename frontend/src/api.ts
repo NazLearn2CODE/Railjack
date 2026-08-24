@@ -75,6 +75,7 @@ export interface CalendarTask {
   title: string;
   status: "pending" | "in_progress" | "completed" | "snoozed";
   tags?: string[];
+  note?: string;
   target_repo?: string;
   prompt?: string;
   interpolated_prompt?: string;
@@ -115,6 +116,7 @@ export async function createCalendarTask(body: {
   title: string;
   status?: string;
   tags?: string[];
+  note?: string;
   target_repo?: string;
   prompt?: string;
   cron?: string;
@@ -137,8 +139,12 @@ export async function updateCalendarTaskStatus(
   });
 }
 
-export async function deleteCalendarTask(taskId: string): Promise<{ status: string; deleted_id: string; sync?: CalendarSyncResult }> {
-  return fetchJSON(`/api/calendar/task/${taskId}`, {
+export async function deleteCalendarTask(
+  taskId: string,
+  date?: string
+): Promise<{ status: string; deleted_id: string; skip_date?: string; sync?: CalendarSyncResult }> {
+  const query = date ? `?date=${date}` : "";
+  return fetchJSON(`/api/calendar/task/${taskId}${query}`, {
     method: "DELETE",
   });
 }
