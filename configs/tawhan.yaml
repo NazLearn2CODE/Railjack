@@ -160,9 +160,16 @@ buttons:
 
 catalog:
   mcp_insert_template: "use the {name} MCP to "
+  # Skills menu groups — by USAGE/FUNCTION (Naz, 2026-08-23 reorganization of the
+  # old flat F5 bucket). First-match-wins; F5 skills land in their function
+  # group. Regexes stay on the unprefixed Claude-Code names — this menu scans
+  # ~/.claude/skills; the dsh- prefix lives only in the DSH catalog ~/.dsh/skills.
   groups:
-    - { name: F5, match: "^f5-" }
-    - { name: MEDIA, match: "comfyui|ffmpeg|davinci|youtube|story|channel|case|resolve" }
-    - { name: RESEARCH, match: "reach|search|reader|zread|newstank|notebooklm|radar" }
-    - { name: AGENTS, match: "agent|subagent|delegate|llm" }
+    - { name: AGENTS,    match: "agents-and-code|agent-x|local-subagents|local-llm-eval|context-router|stop-digging|repo-maintenance|agy-fallback" }
+    - { name: BUILD,     match: "^adw-|project-bootstrap|connector-scaffold|vibe-check|ship-android|drift-doctor" }
+    - { name: RESEARCH,  match: "agent-reach|newstank|notebooklm|story-scout|events-scout|case-radar|channel-radar|youtube-search" }
+    - { name: MEDIA,     match: "comfyui|ffmpeg|news-bgm|vocal-music|davinci|resolve" }
+    - { name: NEWSROOM,  match: "newsroom|radio-news|thai-script|unslop" }
+    - { name: WRITING,   match: "writing-for-agents|wait-what|grill-me" }
+    - { name: UTILITIES, match: "rate-ck|playwright" }
     - { name: WORKSPACE, match: "google|obsidian|workspace" }
