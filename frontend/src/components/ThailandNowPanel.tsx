@@ -3059,7 +3059,7 @@ function StoryScoutTab() {
   const scoutViaClaude = useCallback(async () => {
     const q = query.trim();
     if (!q) { setErr("type a topic first"); return; }
-    const cmd = `/f5-story-scout pitch "${q.replace(/["\n\r]/g, "'")}"`;   // no quotes/newlines: insert is type-only, <500 chars
+    const cmd = `/story-scout pitch "${q.replace(/["\n\r]/g, "'")}"`;   // no quotes/newlines: insert is type-only, <500 chars
     const r = await post<{ status: string }>("/api/terminal/insert", { text: cmd });
     if (!r.ok) { setErr(r.error || "couldn't reach the terminal — is ttyd/tmux up?"); return; }
     setLastScoutAt(Date.now());

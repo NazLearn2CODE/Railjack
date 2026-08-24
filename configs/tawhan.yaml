@@ -28,9 +28,9 @@ modules:
     health: { type: http, url: "http://127.0.0.1:8188/system_stats" }
     manage:
       type: command
-      start: ["bash", "/home/NAZ/.claude/skills/f5-comfyui-media/scripts/comfy.sh", "start"]
-      stop:  ["bash", "/home/NAZ/.claude/skills/f5-comfyui-media/scripts/comfy.sh", "stop"]
-      log:   ["bash", "/home/NAZ/.claude/skills/f5-comfyui-media/scripts/comfy.sh", "log"]
+      start: ["bash", "/home/NAZ/.claude/skills/comfyui-media/scripts/comfy.sh", "start"]
+      stop:  ["bash", "/home/NAZ/.claude/skills/comfyui-media/scripts/comfy.sh", "stop"]
+      log:   ["bash", "/home/NAZ/.claude/skills/comfyui-media/scripts/comfy.sh", "log"]
       start_timeout_s: 150
     options:
       checkout: "/var/home/NAZ/Coding Projects/ComfyUI"

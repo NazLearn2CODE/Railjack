@@ -7,7 +7,7 @@ Outputs go only to ``output_dir`` (created on demand), timestamped.
 
 Op builders return argv **lists** (never shell strings) — run with
 ``asyncio.create_subprocess_exec`` (never ``shell=True``, never sudo). They
-follow ``skills/f5-ffmpeg-video/references/recipes.md``; the recipe section is
+follow ``skills/ffmpeg-video/references/recipes.md``; the recipe section is
 cited in a comment per builder. Normalize (§0) is built into the multi-input
 ops (concat/xfade) where it is required, not a user-facing knob.
 
@@ -177,7 +177,7 @@ def _probe_one(p: Path) -> tuple[float, bool]:
 
 
 # ---------------------------------------------------------------- op builders
-# recipes.md sections (skill f5-ffmpeg-video): §M master block, §0 normalize,
+# recipes.md sections (skill ffmpeg-video): §M master block, §0 normalize,
 # §1 concat, §2 xfade offset formula, §3 lut3d, §8 DNxHR.
 
 FPS = "30000/1001"   # 29.97 — master timeline fps for §0 normalize

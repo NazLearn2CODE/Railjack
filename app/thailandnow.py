@@ -1857,7 +1857,7 @@ _SCOUT_HANDOFF = Path("/tmp/railjack-scout/latest.json")
 
 @router.get("/api/thailandnow/scout/terminal-report")
 async def scout_terminal_report():
-    """CONVERT — read the JSON the /f5-story-scout skill wrote to disk. Returns
+    """CONVERT — read the JSON the /story-scout skill wrote to disk. Returns
     {results, count, mtime}. 404 until the skill has written a file."""
     p = _SCOUT_HANDOFF
     if not p.exists():
@@ -2760,7 +2760,7 @@ _EVENTS_HANDOFF = Path("/tmp/railjack-events/latest.json")
 
 @router.get("/api/thailandnow/events/terminal-report")
 async def events_terminal_report():
-    """CONVERT — read the JSON the /f5-events-scout skill wrote to disk. Returns
+    """CONVERT — read the JSON the /events-scout skill wrote to disk. Returns
     {events, count, mtime} in the TnEvent card shape. 404 until the skill has
     written a file; 422 if the handoff isn't a valid JSON array."""
     p = _EVENTS_HANDOFF

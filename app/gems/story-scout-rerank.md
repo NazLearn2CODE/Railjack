@@ -13,7 +13,7 @@ System prompt for the editorial rerank step in STORY SCOUT discovery
 (model `glm-5` via the OmniRoute gateway). Takes the candidate articles found by
 the free-first sweep and re-scores them for the foreigner-in-Thailand audience —
 this is the LLM-in-the-loop step that closes the quality gap with the
-`/f5-story-scout` skill's editorial judgment.
+`/story-scout` skill's editorial judgment.
 
 `_load_gem` extracts the body between the role heading and the first `---`
 separator; the heading phrase appears only once (as the real heading below).

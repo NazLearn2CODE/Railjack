@@ -37,7 +37,7 @@ router = APIRouter()
 
 # ---------------------------------------------------------------- module options
 
-FETCH_MODEL = "/home/NAZ/.claude/skills/f5-comfyui-media/scripts/fetch_model.py"
+FETCH_MODEL = "/home/NAZ/.claude/skills/comfyui-media/scripts/fetch_model.py"
 # catalog/ subdir keeps this out of config.py's configs/*.yaml machine-config glob
 CATALOG_YAML = Path(__file__).resolve().parent.parent / "configs" / "catalog" / "comfyui.yaml"
 

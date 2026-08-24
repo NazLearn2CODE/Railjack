@@ -2,7 +2,7 @@
 #
 # All URLs HEAD-checked 200 on 2026-07-19 (Comfy-Org repackaged repos; note
 # Krea-2 keeps files at repo root, HunyuanVideo_1.5_repackaged uses split_files/
-# — see skills/f5-comfyui-media/references/model-install.md). size_gb from the
+# — see skills/comfyui-media/references/model-install.md). size_gb from the
 # HF API (fit math uses vram_gb, not size). Runtime fields (`installed`, `fit`)
 # are NOT here — the API computes them from the filesystem and options.vram_gb.
 entries:

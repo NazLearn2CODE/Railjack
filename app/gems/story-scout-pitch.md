@@ -75,7 +75,7 @@ Rules:
   failure the route degrades gracefully (no HTTP 500) — this prompt only runs on
   the happy path.
 - Editorial discovery filters (denylists, category tags, promo-exception) are NOT
-  in the gem; they live in the `/f5-story-scout` skill and a future Slice 2. This
+  in the gem; they live in the `/story-scout` skill and a future Slice 2. This
   gem only writes pitches from whatever article it is handed.
 - **Negative-framing rule (2026-08-23, home port of Somatic be3fb78):** if the
   article's angle is fear-framing — tourist-trap / myth-bust / warning pieces,
