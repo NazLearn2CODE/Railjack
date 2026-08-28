@@ -698,6 +698,8 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
   const [infoSuggesting, setInfoSuggesting] = useState(false);
   const [infoAnnotated, setInfoAnnotated] = useState("");
   const [converting, setConverting] = useState(false);
+  // Thai-name fact-check surfaced from CONVERT / rewrite (advisory, 2026-08-27)
+  const [nameNote, setNameNote] = useState<string | null>(null);
   const [copiedQueuePrompt, setCopiedQueuePrompt] = useState(false);
 
   // RADIO Document Generator state
@@ -1754,6 +1756,18 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
     }
   };
 
+  // Thai-name fact-check (advisory hook, 2026-08-27) → one-line note for Naz.
+  const namecheckNote = (
+    nc: { errors?: { thai: string }[]; warnings?: { kind: string; name?: string; detail?: string }[] } | undefined | null,
+  ): string | null => {
+    if (!nc) return null;
+    const lines = [
+      ...(nc.errors ?? []).map((e) => `bare Thai "${e.thai}"`),
+      ...(nc.warnings ?? []).map((w) => (w.name ? `${w.kind}: ${w.name}` : w.detail ?? "")),
+    ].filter(Boolean);
+    return lines.length ? lines.join(" · ") : null;
+  };
+
   // REWRITE: POST the Script-box text to the backend Rules-Gem pass (which
   // rides the OmniRoute gateway), then render the finished two-layer script in
   // the iframe. Inlined (not via `post`) because we need the response body.
@@ -1776,6 +1790,7 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
         const d = await res.json().catch(() => ({}));
         setRewritten(d.rewritten || "");
         setSeo(d.seo || "");
+        setNameNote(namecheckNote(d.namecheck));
       }
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : String(e));
@@ -1843,6 +1858,7 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
       if (!d.rewritten && d.errors?.length) setError(d.errors[0]);
       setRewritten(d.rewritten || "");
       setSeo(d.seo || "");
+      setNameNote(namecheckNote(d.namecheck));
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "convert failed");
     } finally {
@@ -4490,6 +4506,11 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
         </div>
       )}
 
+      {nameNote && (
+        <div className="mono px-2 text-xs" style={{ color: "var(--color-hazard)" }}>
+          ⚠ namecheck: {nameNote}
+        </div>
+      )}
       {error && (
         <div className="mono px-2 text-xs" style={{ color: "var(--color-critical)" }}>
           ✗ {error}

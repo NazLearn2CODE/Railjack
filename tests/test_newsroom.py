@@ -83,11 +83,11 @@ def test_rewrite_convert_missing_and_valid(tmp_path, monkeypatch):
         "seo": "## AI SEO BLOCK\nSummary.",
     }), encoding="utf-8")
     monkeypatch.setattr(newsroom, "_REWRITE_HANDOFF", handoff)
-    assert asyncio.run(rewrite_convert()) == {                         # valid → verbatim relay
-        "rewritten": "EN: Title\nTH: หัวข้อ\n\nBody with **name** and ~~date~~ markers.",
-        "seo": "## AI SEO BLOCK\nSummary.",
-        "errors": [],
-    }
+    out = asyncio.run(rewrite_convert())                       # valid → verbatim relay
+    assert out["rewritten"] == "EN: Title\nTH: หัวข้อ\n\nBody with **name** and ~~date~~ markers."
+    assert out["seo"] == "## AI SEO BLOCK\nSummary."
+    assert out["errors"] == []
+    assert out["namecheck"]["ok"] is True                      # namecheck rides along
 
 
 # ---------------------------------------------------------------- queue

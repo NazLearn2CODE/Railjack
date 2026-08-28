@@ -22,6 +22,7 @@ from pathlib import Path
 from fastapi import APIRouter, Body, HTTPException
 
 from . import zai
+from .name_check import check_rewritten
 
 router = APIRouter()
 
@@ -522,9 +523,10 @@ async def api_newsline_docgen_generate(body: dict = Body(...)):
 # ---------------------------------------------------------------- rewrite
 # Source article → two-layer broadcast script via the news-producer Rules Gem.
 # Rides app/zai.py (the OmniRoute gateway, NOT z.ai direct), so the pass keeps
-# working past a z.ai quota wall. Editorial hard rule: source-only, and never
-# translate a person's name or title out of the original Thai — the writers
-# render those themselves.
+# working past a z.ai quota wall. Editorial hard rule (2026-08-27): every Thai
+# name in the body rides inside the overlay — **English Name [ชื่อไทย]** — and
+# app.name_check enforces it post-hoc (search-before-name happens in the IDE
+# lane; the metered lane confirms from knowledge or romanizes RTGS-style).
 
 
 _THAI_RUN_RE = re.compile(r'[฀-๿]{3,}')
@@ -548,9 +550,16 @@ def _strip_fabricated_thai(body: str, source: str) -> str:
             s -= 1
             e += 1
         body = body[:s] + body[e:]
-    # Tidy: empty parens from multi-word Thai stripped separately, then orphaned brackets
+    # Tidy: empty parens from multi-word Thai stripped separately, then orphaned
+    # brackets — but SPARE bracket groups that contain Thai: the 2026-08-27
+    # overlay format is **English Name [ชื่อไทย]** and the brackets are load-
+    # bearing (app.name_check reads them as the only legal Thai zone).
     body = re.sub(r'\(\s*\)', '', body)
-    body = re.sub(r'\[([^\[\]()]+)\]', r'\1', body)
+    body = re.sub(
+        r'\[([^\[\]()]+)\]',
+        lambda m: m.group(0) if re.search(r'[\u0e00-\u0e7f]', m.group(1)) else m.group(1),
+        body,
+    )
     return body
 
 
@@ -631,19 +640,26 @@ async def api_rewrite(body: dict = Body(...)):
         "- Wrap every date, time, and relative-time expression in ~~…~~ markers "
         "(e.g. ~~July 15, 2026~~, ~~3:00 PM~~, ~~next month~~). These become underlined in the Doc.\n"
         "- **double-stars** and ~~tildes~~ are the ONLY markup allowed in `body`; no other markdown.\n\n"
-        "=== NAME OVERLAY RULE ===\n"
-        "For each person the SOURCE names, render their name as follows:\n"
-        "- If the SOURCE gives the name in ENGLISH: use that English name exactly as written, bolded "
-        "(**EnglishName**). Do NOT generate or invent Thai script for an English-source name.\n"
-        "- If the SOURCE gives the name in THAI and you can CONFIDENTLY confirm the official English "
-        "rendering: output **[OfficialEnglish(Thai)]** (e.g. **[Anutin Charnvirakul(อนุทิน ชาญวีรกูล)]**).\n"
-        "- If the SOURCE gives the name in THAI and you CANNOT confirm an official English name: "
-        "output **Thai name** as-is (bold-marked, NO transliteration, NO guessing — e.g. **นายกฯ**).\n"
-        "NEVER transliterate, romanize, or invent a Thai rendering for a name the source does not "
-        "contain in Thai. When in doubt, copy the source's name verbatim. Editors fix gaps.\n"
-        "NARROW CARVE-OUT: knowledge is allowed ONLY to supply a named person's official English "
-        "name-form. Never use knowledge to ADD names, dates, figures, events, or any other facts — "
-        "all other content is SOURCE-ONLY.\n\n"
+        "=== NAME OVERLAY RULE (persons AND places) ===\n"
+        "For every PERSON or PLACE the source names — persons, and places such as "
+        "sub-district, district, province, or river — render the FIRST mention as:\n"
+        "**English Name [ชื่อไทยเดิม]**\n"
+        "- The bracket holds the name EXACTLY as the source writes it (Thai only, no "
+        "title). Square brackets; bold wraps the whole form. Later mentions: English only.\n"
+        "- If the SOURCE gives the name in ENGLISH: use that English name exactly as "
+        "written, bolded (**EnglishName**). Do NOT generate Thai script for an "
+        "English-source name.\n"
+        "- If the SOURCE gives the name in THAI: confirm the official or established "
+        "English rendering from your knowledge and use it; when you cannot confirm one, "
+        "romanize conservatively (places: Royal Thai General System; persons: common "
+        "press style) and STILL bracket the source Thai. NEVER leave a Thai name bare "
+        "in the body — every Thai name rides inside the bracket.\n"
+        "- Names NEVER carry titles, ranks, or honorifics (no นาย/นาง/ตำแหน่ง) — the "
+        "sentence carries the role, the overlay carries only the name.\n"
+        "NEVER invent a Thai rendering for a name the source does not contain in Thai. "
+        "NARROW CARVE-OUT: knowledge is allowed ONLY to supply a named person's or "
+        "place's English name-form. Never use knowledge to ADD names, dates, figures, "
+        "events, or any other facts — all other content is SOURCE-ONLY.\n\n"
         "=== CRITICAL EDITORIAL RULE (overrides everything above) ===\n"
         "Use ONLY the information in the SOURCE ARTICLE below. Never add "
         "dates, ranks, titles, agencies, figures, locations, or any fact from your "
@@ -652,8 +668,8 @@ async def api_rewrite(body: dict = Body(...)):
         "promote, demote, or infer one (source says Prime Minister → not Deputy).\n"
         "- Do NOT invent a day of week, absolute date, or which agency acts unless "
         "the source states it. No date in source → write none.\n"
-        "- Do NOT guess transliterations. Official English names only (per NAME OVERLAY above), "
-        "else Thai-only fallback.\n\n"
+        "- Do NOT guess transliterations. Established English name-forms only (per NAME "
+        "OVERLAY above), else conservative romanization with the source Thai bracketed.\n\n"
         "=== SOURCE ARTICLE ===\n" + text
     )
     seo_system = (
@@ -681,7 +697,7 @@ async def api_rewrite(body: dict = Body(...)):
     # lines, then the marked-up body. Downstream (Script box, SEND TO NL/RADIO)
     # is unchanged — the JSON is only a more reliable transport for the pieces.
     rewritten = f"EN: {title}\nTH: {title_th}\n\n{body}" if (title or title_th) else body
-    return {"rewritten": rewritten, "seo": out_seo}
+    return {"rewritten": rewritten, "seo": out_seo, "namecheck": _safe_namecheck(rewritten)}
 
 
 # ------------------------------------------------------- infographics
@@ -782,12 +798,26 @@ async def api_infographic_suggest(body: dict = Body(...)):
 _REWRITE_HANDOFF = Path("/tmp/newsroom-rewrite/latest.json")
 
 
+def _safe_namecheck(text: str) -> dict:
+    """Thai-name fact-check that can never kill a good rewrite (advisory hook)."""
+    try:
+        return check_rewritten(text)
+    except Exception as exc:  # pragma: no cover — checker is pure + tested
+        return {
+            "errors": [],
+            "warnings": [{"kind": "checker", "name": "", "detail": str(exc)}],
+            "names": {"verified": [], "unverified": []},
+            "ok": True,
+        }
+
+
 @router.post("/api/newsroom/rewrite/convert")
 async def rewrite_convert() -> dict:
     """FREE IDE CONVERT — relay the Antigravity rewrite handoff (``_REWRITE_HANDOFF`` JSON) as
     ``{rewritten, seo}``, the SAME shape ``api_rewrite`` returns so the frontend path is identical.
     No LLM, no body. Soft-fails to HTTP 200 ``{rewritten:"", seo:"", errors:[...]}`` when the
-    handoff is missing/unparseable — points the user at 📋 IDE REWRITE first."""
+    handoff is missing/unparseable — points the user at 📋 IDE REWRITE first.
+    Relays a ``namecheck`` block too (Thai-name fact-check) — advisory, never blocking."""
     miss = {"rewritten": "", "seo": "", "errors": ["no IDE handoff file — run 📋 IDE REWRITE first"]}
     if not _REWRITE_HANDOFF.exists():
         return miss
@@ -795,10 +825,12 @@ async def rewrite_convert() -> dict:
         data = json.loads(_REWRITE_HANDOFF.read_text(encoding="utf-8"))
     except Exception:
         return miss
+    rewritten = (data.get("rewritten") or "").strip()
     return {
-        "rewritten": (data.get("rewritten") or "").strip(),
+        "rewritten": rewritten,
         "seo": (data.get("seo") or "").strip(),
         "errors": [],
+        "namecheck": _safe_namecheck(rewritten),
     }
 
 
