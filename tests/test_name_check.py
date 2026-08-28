@@ -112,3 +112,26 @@ def test_strip_fabricated_thai_keeps_new_overlay(tmp_path):
     out = newsroom._strip_fabricated_thai(body, src)
     assert "[อนุทิน ชาญวีรกูล]" in out, out  # overlay brackets survive
     assert "the council" in out and "[the council]" not in out  # orphan unwrap still works
+
+def test_legacy_bracket_verifies_thai_part(tmp_path):
+    """Legacy `[English(ไทย)]` shape: registry lookup uses the Thai part and the
+    readable form carries the parens."""
+    blob = "EN: t\nTH: ห\n\n**[Anutin Charnvirakul(อนุทิน ชาญวีรกูล)]** spoke."
+    out = check_rewritten(blob, _registry(tmp_path))
+    assert out["ok"], out["warnings"]
+    assert out["names"]["verified"] == ["Anutin Charnvirakul (อนุทิน ชาญวีรกูล)"]
+    assert out["names"]["unverified"] == []
+
+
+def test_legacy_bracket_english_mismatch_warns(tmp_path):
+    """Registry hit but the bracket's english spelling differs → warning."""
+    blob = "EN: t\nTH: ห\n\n**[Anutin Charnveerakul(อนุทิน ชาญวีรกูล)]** spoke."
+    out = check_rewritten(blob, _registry(tmp_path))
+    assert out["names"]["verified"] == ["Anutin Charnveerakul (อนุทิน ชาญวีรกูล)"]
+    assert any(w["kind"] == "english-mismatch" for w in out["warnings"])
+
+
+def test_legacy_bracket_unverified_shows_readable_form():
+    blob = "EN: t\nTH: ห\n\n**[Arada Fuangtong(อารดา เฟื่องทอง)]** spoke."
+    out = check_rewritten(blob)
+    assert out["names"]["unverified"] == ["Arada Fuangtong (อารดา เฟื่องทอง)"]

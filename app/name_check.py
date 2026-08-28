@@ -130,26 +130,45 @@ def check_rewritten(text: str, registry_dir: Path | None = None) -> dict:
     unverified: list[str] = []
     seen: set[str] = set()
     for a, b in allowed:
-        name = body[a + 1 : b - 1].strip()
-        if not name or name in seen:
+        raw = body[a + 1 : b - 1].strip()
+        if not raw or raw in seen:
             continue
-        seen.add(name)
-        if any(name.startswith(h) for h in _HONORIFICS):
+        seen.add(raw)
+        # Legacy overlay shape `English(Thai)` (2026-08-26 rule): verify the
+        # THAI part against the registry, surface the readable form, and guard
+        # the english spelling against the registry's verified rendering.
+        english, thai_name = raw, None
+        m = re.match(r"^([^()]+?)\s*\(([^()]+)\)$", raw)
+        if m and re.search(rf"[{THAI}]", m.group(2)):
+            english = m.group(1).strip()
+            thai_name = m.group(2).strip()
+        display = f"{english} ({thai_name})" if thai_name else raw
+        lookup = thai_name or raw
+        if lookup.startswith(_HONORIFICS):
             warnings.append(
                 {
                     "kind": "honorific",
-                    "name": name,
+                    "name": display,
                     "detail": "name overlay carries a title/rank — strip to the bare name",
                 }
             )
-        if name in reg:
-            verified.append(name)
+        if lookup in reg:
+            verified.append(display)
+            reg_en = reg[lookup]
+            if thai_name and reg_en and reg_en.strip().lower() != english.lower():
+                warnings.append(
+                    {
+                        "kind": "english-mismatch",
+                        "name": display,
+                        "detail": f'name-wiki has "{reg_en}" — bracket says "{english}"',
+                    }
+                )
         else:
-            unverified.append(name)
+            unverified.append(display)
             warnings.append(
                 {
                     "kind": "unverified",
-                    "name": name,
+                    "name": display,
                     "detail": "not in name-wiki yet — verify the English form, then register",
                 }
             )

@@ -3317,3 +3317,41 @@ def test_resolve_fb_link_all_forms():
     def _dead(u):
         raise RuntimeError("net down")
     assert nl_rep.resolve_fb_link("https://www.facebook.com/share/v/zzz/", fetch_fn=_dead) is None
+
+
+def test_render_overlays_legacy_and_bracket_shapes():
+    """Aired form is **English (ชื่อไทย)** — brackets are pipeline-only."""
+    from app.newsroom import _render_overlays
+
+    # legacy bracket-paren shapes (2026-08-26 rule) → bold parens
+    assert _render_overlays("**[Korawi Prissananantakul(กรวีร์ ปริศนานันทกุล)]**") == \
+        "**Korawi Prissananantakul (กรวีร์ ปริศนานันทกุล)**"
+    assert _render_overlays("[Korawi Prissananantakul(กรวีร์ ปริศนานันทกุล)]") == \
+        "**Korawi Prissananantakul (กรวีร์ ปริศนานันทกุล)**"
+    # current bracket shape (2026-08-27 rule) → parens, bold preserved
+    assert _render_overlays("**Korawi Prissananantakul [กรวีร์ ปริศนานันทกุล]** said") == \
+        "**Korawi Prissananantakul (กรวีร์ ปริศนานันทกุล)** said"
+    assert _render_overlays("Chulapan[จุลพันธ์] spoke.") == "Chulapan (จุลพันธ์) spoke."
+    # non-Thai brackets are prose, untouched
+    assert _render_overlays("see [the council] minute 2") == "see [the council] minute 2"
+    # idempotent — CONVERT-again can't double-apply
+    once = _render_overlays("**Korawi Prissananantakul [กรวีร์ ปริศนานันทกุล]** spoke.")
+    assert _render_overlays(once) == once
+
+
+def test_convert_renders_overlays_but_checks_canonical(tmp_path, monkeypatch):
+    """The relay serves parens; the checks still read the bracket canonical."""
+    import asyncio
+    handoff = tmp_path / "latest.json"
+    handoff.write_text(json.dumps({
+        "rewritten": "EN: T\nTH: หัวข้อ\n\n**Korawi Prissananantakul [กรวีร์ ปริศนานันทกุล]** spoke.",
+        "seo": "S",
+    }, ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setattr(newsroom, "_REWRITE_HANDOFF", handoff)
+    out = asyncio.run(newsroom.rewrite_convert())
+    assert "**Korawi Prissananantakul (กรวีร์ ปริศนานันทกุล)**" in out["rewritten"]
+    assert "[กรวีร์" not in out["rewritten"]
+    # namecheck ran on the canonical bracket form — name seen, flagged unverified
+    assert "กรวีร์ ปริศนานันทกุล" in out["namecheck"]["names"]["unverified"]
+    # stylecheck rides along, advisory
+    assert out["stylecheck"]["ok"] is True

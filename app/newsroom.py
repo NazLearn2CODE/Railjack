@@ -23,6 +23,7 @@ from fastapi import APIRouter, Body, HTTPException
 
 from . import zai
 from .name_check import check_rewritten
+from .style_check import check_style
 
 router = APIRouter()
 
@@ -693,11 +694,17 @@ async def api_rewrite(body: dict = Body(...)):
     # guard must not clobber (office guards the whole blob, but office returns it raw --
     # Railjack surfaces title_th as "TH:", so protect it). Strips Thai not in the source.
     body = _strip_fabricated_thai(body, text)
-    # Reassemble the sendable blob the panel already understands: EN/TH title
-    # lines, then the marked-up body. Downstream (Script box, SEND TO NL/RADIO)
-    # is unchanged — the JSON is only a more reliable transport for the pieces.
-    rewritten = f"EN: {title}\nTH: {title_th}\n\n{body}" if (title or title_th) else body
-    return {"rewritten": rewritten, "seo": out_seo, "namecheck": _safe_namecheck(rewritten)}
+    # Reassemble the CANONICAL blob (bracket overlays intact) — checks read
+    # this form; the SERVED form renders overlays to aired parens (below).
+    canonical = f"EN: {title}\nTH: {title_th}\n\n{body}" if (title or title_th) else body
+    namecheck = _safe_namecheck(canonical)
+    stylecheck = _safe_stylecheck(canonical)
+    return {
+        "rewritten": _render_overlays(canonical),
+        "seo": out_seo,
+        "namecheck": namecheck,
+        "stylecheck": stylecheck,
+    }
 
 
 # ------------------------------------------------------- infographics
@@ -811,13 +818,54 @@ def _safe_namecheck(text: str) -> dict:
         }
 
 
+def _safe_stylecheck(text: str) -> dict:
+    """Ben-voice / anti-slop check that can never kill a good rewrite (advisory)."""
+    try:
+        return check_style(text)
+    except Exception as exc:  # pragma: no cover — checker is pure + tested
+        return {
+            "errors": [],
+            "warnings": [{"kind": "checker", "name": "", "detail": str(exc)}],
+            "stats": {},
+            "ok": True,
+        }
+
+
+# Overlay render shapes, most specific first:
+#   legacy  **[English(Thai)]** / [English(Thai)]  →  **English (Thai)**
+#   current **English [Thai]**   / English [Thai]  →  English (Thai)
+# Thai-bearing only — non-Thai brackets are prose, not overlays.
+_OVERLAY_LEGACY_RE = re.compile(
+    r"\*{0,2}\[([^\[\]\n()]+)\(([^()\[\]\n]*[\u0e00-\u0e7f][^()\[\]\n]*)\)\]\*{0,2}"
+)
+_OVERLAY_BRACKET_RE = re.compile(r"\s*\[([^\[\]\n]*[\u0e00-\u0e7f][^\[\]\n]*)\]")
+
+
+def _render_overlays(text: str) -> str:
+    """Render Thai-name overlays to aired form: **English (ชื่อไทย)**.
+
+    Square brackets are the PIPELINE format — the machine-readable zone that
+    app.name_check treats as the only legal Thai and the strip guard spares.
+    They were never meant for the anchor's eyes: every script this hub serves
+    (rewrite, CONVERT → Script box → preview → Docs → radio) renders them as
+    parentheses. Checks always run on the canonical bracket form BEFORE this;
+    the transform is idempotent, so CONVERT-again can't double-apply.
+    """
+    text = _OVERLAY_LEGACY_RE.sub(
+        lambda m: f"**{m.group(1).strip()} ({m.group(2).strip()})**", text
+    )
+    text = _OVERLAY_BRACKET_RE.sub(lambda m: f" ({m.group(1).strip()})", text)
+    return text
+
+
 @router.post("/api/newsroom/rewrite/convert")
 async def rewrite_convert() -> dict:
     """FREE IDE CONVERT — relay the Antigravity rewrite handoff (``_REWRITE_HANDOFF`` JSON) as
     ``{rewritten, seo}``, the SAME shape ``api_rewrite`` returns so the frontend path is identical.
     No LLM, no body. Soft-fails to HTTP 200 ``{rewritten:"", seo:"", errors:[...]}`` when the
     handoff is missing/unparseable — points the user at 📋 IDE REWRITE first.
-    Relays a ``namecheck`` block too (Thai-name fact-check) — advisory, never blocking."""
+    Relays ``namecheck`` (Thai-name fact-check) and ``stylecheck`` (Ben-voice/anti-slop)
+    too — advisory, never blocking."""
     miss = {"rewritten": "", "seo": "", "errors": ["no IDE handoff file — run 📋 IDE REWRITE first"]}
     if not _REWRITE_HANDOFF.exists():
         return miss
@@ -826,11 +874,14 @@ async def rewrite_convert() -> dict:
     except Exception:
         return miss
     rewritten = (data.get("rewritten") or "").strip()
+    namecheck = _safe_namecheck(rewritten)
+    stylecheck = _safe_stylecheck(rewritten)
     return {
-        "rewritten": rewritten,
+        "rewritten": _render_overlays(rewritten),
         "seo": (data.get("seo") or "").strip(),
         "errors": [],
-        "namecheck": _safe_namecheck(rewritten),
+        "namecheck": namecheck,
+        "stylecheck": stylecheck,
     }
 
 
