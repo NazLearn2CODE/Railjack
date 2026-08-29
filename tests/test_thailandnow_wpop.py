@@ -609,7 +609,6 @@ def test_extract_google_doc_data_article_mode():
 def test_build_gutenberg_from_doc_ast_article_three_enters():
     """Articles get 3 empty-para spacers directly under each H2."""
     from app.thailandnow import _extract_google_doc_data, _build_gutenberg_from_doc_ast
-    import re
 
     doc_ast = {
         "body": {

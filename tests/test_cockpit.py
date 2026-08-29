@@ -6,7 +6,6 @@ no real tmux, no real ~/.claude.
 """
 
 import json
-from datetime import datetime, timedelta, timezone
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient

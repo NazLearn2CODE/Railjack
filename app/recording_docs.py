@@ -66,8 +66,8 @@ def _export_lines(script_doc_id: str) -> list[str]:
 
 def _anchor_name(script_doc_id: str) -> str:
     """The NL header's anchor chip current item, e.g. 'SANDRA H.'."""
-    for l in _export_lines(script_doc_id):
-        m = re.search(r"NEWSLINE [^\n]*?-- ANCHOR:\s*([^\n]+)", l)
+    for ln in _export_lines(script_doc_id):
+        m = re.search(r"NEWSLINE [^\n]*?-- ANCHOR:\s*([^\n]+)", ln)
         if m:
             return m.group(1).strip()
     return ""
@@ -77,8 +77,8 @@ def _eve_announcer(script_doc_id: str) -> str:
     """The EVE rundown's announcer chips (both sides of the '/') rendered as
     one line, e.g. 'ผปก. EVE / TikTok: @sandrahanutsaha'."""
     lines = _export_lines(script_doc_id)
-    for i, l in enumerate(lines):
-        if "BRIEF EVENING" in l:
+    for i, ln in enumerate(lines):
+        if "BRIEF EVENING" in ln:
             for j in range(i + 1, min(i + 8, len(lines))):
                 if "ผู้ประกาศ" in lines[j]:
                     for k in range(j + 1, min(j + 3, len(lines))):

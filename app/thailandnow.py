@@ -397,11 +397,11 @@ async def _trello_list_id(board_short: str, list_name: str) -> str:
     names are ALL-CAPS ('To draft (PAUL)') while the config is mixed-case."""
     lists = await _trello("GET", f"/boards/{board_short}/lists", {"fields": "name,id"})
     want = list_name.strip().lower()
-    for l in lists:
-        if l["name"].strip().lower() == want:
-            return l["id"]
+    for li in lists:
+        if li["name"].strip().lower() == want:
+            return li["id"]
     raise HTTPException(
-        400, f"no Trello list matching {list_name!r}; have {[l['name'] for l in lists]}"
+        400, f"no Trello list matching {list_name!r}; have {[li['name'] for li in lists]}"
     )
 
 
@@ -412,7 +412,7 @@ async def _trello_label_ids(board_short: str, names: list[str]) -> list[str]:
     if not names:
         return []
     labels = await _trello("GET", f"/boards/{board_short}/labels", {"fields": "name,id"})
-    by = {l["name"].strip().lower(): l["id"] for l in labels}
+    by = {li["name"].strip().lower(): li["id"] for li in labels}
     ids: list[str] = []
     missing: list[str] = []
     for n in names:
@@ -424,7 +424,7 @@ async def _trello_label_ids(board_short: str, names: list[str]) -> list[str]:
     if missing:
         raise HTTPException(
             400, f"labels not on board {board_short!r}: {missing}; "
-            f"have {[l['name'] for l in labels]}"
+            f"have {[li['name'] for li in labels]}"
         )
     return ids
 
@@ -1339,9 +1339,9 @@ def _extract_title(lines: list[str], non_blank: list[str]) -> str:
     first non-blank), strip Jina metadata prefix + markdown link/image syntax,
     drop bot-check/error pages (→ ""). Shared by _extract_news and scout_pitch."""
     title = ""
-    for l in lines:
-        if l.startswith("#"):
-            title = l.lstrip("#").strip()
+    for ln in lines:
+        if ln.startswith("#"):
+            title = ln.lstrip("#").strip()
             if title:
                 break
     if not title and non_blank:
@@ -1360,7 +1360,7 @@ def _extract_news(md: str, url: str) -> dict | None:
     if not md:
         return None
     lines = [line.strip() for line in md.split("\n")]
-    non_blank = [l for l in lines if l]
+    non_blank = [ln for ln in lines if ln]
     if not non_blank:
         return None
 
@@ -1369,30 +1369,30 @@ def _extract_news(md: str, url: str) -> dict | None:
         return None
 
     snippet = ""
-    for l in lines:
-        if not l:
+    for ln in lines:
+        if not ln:
             continue
-        if l.startswith("#") or l.startswith(">"):
+        if ln.startswith("#") or ln.startswith(">"):
             continue
-        if l.startswith("![") or ("![" in l and "](" in l):
+        if ln.startswith("![") or ("![" in ln and "](" in ln):
             continue
-        if l.lower().startswith(_JINA_META):
+        if ln.lower().startswith(_JINA_META):
             continue
-        if l == title or l == f"# {title}":
+        if ln == title or ln == f"# {title}":
             continue
-        snippet = l[:300]
+        snippet = ln[:300]
         break
 
     date = ""
-    for l in lines:  # Jina's "Published Time: <ISO>" is the reliable publish date
-        if l.lower().startswith("published time:"):
-            d = _parse_date(l.split(":", 1)[1])
+    for ln in lines:  # Jina's "Published Time: <ISO>" is the reliable publish date
+        if ln.lower().startswith("published time:"):
+            d = _parse_date(ln.split(":", 1)[1])
             if d:
                 date = d
                 break
     if not date:  # fallback: regex-scan the top of the content
-        for l in lines[:20]:
-            d = _parse_date(l)
+        for ln in lines[:20]:
+            d = _parse_date(ln)
             if d:
                 date = d
                 break
@@ -1663,8 +1663,8 @@ async def _scout_images_content(url: str) -> dict:
     tier1_raw = _parse_images(md)
     tier1 = [{"url": img.get("url", ""), "alt": img.get("alt", ""), "tier": 1} for img in tier1_raw]
 
-    lines = [l.strip() for l in md.split("\n")]
-    non_blank = [l for l in lines if l]
+    lines = [ln.strip() for ln in md.split("\n")]
+    non_blank = [ln for ln in lines if ln]
     title = _extract_title(lines, non_blank)
 
     digest_prompt = f"Title: {title}\nURL: {url}\n\nContent:\n{md[:6000]}"
@@ -1749,8 +1749,8 @@ async def scout_pitch(payload: dict = Body(default={})):
         raise HTTPException(400, "url is required")
 
     md = await _jina_read(url)
-    lines = [l.strip() for l in md.split("\n")]
-    non_blank = [l for l in lines if l]
+    lines = [ln.strip() for ln in md.split("\n")]
+    non_blank = [ln for ln in lines if ln]
     title = _extract_title(lines, non_blank)
 
     system = _load_gem(_scout_gem_path())
@@ -2421,12 +2421,12 @@ async def _flow_fireside_source(job: TnJob, seed: str | None, category: str | No
         hook_queries: list[str] = []
         # Simple heuristic: extract lines starting with "hook", "event", or title-like capitalized lines
         for line in answer.split("\n"):
-            l = line.strip().lstrip("-*•").strip()
-            llow = l.lower()
-            if (llow.startswith("hook") or llow.startswith("event") or llow.startswith("news")) and len(l) > 20:
-                hook_queries.append(l[:120])
-            elif len(l) > 20 and l[0].isupper() and not l.startswith("For") and not l.startswith("The topic"):
-                hook_queries.append(l[:100])
+            ln = line.strip().lstrip("-*•").strip()
+            lnlow = ln.lower()
+            if (lnlow.startswith("hook") or lnlow.startswith("event") or lnlow.startswith("news")) and len(ln) > 20:
+                hook_queries.append(ln[:120])
+            elif len(ln) > 20 and ln[0].isupper() and not ln.startswith("For") and not ln.startswith("The topic"):
+                hook_queries.append(ln[:100])
         hook_queries = hook_queries[:6]  # cap to avoid burn
 
         # Also add subject as baseline
@@ -2848,7 +2848,6 @@ async def _nlm_ensure_notebook() -> str:
 @router.get("/api/thailandnow/debug")
 async def debug_info() -> dict:
     """Debug endpoint to check module health."""
-    import traceback
     status: dict[str, str | bool] = {"module_loaded": True}
 
     # Test notebooklm CLI
@@ -2861,7 +2860,7 @@ async def debug_info() -> dict:
     # Test z.ai (if used)
     try:
         from .zai import zai_message
-        test = await zai_message("test", max_tokens=10, timeout=10)
+        await zai_message("test", max_tokens=10, timeout=10)
         status["zai"] = "ok"
     except Exception as e:
         status["zai"] = f"error: {e}"
@@ -4170,7 +4169,7 @@ def _seo_suggest(orphan_title: str, candidates: list[tuple[str, str]], n: int = 
         if ov > 0:
             scored.append((ov, link, title))
     scored.sort(key=lambda x: x[0], reverse=True)
-    return [{"link": l, "title": t} for _, l, t in scored[:n]]
+    return [{"link": lnk, "title": t} for _, lnk, t in scored[:n]]
 
 
 def _seo_img_base(url: str) -> str:
@@ -4394,7 +4393,7 @@ async def _flow_seo_health(job: "TnJob") -> None:
               for p in (posts + events + other_cpts) if p.get("link")]
     link_ids = {p.get("link", ""): p.get("id") for p in (posts + events + other_cpts)}
     for o in rep["orphans"]:
-        cands = [(l, t) for (l, t) in titles if l != o["link"]]
+        cands = [(lnk, t) for (lnk, t) in titles if lnk != o["link"]]
         o["suggested"] = _seo_suggest(o["title"], cands, n=3)
         for s in o["suggested"]:  # host id → anchor ANALYZE endpoint
             s["id"] = link_ids.get(s["link"])

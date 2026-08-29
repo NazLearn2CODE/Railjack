@@ -16,7 +16,8 @@ from app import thailandnow
 from app.thailandnow import _dedup_merge_events, convert_ide_events
 
 NOW = datetime.now()
-ISO = lambda dt: dt.strftime("%Y-%m-%d")
+def ISO(dt):
+    return dt.strftime("%Y-%m-%d")
 
 
 def test_dedup_merge_collapses_same_event_across_sources():

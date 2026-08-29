@@ -431,8 +431,10 @@ def _parse_scene_frames(stdout_json: str) -> list[float]:
     data = json.loads(stdout_json or "{}")
     out = []
     for fr in data.get("frames", []):
-        try: out.append(float(fr["pts_time"]))
-        except (KeyError, TypeError, ValueError): continue
+        try:
+            out.append(float(fr["pts_time"]))
+        except (KeyError, TypeError, ValueError):
+            continue
     return sorted(out)
 
 def _build_scenes(cut_times, duration, min_len) -> dict:
@@ -517,7 +519,8 @@ async def _run_capture(job: "Job", argv: list[str]) -> tuple[int, str, str]:
 async def analyze_scene_detect(inputs, p, job) -> dict:
     rc, stdout, stderr = await _run_capture(job, _scene_argv(inputs[0], p["threshold"]))
     if rc != 0:
-        for ln in stderr.splitlines()[-20:]: job.logs.append(ln)
+        for ln in stderr.splitlines()[-20:]:
+            job.logs.append(ln)
         raise RuntimeError(f"ffprobe exited {rc}")
     built = _build_scenes(_parse_scene_frames(stdout), p["durations"][0], p["min_scene_len"])
     job.logs.append(f"scene_detect: {len(built['cuts'])} cut(s), {len(built['scenes'])} scene(s)")
@@ -529,7 +532,8 @@ async def analyze_scene_detect(inputs, p, job) -> dict:
 async def analyze_audio_energy(inputs, p, job) -> dict:
     rc, _out, stderr = await _run_capture(job, _energy_argv(inputs[0]))
     if rc != 0:
-        for ln in stderr.splitlines()[-20:]: job.logs.append(ln)
+        for ln in stderr.splitlines()[-20:]:
+            job.logs.append(ln)
         raise RuntimeError(f"ffmpeg exited {rc}")
     samples = _parse_ebur128(stderr)
     if not samples:
@@ -744,20 +748,25 @@ async def _execute_analysis(job: Job, op: str, inputs: list[Path],
     sidecar instead of a rendered file; no incremental progress."""
     async with _LOCK:
         if job.cancel:
-            job.status = "cancelled"; return
+            job.status = "cancelled"
+            return
         job.status = "running"
         try:
             result = await ANALYZERS[op](inputs, params, job)
         except RuntimeError as e:
-            if job.cancel: job.status = "cancelled"
-            else: job.status, job.error = "error", str(e)
+            if job.cancel:
+                job.status = "cancelled"
+            else:
+                job.status, job.error = "error", str(e)
             return
         if job.cancel:
-            job.status = "cancelled"; return
+            job.status = "cancelled"
+            return
         try:
             out.write_text(json.dumps(result, indent=2))
         except OSError as e:
-            job.logs.append(f"sidecar write failed: {e}"); job.output_path = None
+            job.logs.append(f"sidecar write failed: {e}")
+            job.output_path = None
         # inline copy capped so the 1s poll doesn't ship megabytes (sidecar keeps all)
         slim = dict(result)
         prof = slim.get("energy_profile")
@@ -972,7 +981,8 @@ async def create_job(body: JobBody) -> dict:
         job = Job(id=jid, op=op, output_path=str(out))
         _JOBS[jid] = job
         task = asyncio.create_task(_execute_analysis(job, op, inputs, params, out))
-        _BG.add(task); task.add_done_callback(_BG.discard)
+        _BG.add(task)
+        task.add_done_callback(_BG.discard)
         return {"id": jid}
 
     argv = BUILDERS[op](inputs, out, params)

@@ -8,7 +8,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from app.factory.tracer import Tracer, get_tracer, set_tracer_db_path, trace_for_task
+from app.factory.tracer import get_tracer, set_tracer_db_path, trace_for_task
 from app.kanban import _watchdog_kill, router
 
 _test_app = FastAPI()

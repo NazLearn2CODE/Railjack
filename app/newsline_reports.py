@@ -19,6 +19,9 @@ _fatal into a clean HTTP 400.
 
 from __future__ import annotations
 
+import random
+import time
+
 import argparse
 import calendar
 import copy
@@ -112,9 +115,6 @@ def google_token() -> str:
     _TOKEN = resp["access_token"]
     return _TOKEN  # type: ignore[return-value]
 
-
-import random
-import time
 
 def _api(method: str, url: str, body=None, params=None, headers=None, raw_response: bool = False, max_retries: int = 5):
     """Drive REST helper (stdlib urllib): JSON in, JSON/bytes out with 429/5xx retry backoff."""
