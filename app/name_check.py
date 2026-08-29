@@ -90,10 +90,10 @@ def load_registry(registry_dir: Path | None = None) -> tuple[dict[str, str], str
         m = re.match(r"^---\n(.*?)\n---", head, re.S)
         if not m:
             continue
-        thai = re.search(rf'^thai:[ \t]*"?([^"\n]+)"?[ \t]*$', m.group(1), re.M)
+        thai = re.search(r'^thai:[ \t]*"?([^"\n]+)"?[ \t]*$', m.group(1), re.M)
         if not thai:
             continue
-        eng = re.search(rf'^english:[ \t]*"?([^"\n]+)"?[ \t]*$', m.group(1), re.M)
+        eng = re.search(r'^english:[ \t]*"?([^"\n]+)"?[ \t]*$', m.group(1), re.M)
         reg[thai.group(1).strip()] = eng.group(1).strip() if eng else ""
     return reg, None
 

@@ -1,5 +1,5 @@
 machine: tawhan
-hostnames: [bazzite]          # `hostname -s` on the Tawhan (home) machine
+hostnames: [bazzite, tawhan]   # hostname renamed bazzite→tawhan 2026-08-29; both kept for safety
 modules:
   - id: dsh
     title: DSH

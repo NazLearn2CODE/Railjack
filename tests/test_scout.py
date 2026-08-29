@@ -1,5 +1,7 @@
 import asyncio
 import json
+from datetime import datetime, timedelta, timezone
+
 from app import thailandnow
 
 
@@ -459,13 +461,17 @@ def test_parse_reddit_posts_real_shape():
 
 def test_parse_twitter_posts_opencli_shape_recency_and_short_drop():
     # opencli twitter tweets -f json: created_at / author as plain string
+    # dates computed relative to now — hardcoded dates rotted on 2026-08-29
+    fmt = "%a %b %d %H:%M:%S %z %Y"
+    recent = (datetime.now(timezone.utc) - timedelta(days=1)).strftime(fmt)
+    old = (datetime.now(timezone.utc) - timedelta(days=30)).strftime(fmt)
     rows = [
-        {"id": "111", "text": "x" * 60, "created_at": "Mon Aug 17 08:00:00 +0000 2026",
+        {"id": "111", "text": "x" * 60, "created_at": recent,
          "author": "ThaiPBSWorld"},
         {"id": "222", "text": "short",  # dropped: <40 chars
-         "created_at": "Mon Aug 17 08:00:00 +0000 2026", "author": "ThaiPBSWorld"},
+         "created_at": recent, "author": "ThaiPBSWorld"},
         {"id": "333", "text": "y" * 60,  # dropped: too old
-         "created_at": "Mon Jan 01 08:00:00 +0000 2026", "author": "ThaiPBSWorld"},
+         "created_at": old, "author": "ThaiPBSWorld"},
     ]
     arts = thailandnow._parse_twitter_posts(json.dumps(rows), "fallback", days=7)
     assert len(arts) == 1
