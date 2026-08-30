@@ -30,11 +30,12 @@ class _MockResponse:
 
 
 class _MockAsyncClient:
-    """Routes the calls _google_create_doc makes and records every request."""
+    """Routes the requests _google_transfer_ownership makes; records everything."""
 
     calls: list = []  # (method, url, json_body)
     grant_fail = False
     accept_fail = False
+    recipient_known = True  # recipient already has a permission (inherited from folder)
 
     def __init__(self, *a, **kw):
         pass
@@ -45,6 +46,16 @@ class _MockAsyncClient:
     async def __aexit__(self, *a):
         pass
 
+    async def get(self, url, headers=None, params=None):
+        type(self).calls.append(("GET", url, {}))
+        if url.endswith("/permissions"):
+            perms = [{"id": "PERM_PEND", "emailAddress": "thailandnow.info@gmail.com"}] \
+                if type(self).recipient_known else []
+            return _MockResponse(200, {"permissions": perms})
+        if url.endswith("/drive/v3/files"):
+            return _MockResponse(200, {"id": "DOC_X"})
+        return _MockResponse(200, {"webViewLink": "https://docs.google.com/document/d/DOC_X/edit"})
+
     async def post(self, url, headers=None, json=None, params=None, content=None):
         type(self).calls.append(("POST", url, json or {}))
         if url.endswith("/drive/v3/files"):
@@ -52,17 +63,21 @@ class _MockAsyncClient:
         if url.endswith("/permissions"):
             body = json or {}
             if body.get("pendingOwner"):
-                # the consent dance: writer + pendingOwner, NOT a direct owner grant
-                assert body["role"] == "writer" and body.get("emailAddress")
-                if type(self).grant_fail:
-                    return _MockResponse(403, {}, text="403 cannotShare")
-                return _MockResponse(200, {"id": "PERM_PEND", "role": "writer"})
-            return _MockResponse(200, {"id": "PERM_ANYONE"})
+                raise AssertionError("pendingOwner must be set via PATCH, create drops it")
+            if body.get("type") == "anyone":  # the link-share grant from _google_create_doc
+                return _MockResponse(200, {"id": "PERM_ANYONE"})
+            assert body.get("emailAddress")
+            return _MockResponse(200, {"id": "PERM_NEW"})
         raise AssertionError(f"unexpected POST {url}")
 
     async def patch(self, url, headers=None, json=None, params=None):
         type(self).calls.append(("PATCH", url, json or {}))
         body = json or {}
+        if body.get("pendingOwner"):
+            assert body["role"] == "writer"
+            if type(self).grant_fail:
+                return _MockResponse(403, {}, text="403 cannotShare")
+            return _MockResponse(200, {"id": "PERM_PEND", "role": "writer"})
         assert body.get("role") == "owner"
         assert (params or {}).get("transferOwnership") == "true"
         assert (headers or {}).get("Authorization") == "Bearer OWNER_TOK"
@@ -70,16 +85,13 @@ class _MockAsyncClient:
             return _MockResponse(400, {}, text="400 badAccept")
         return _MockResponse(200, {"id": "PERM_PEND", "role": "owner"})
 
-    async def get(self, url, headers=None, params=None):
-        type(self).calls.append(("GET", url, {}))
-        return _MockResponse(200, {"webViewLink": "https://docs.google.com/document/d/DOC_X/edit"})
-
 
 @pytest.fixture(autouse=True)
 def _patch_http(monkeypatch):
     _MockAsyncClient.calls = []
     _MockAsyncClient.grant_fail = False
     _MockAsyncClient.accept_fail = False
+    _MockAsyncClient.recipient_known = True
     monkeypatch.setattr(thailandnow.httpx, "AsyncClient", _MockAsyncClient)
 
 
@@ -93,12 +105,31 @@ async def test_transfer_autoaccept_ok(monkeypatch):
     )
     assert link == "https://docs.google.com/document/d/DOC_X/edit"
     assert status == "ok"
-    grant = [c for c in _MockAsyncClient.calls if c[1].endswith("/permissions") and c[2].get("pendingOwner")]
-    accept = [c for c in _MockAsyncClient.calls if c[0] == "PATCH"]
-    assert len(grant) == 1 and len(accept) == 1
-    assert grant[0][2] == {"role": "writer", "type": "user",
-                           "emailAddress": "thailandnow.info@gmail.com", "pendingOwner": True}
+    pending = [c for c in _MockAsyncClient.calls
+               if c[0] == "PATCH" and c[2].get("pendingOwner")]
+    accept = [c for c in _MockAsyncClient.calls
+              if c[0] == "PATCH" and c[2].get("role") == "owner"]
+    assert len(pending) == 1 and len(accept) == 1
+    assert pending[0][2] == {"role": "writer", "pendingOwner": True}
     assert "/permissions/PERM_PEND" in accept[0][1]
+
+
+@pytest.mark.anyio
+async def test_transfer_creates_permission_when_unknown(monkeypatch):
+    async def tok():
+        return None
+    monkeypatch.setattr(thailandnow, "_google_owner_token", tok)
+    _MockAsyncClient.recipient_known = False
+    link, status = await thailandnow._google_create_doc(
+        "tok", "FOLDER", "N", "", transfer_to="x@gmail.com"
+    )
+    assert link == "https://docs.google.com/document/d/DOC_X/edit"  # doc survives
+    assert status.startswith("pending")
+    created = [c for c in _MockAsyncClient.calls
+               if c[0] == "POST" and c[1].endswith("/permissions")
+               and c[2].get("type") == "user"]
+    assert len(created) == 1
+    assert created[0][2] == {"role": "writer", "type": "user", "emailAddress": "x@gmail.com"}
 
 
 @pytest.mark.anyio

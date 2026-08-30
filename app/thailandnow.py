@@ -357,36 +357,60 @@ async def _google_transfer_ownership(
     c: httpx.AsyncClient, hdr: dict, doc_id: str, email: str
 ) -> str:
     """Hand ownership of ``doc_id`` to ``email``. Consumer→consumer transfers are a
-    TWO-STEP consent dance (Drive API guide): (1) the current owner grants the
-    prospective owner's permission with ``pendingOwner=true`` — Google emails them;
-    (2) the prospective owner accepts by updating that permission with
-    ``role=owner`` + ``transferOwnership=true``. Step 2 runs automatically when a
-    token minted AS the receiving account exists (``_google_owner_token``); without
-    it the transfer stays "pending" on the email click. Returns ""/"ok" on success,
-    "pending …" while awaiting consent, "failed: …" on errors — never raises."""
+    TWO-STEP consent dance (Drive API guide): (1) the current owner marks the
+    recipient's permission ``pendingOwner: true`` — Google notifies them; (2) the
+    recipient accepts by updating that permission with ``role=owner`` +
+    ``transferOwnership=true``. GOTCHAS proven live: creating a permission with
+    ``pendingOwner: true`` is SILENTLY DROPPED (readback false) — it must be set
+    via PATCH on the existing permission; and the permission body uses v3's
+    ``emailAddress``, not v2's ``value``. Step 2 runs automatically when a token
+    minted AS the receiving account exists (``_google_owner_token``); without it
+    the transfer stays "pending" on the email click. Returns "ok" on success,
+    "pending …" while awaiting consent, "failed: …" on errors — never raises,
+    because a refused transfer must not lose the already-created doc/card pair."""
     try:
-        r = await c.post(
+        # locate the grantee's permission (fresh desk docs inherit it from the folder)
+        r = await c.get(
             f"https://www.googleapis.com/drive/v3/files/{doc_id}/permissions",
-            headers=hdr,
-            # notification doubles as the manual fallback if the auto-accept breaks
-            params={"sendNotificationEmail": "true"},
-            json={"role": "writer", "type": "user", "emailAddress": email,
-                  "pendingOwner": True},
+            headers=hdr, params={"fields": "permissions(id,emailAddress)", "pageSize": 100},
         )
         if r.status_code >= 400:
             return f"failed: {r.status_code} {r.text[:160]}"
-        perm_id = r.json().get("id")
+        perm = next((p for p in r.json().get("permissions", [])
+                     if (p.get("emailAddress") or "").lower() == email.lower()), None)
+        if perm is None:  # recipient had no access at all → plain grant first
+            r = await c.post(
+                f"https://www.googleapis.com/drive/v3/files/{doc_id}/permissions",
+                headers=hdr, params={"sendNotificationEmail": "true"},
+                json={"role": "writer", "type": "user", "emailAddress": email},
+            )
+            if r.status_code >= 400:
+                return f"failed: {r.status_code} {r.text[:160]}"
+            perm_id = r.json()["id"]
+        else:
+            perm_id = perm["id"]
+
+        r = await c.patch(
+            f"https://www.googleapis.com/drive/v3/files/{doc_id}/permissions/{perm_id}",
+            headers=hdr,
+            # notification doubles as the manual fallback if the auto-accept breaks
+            params={"sendNotificationEmail": "true"},
+            json={"role": "writer", "pendingOwner": True},
+        )
+        if r.status_code >= 400:
+            return f"failed: {r.status_code} {r.text[:160]}"
+
         owner_tok = await _google_owner_token()
         if not owner_tok:
             return f"pending (acceptance email sent to {email})"
-        r2 = await c.patch(
+        r = await c.patch(
             f"https://www.googleapis.com/drive/v3/files/{doc_id}/permissions/{perm_id}",
             headers={"Authorization": f"Bearer {owner_tok}", "Content-Type": "application/json"},
             params={"transferOwnership": "true"},
             json={"role": "owner"},
         )
-        if r2.status_code >= 400:
-            return f"pending (auto-accept failed: {r2.status_code} {r2.text[:120]})"
+        if r.status_code >= 400:
+            return f"pending (auto-accept failed: {r.status_code} {r.text[:120]})"
         return "ok"
     except Exception as exc:  # network hiccup etc. — report, don't abort
         return f"failed: {repr(exc)[:160]}"
