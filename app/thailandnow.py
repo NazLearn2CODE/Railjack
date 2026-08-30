@@ -3883,6 +3883,29 @@ _SEO_STOP = {  # generic + site words, stripped for orphan-suggestion token over
     "by", "from", "is", "are", "was", "were", "be", "as", "it", "its", "that",
     "this", "thailand", "thai", "now", "news", "how", "what", "when", "where",
 }
+# extended generic-prose words for RELATED anchor scoring only (never exact mode
+# or suggestions) — filler like "there are over" must not read as topic overlap
+_SEO_STOP_RELATED = _SEO_STOP | {
+    "there", "here", "over", "also", "too", "take", "takes", "taken", "took",
+    "know", "known", "knows", "through", "throughout", "one", "two", "three",
+    "four", "five", "six", "more", "most", "than", "then", "them", "they",
+    "their", "will", "would", "can", "could", "should", "may", "might", "must",
+    "has", "have", "had", "been", "being", "into", "about", "after", "before",
+    "during", "since", "while", "both", "each", "other", "others", "some",
+    "such", "only", "very", "much", "many", "among", "across", "between",
+    "within", "without", "along", "around", "because", "against", "another",
+    "any", "all", "just", "like", "says", "said", "say", "told", "but", "not",
+    "new", "first", "last", "next", "year", "years", "week", "weeks", "day",
+    "days", "make", "makes", "made", "get", "gets", "got", "still", "even",
+    "well", "back", "down", "out", "up", "which", "who", "whom", "whose",
+}
+
+
+def _seo_rel_tokens(text: str) -> set[str]:
+    """Content tokens for RELATED scoring — same shape as _seo_tokens but with
+    the extended generic-prose stoplist."""
+    return {w for w in re.findall(r"[a-z0-9]+", (text or "").lower())
+            if len(w) > 2 and w not in _SEO_STOP_RELATED}
 
 
 def _wp_creds() -> tuple[str, str, str]:
@@ -4722,7 +4745,7 @@ def _seo_related_candidates(orphan_title: str, extra_text: str | None, host_html
     matches _seo_anchor_candidates plus score/related. Pure-Thai topics have no
     latin topic tokens -> [] (exact mode still covers Thai via full-string
     match). ponytail: candidate scan capped at 5000 unique n-grams."""
-    topic = _seo_tokens(orphan_title) | _seo_tokens(extra_text or "")
+    topic = _seo_rel_tokens(orphan_title) | _seo_rel_tokens(extra_text or "")
     if not topic or not host_html:
         return []
     clean = " ".join(re.sub(r"<[^>]+>", " ", host_html).split())
@@ -4736,10 +4759,10 @@ def _seo_related_candidates(orphan_title: str, extra_text: str | None, host_html
                 continue
             seen.add(phrase)
             # anchors must not lead/trail with a function word ("when Songkran"
-            # reads badly; "Songkran arrives" or "border security" don't)
-            if words[i].lower() in _SEO_STOP or words[i + n - 1].lower() in _SEO_STOP:
+            # or "there are over" read badly; "border security" doesn't)
+            if words[i].lower() in _SEO_STOP_RELATED or words[i + n - 1].lower() in _SEO_STOP_RELATED:
                 continue
-            ptoks = _seo_tokens(phrase)
+            ptoks = _seo_rel_tokens(phrase)
             if not ptoks:
                 continue
             shared = ptoks & topic
