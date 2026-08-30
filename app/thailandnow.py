@@ -4418,12 +4418,32 @@ async def _flow_seo_health(job: "TnJob") -> None:
     # excerpt (standfirst prose) → extra anchor-phrase source for BULK LINK
     link_desc = {p.get("link", ""): (p.get("excerpt") or {}).get("rendered", "")
                  for p in (posts + events + other_cpts)}
+    # id → rendered content (tier classification scans it; insertion still
+    # re-fetches context=edit raw per host, so tiers are advisory only)
+    host_content = {p.get("id"): (p.get("content") or {}).get("rendered", "")
+                    for p in (posts + events + other_cpts)}
     for o in rep["orphans"]:
         cands = [(lnk, t) for (lnk, t) in titles if lnk != o["link"]]
         o["suggested"] = _seo_suggest(o["title"], cands, n=3)
         for s in o["suggested"]:  # host id → anchor ANALYZE endpoint
             s["id"] = link_ids.get(s["link"])
         o["description"] = link_desc.get(o["link"], "")
+        # tier: exact/related (auto-linkable) · vibe (suggestions, no anchor) · dead-end
+        host_htmls = [(s["id"], host_content.get(s["id"], ""))
+                      for s in o["suggested"] if s.get("id")]
+        has_exact = has_related = False
+        for _hid, _html in host_htmls:
+            if not _html:
+                continue
+            if not has_exact and _seo_anchor_candidates(o["title"], _html, cap=1,
+                                                        extra_text=o["description"]):
+                has_exact = True
+            if not has_related and _seo_related_candidates(o["title"], o["description"],
+                                                           _html, cap=1):
+                has_related = True
+            if has_exact:
+                break  # best tier reached — stop scanning hosts
+        o["tier"] = _seo_orphan_tier(len(host_htmls), has_exact, has_related)
     job.progress = 50
     # HTTP-verify external links/images, internal image candidates, AND internal
     # link candidates (Fix 1). Internal links use authed probe (Sucuri bypass).
@@ -5079,6 +5099,18 @@ def _seo_bulk_hosts(orphan_link: str, suggested: list[dict]) -> list[dict]:
         seen.add(hid)
         out.append({"id": hid, "title": s.get("title") or "", "link": s.get("link") or ""})
     return out
+
+
+def _seo_orphan_tier(n_usable_hosts: int, has_exact: bool, has_related: bool) -> str:
+    """Pure: automation tier for an orphan — "exact"/"related" = auto-linkable
+    via BULK LINK at that strength; "vibe" = usable suggested hosts exist but
+    no anchor was found in any of them (a link needs an invented reason);
+    "dead-end" = no usable suggested hosts at all."""
+    if has_exact:
+        return "exact"
+    if has_related:
+        return "related"
+    return "vibe" if n_usable_hosts else "dead-end"
 
 
 async def _seo_bulk_link_host(host: dict, orphan_title: str, orphan_link: str,
@@ -7186,6 +7218,9 @@ if __name__ == "__main__":
     assert rel1 and rel1[0]["phrase"].startswith("Songkran"), rel1  # rare-token rule, no stopword lead
     assert _seo_related_candidates("เที่ยวขอนแก่น", None, rel_html) == [], \
         "pure-Thai topic has no latin tokens → related stays silent"
+    # tier classifier
+    assert _seo_orphan_tier(3, True, True) == "exact" and _seo_orphan_tier(3, False, True) == "related"
+    assert _seo_orphan_tier(2, False, False) == "vibe" and _seo_orphan_tier(0, False, False) == "dead-end"
     # R1: month override
     assert _mon_for("202608") == "AUG"
     assert _mon_for("202613") is None and _mon_for("garbage") is None

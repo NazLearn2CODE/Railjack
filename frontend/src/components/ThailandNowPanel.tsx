@@ -166,7 +166,16 @@ interface FiresideEditNotesResp {
 // SEO HEALTH report (THAILAND NOW → SEO tab → HEALTH)
 interface HealthSource { from: string; from_id?: number; from_title?: string }
 interface HealthSuggestion { link: string; title: string; id?: number }
-interface HealthOrphan { id?: number; link: string; title: string; suggested: HealthSuggestion[]; description?: string }
+interface HealthOrphan { id?: number; link: string; title: string; suggested: HealthSuggestion[]; description?: string; tier?: string }
+
+/** Automation tier colors for orphan rows (exact/related auto-linkable, vibe =
+ *  suggestions exist but no anchor found, dead-end = no usable suggestions). */
+const TIER_COLORS: Record<string, string> = {
+  exact: "var(--color-go)",
+  related: "var(--color-signal)",
+  vibe: "var(--color-hazard)",
+  "dead-end": "var(--color-critical)",
+};
 interface HealthReport {
   post_count: number; page_count: number; event_count: number; other_cpt_count?: number; valid_paths: number;
   broken_internal_links: { from: string; from_id?: number; from_title: string; to: string; href?: string; reason?: string }[];
@@ -881,6 +890,22 @@ function HealthSubTab() {
                 {bulkAllResult.skipped ? ` · ${bulkAllResult.skipped} skipped (no usable hosts)` : ""} — re-scan to refresh the report.
               </div>
             )}
+            {(() => {
+              const tc: Record<string, number> = { exact: 0, related: 0, vibe: 0, "dead-end": 0 };
+              for (const o of r.orphans) if (o.tier && o.tier in tc) tc[o.tier]++;
+              return (
+                <div className="mono text-xs flex flex-wrap gap-2">
+                  {(["exact", "related", "vibe", "dead-end"] as const).map((t) => (
+                    <span key={t} style={{ color: TIER_COLORS[t] }}>
+                      {t === "dead-end" ? "DEAD END" : t.toUpperCase()} {tc[t]}
+                    </span>
+                  ))}
+                  <span style={{ color: "var(--color-muted)" }}>
+                    (exact/related = BULK LINK-ready · vibe = needs an invented link reason · dead end = no suggestions)
+                  </span>
+                </div>
+              );
+            })()}
             {r.orphans.map((o) => {
               const expanded = expandedOrphan === o.link;
               return (
@@ -890,6 +915,11 @@ function HealthSubTab() {
                       onClick={(e) => { e.preventDefault(); setExpandedOrphan(expanded ? null : o.link); }}>
                       {expanded ? "▾ " : "▸ "}{o.title || o.link}
                     </a>
+                    {o.tier && (
+                      <span className="mono text-xs ml-1" style={{ color: TIER_COLORS[o.tier] ?? "var(--color-muted)" }}>
+                        [{o.tier === "dead-end" ? "DEAD END" : o.tier.toUpperCase()}]
+                      </span>
+                    )}
                     <a href={o.link} target="_blank" rel="noreferrer" title="open article"
                       className="mono text-xs ml-1" style={{ color: "var(--color-muted)" }}>↗</a>
                     <WpEdit id={o.id} link={o.link} />
