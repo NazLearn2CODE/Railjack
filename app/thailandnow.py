@@ -5159,7 +5159,11 @@ async def _seo_vibe_anchor(orphan_title: str, extra_text: str | None, host_html:
         "- If nothing is suitable, reply with exactly: NONE\n"
         "Reply with ONLY the phrase (or NONE)."
     )
-    raw = await zai_message(prompt, max_tokens=60, model=model, timeout=60)
+    raw = ""
+    for _attempt in range(2):  # glm-5.2 thinking sometimes returns empty on short budgets
+        raw = await zai_message(prompt, max_tokens=1024, model=model, timeout=120)
+        if raw:
+            break
     phrase = (raw or "").strip().strip("\"'`").rstrip(".").strip()
     if not phrase or phrase.upper() == "NONE" or "\n" in phrase or len(phrase) < 4 or len(phrase) > 60:
         return None
