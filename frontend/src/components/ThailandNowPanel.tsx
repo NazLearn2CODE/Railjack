@@ -91,6 +91,7 @@ interface ProvisionItem {
   doc_url: string;
   card_name: string;
   card_url: string;
+  owner_transfer?: string; // "ok" | "off" | "failed: …"
 }
 interface SourcesResp {
   sources: { id: string; title: string; url: string; status: string }[];
@@ -1808,6 +1809,15 @@ function WritersTab({
                 <a className="mono" href={it.card_url} target="_blank" rel="noreferrer" style={{ color: "var(--color-phosphor-dim)" }}>
                   {it.card_name}
                 </a>
+                {it.owner_transfer && it.owner_transfer !== "off" && (() => {
+                  const color = it.owner_transfer === "ok" ? "var(--color-go)"
+                    : it.owner_transfer.startsWith("pending") ? "var(--color-hazard)"
+                    : "var(--color-critical)";
+                  const label = it.owner_transfer === "ok" ? "OWNER → thailandnow.info"
+                    : it.owner_transfer.startsWith("pending") ? "OWNER PENDING (accept email)"
+                    : `OWNER ${it.owner_transfer}`;
+                  return <span className="mono text-xs" style={{ color }}>{label}</span>;
+                })()}
               </div>
             ))}
           </div>
@@ -4154,6 +4164,15 @@ function ThickBox({ event, onBack }: { event: TnEvent; onBack: () => void }) {
             <a className="mono" href={created.card_url} target="_blank" rel="noreferrer" style={{ color: "var(--color-phosphor-dim)" }}>
               {created.card_name}
             </a>
+            {created.owner_transfer && created.owner_transfer !== "off" && (() => {
+              const color = created.owner_transfer === "ok" ? "var(--color-go)"
+                : created.owner_transfer.startsWith("pending") ? "var(--color-hazard)"
+                : "var(--color-critical)";
+              const label = created.owner_transfer === "ok" ? "OWNER → thailandnow.info"
+                : created.owner_transfer.startsWith("pending") ? "OWNER PENDING (accept email)"
+                : `OWNER ${created.owner_transfer}`;
+              return <span className="mono text-xs" style={{ color }}>{label}</span>;
+            })()}
           </div>
         )}
         {!created && !createErr && (

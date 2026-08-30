@@ -66,6 +66,8 @@ modules:
     panel: thailandnow
     options:
       google_token_path: ~/.config/railjack/google_token.json   # minted once: documents + drive scopes
+      transfer_doc_owner: thailandnow.info@gmail.com            # every desk doc handed to this account on creation (creator stays editor)
+      google_owner_token_path: ~/.config/railjack/google_token_owner.json   # minted once AS thailandnow.info (TN_TOKEN_PATH=... python -m app.tn_auth) — auto-accepts the transfer; missing → transfers stay pending on the acceptance email
       trello_board_short: VTMuHmEj                              # board short link (thailand-now-25-26)
       publicity_llm:
         model: glm-5      # /events/publicize; the call routes through app/zai.py (ZAI_API_KEY + z.ai Anthropic endpoint)

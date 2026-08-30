@@ -328,9 +328,78 @@ async def _google_token() -> str:
         return r.json()["access_token"]
 
 
-async def _google_create_doc(token: str, folder_id: str, name: str, body: str) -> str:
+def _google_owner_token_path() -> Path:
+    """The ACCEPT-side token (minted once AS the receiving account). Missing file
+    is normal pre-setup: transfers then stay pending on the acceptance email."""
+    return Path(os.path.expanduser(_opts().get(
+        "google_owner_token_path", "~/.config/railjack/google_token_owner.json")))
+
+
+async def _google_owner_token() -> str | None:
+    """Refresh token for the receiving account, or None when not minted yet."""
+    path = _google_owner_token_path()
+    if not path.exists():
+        return None
+    d = json.loads(path.read_text())
+    data = urllib.parse.urlencode({
+        "client_id": d["client_id"], "client_secret": d["client_secret"],
+        "refresh_token": d["refresh_token"], "grant_type": "refresh_token",
+    })
+    async with httpx.AsyncClient(timeout=20) as c:
+        r = await c.post(d["token_uri"], content=data,
+                         headers={"content-type": "application/x-www-form-urlencoded"})
+        if r.status_code != 200:
+            raise HTTPException(502, f"Owner token refresh failed: {r.text[:200]}")
+        return r.json()["access_token"]
+
+
+async def _google_transfer_ownership(
+    c: httpx.AsyncClient, hdr: dict, doc_id: str, email: str
+) -> str:
+    """Hand ownership of ``doc_id`` to ``email``. Consumer→consumer transfers are a
+    TWO-STEP consent dance (Drive API guide): (1) the current owner grants the
+    prospective owner's permission with ``pendingOwner=true`` — Google emails them;
+    (2) the prospective owner accepts by updating that permission with
+    ``role=owner`` + ``transferOwnership=true``. Step 2 runs automatically when a
+    token minted AS the receiving account exists (``_google_owner_token``); without
+    it the transfer stays "pending" on the email click. Returns ""/"ok" on success,
+    "pending …" while awaiting consent, "failed: …" on errors — never raises."""
+    try:
+        r = await c.post(
+            f"https://www.googleapis.com/drive/v3/files/{doc_id}/permissions",
+            headers=hdr,
+            # notification doubles as the manual fallback if the auto-accept breaks
+            params={"sendNotificationEmail": "true"},
+            json={"role": "writer", "type": "user", "emailAddress": email,
+                  "pendingOwner": True},
+        )
+        if r.status_code >= 400:
+            return f"failed: {r.status_code} {r.text[:160]}"
+        perm_id = r.json().get("id")
+        owner_tok = await _google_owner_token()
+        if not owner_tok:
+            return f"pending (acceptance email sent to {email})"
+        r2 = await c.patch(
+            f"https://www.googleapis.com/drive/v3/files/{doc_id}/permissions/{perm_id}",
+            headers={"Authorization": f"Bearer {owner_tok}", "Content-Type": "application/json"},
+            params={"transferOwnership": "true"},
+            json={"role": "owner"},
+        )
+        if r2.status_code >= 400:
+            return f"pending (auto-accept failed: {r2.status_code} {r2.text[:120]})"
+        return "ok"
+    except Exception as exc:  # network hiccup etc. — report, don't abort
+        return f"failed: {repr(exc)[:160]}"
+
+
+async def _google_create_doc(
+    token: str, folder_id: str, name: str, body: str, transfer_to: str | None = None
+) -> tuple[str, str]:
     """Create a Doc in ``folder_id``, make it link-shareable, optionally write
-    ``body`` (Articles/Blogs pass none → blank). Returns the Doc's webViewLink."""
+    ``body`` (Articles/Blogs pass none → blank), optionally hand ownership to
+    ``transfer_to``. Returns ``(webViewLink, transfer_status)`` where status is
+    "" (not requested), "ok", "pending …" (awaiting recipient consent), or
+    "failed: …"."""
     hdr = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     async with httpx.AsyncClient(timeout=30) as c:
         r = await c.post(
@@ -351,11 +420,17 @@ async def _google_create_doc(token: str, folder_id: str, name: str, body: str) -
                 headers=hdr,
                 json={"requests": [{"insertText": {"location": {"index": 1}, "text": body}}]},
             )
+        transfer = ""
+        if transfer_to:
+            # helper returns "" on success → surface that as "ok" so callers can
+            # tell a granted transfer from one never requested
+            transfer = await _google_transfer_ownership(c, hdr, doc_id, transfer_to) or "ok"
         meta = await c.get(
             f"https://www.googleapis.com/drive/v3/files/{doc_id}",
             headers=hdr, params={"fields": "webViewLink"},
         )
-        return meta.json().get("webViewLink") or f"https://docs.google.com/document/d/{doc_id}/edit"
+        link = meta.json().get("webViewLink") or f"https://docs.google.com/document/d/{doc_id}/edit"
+        return link, transfer
 
 
 # --- Trello (key+token as query params) ---
@@ -478,6 +553,9 @@ async def provision(payload: dict = Body(default={})):
     # keyed by `cur` (the card's actual sequence number), not the loop index `i`.
     due_weekdays = desk.get("due_weekdays")
     weekday_dates = _weekday_due_dates(yyyymm, due_weekdays, nn + count - 1) if due_weekdays else None
+    # Ownership handoff: every desk doc goes to this account right after creation
+    # (options.transfer_doc_owner; empty → off). Naz's account stays on as editor.
+    owner_email = (_opts().get("transfer_doc_owner") or "").strip()
 
     if not _google_token_path().exists():
         raise HTTPException(
@@ -492,7 +570,9 @@ async def provision(payload: dict = Body(default={})):
         cur = nn + i
         doc_name = _resolve_name(doc_name_tpl, yyyymm, mon, cur, title)
         card_name = _resolve_name(card_name_tpl, yyyymm, mon, cur, title)
-        doc_url = await _google_create_doc(token, desk["drive_folder_id"], doc_name, doc_body)
+        doc_url, owner_status = await _google_create_doc(
+            token, desk["drive_folder_id"], doc_name, doc_body, transfer_to=owner_email or None
+        )
         card_params = {"idList": list_id, "name": card_name, "desc": card_desc,
                        "idLabels": ",".join(label_ids)}
         if weekday_dates is not None:
@@ -509,7 +589,8 @@ async def provision(payload: dict = Body(default={})):
         await _trello("POST", f"/cards/{card['id']}/attachments",
                       body={"url": folder_url, "name": "Parent folder"})
         out.append({"nn": cur, "doc_name": doc_name, "doc_url": doc_url,
-                    "card_name": card_name, "card_url": card.get("url", "")})
+                    "card_name": card_name, "card_url": card.get("url", ""),
+                    "owner_transfer": (owner_status or "ok") if owner_email else "off"})
     return {"desk_id": desk_id, "count": count, "yyyymm": yyyymm, "items": out}
 
 
