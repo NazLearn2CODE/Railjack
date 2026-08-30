@@ -595,6 +595,7 @@ function HealthSubTab() {
   const [bulkAllConfirm, setBulkAllConfirm] = useState(false);
   const [bulkAllCap, setBulkAllCap] = useState(25);
   const [bulkAllRelated, setBulkAllRelated] = useState(false);
+  const [bulkAllVibe, setBulkAllVibe] = useState(false);
   const [bulkAllResult, setBulkAllResult] = useState<BulkLinkAllResult | null>(null);
   const bulkJob = jobs.find((j) => j.kind === "seo-bulk-link") ?? null;
   const bulkRunning = !!bulkJob && (bulkJob.status === "queued" || bulkJob.status === "running");
@@ -703,7 +704,8 @@ function HealthSubTab() {
       {
         orphan_title: orphan.title, orphan_link: orphan.link, dry_run: dryRun,
         orphan_description: orphan.description ?? "",
-        related: true, // per-orphan preview always shows RELATED fallbacks, tagged
+        related: true, // per-orphan preview always shows the full ladder, tagged
+        vibe: true, // VIBE picks are LLM-nominated + code-verified, shown tagged
         hosts: orphan.suggested.filter((s) => s.id).map((s) => ({ id: s.id!, title: s.title, link: s.link })),
       },
     );
@@ -743,6 +745,7 @@ function HealthSubTab() {
       })),
       cap: bulkAllCap,
       related: bulkAllRelated,
+      vibe: bulkAllVibe,
     });
     if (!res.ok) { setErr(res.error ?? "BULK LINK ALL failed to start"); return; }
     await refetchJobs();
@@ -872,6 +875,12 @@ function HealthSubTab() {
                   FALL BACK TO RELATED ANCHORS when exact title/excerpt phrases miss
                   (topical phrases from host content — review a per-orphan BULK LINK preview first)
                 </label>
+                <label className="mono text-xs flex items-center gap-2" style={{ color: "var(--color-hazard)" }}>
+                  <input type="checkbox" checked={bulkAllVibe}
+                    onChange={(e) => setBulkAllVibe(e.target.checked)} />
+                  VIBE: LLM-NOMINATED anchors for orphans with no anchor at all
+                  (glm/glm-5.2 via OmniRoute nominates; code still verifies the phrase verbatim — hallucinations never write)
+                </label>
                 <div className="flex gap-2">
                   <button className="btn btn--crit" onClick={() => void handleBulkLinkAll()}>CONFIRM — START JOB</button>
                   <button className="btn" onClick={() => setBulkAllConfirm(false)}>CANCEL</button>
@@ -963,10 +972,10 @@ function HealthSubTab() {
                             {!h.ok && <span style={{ color: "var(--color-critical)" }}> — error: {h.error}</span>}
                             {h.ok && h.matches === 0 && <span style={{ color: "var(--color-muted)" }}> — no valid anchor spot</span>}
                             {h.ok && h.matches === 1 && (
-                              <span style={{ color: "var(--color-go)" }}> — ✓ linked with "{h.phrase}"{h.mode === "related" ? " (related)" : ""}</span>
+                              <span style={{ color: "var(--color-go)" }}> — ✓ linked with "{h.phrase}"{h.mode === "related" ? " (related)" : h.mode === "vibe" ? " (vibe)" : ""}</span>
                             )}
                             {h.ok && h.matches == null && (
-                              <span> — {h.mode === "related" ? <b style={{ color: "var(--color-signal)" }}>RELATED:</b> : "best anchor:"} <b>{h.phrase}</b> ×{h.count}</span>
+                              <span> — {h.mode === "related" ? <b style={{ color: "var(--color-signal)" }}>RELATED:</b> : h.mode === "vibe" ? <b style={{ color: "var(--color-hazard)" }}>VIBE:</b> : "best anchor:"} <b>{h.phrase}</b> ×{h.count}</span>
                             )}
                           </div>
                           {h.ok && h.matches == null && h.snippet && (

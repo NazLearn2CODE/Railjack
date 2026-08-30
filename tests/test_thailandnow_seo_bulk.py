@@ -159,6 +159,52 @@ def test_bulk_link_related_fallback(client, fake_wp):
     assert f'<a href="{ORPHAN_LINK}">' in wp.puts[0][1]
 
 
+def test_bulk_link_vibe_llm_nominates_verified(client, fake_wp, monkeypatch):
+    """vibe=True: the LLM only NOMINATES — the phrase must still occur at a
+    valid region, otherwise the host noops. Hallucinations never write."""
+    wp = fake_wp({15: "<p>The festival drew huge crowds to Chiang Mai.</p>"})
+
+    async def good_llm(title, extra, html):
+        return "huge crowds"
+
+    async def hallucinating_llm(title, extra, html):
+        return "quantum llama stampede"
+
+    body = {
+        "orphan_title": "Some totally unrelated orphan headline",
+        "orphan_link": ORPHAN_LINK, "hosts": _hosts(15), "dry_run": False,
+    }
+    # default: no vibe → noop
+    r = client.post("/api/thailandnow/seo/bulk-link", json=body)
+    assert (r.json()["linked"], r.json()["noop"]) == (0, 1)
+    # hallucination → verification gate → noop, no write
+    monkeypatch.setattr(thailandnow, "_seo_vibe_anchor", hallucinating_llm)
+    r2 = client.post("/api/thailandnow/seo/bulk-link", json={**body, "related": True, "vibe": True})
+    d2 = r2.json()
+    assert (d2["linked"], d2["noop"]) == (0, 1), d2
+    assert wp.puts == [], "hallucinated phrase must never write"
+    # honest nomination → linked, mode=vibe
+    monkeypatch.setattr(thailandnow, "_seo_vibe_anchor", good_llm)
+    r3 = client.post("/api/thailandnow/seo/bulk-link", json={**body, "vibe": True})
+    d3 = r3.json()
+    assert d3["linked"] == 1 and d3["results"][0]["mode"] == "vibe", d3
+    assert f'<a href="{ORPHAN_LINK}">huge crowds</a>' in wp.puts[0][1]
+
+
+def test_bulk_link_vibe_llm_failure_is_contained(client, fake_wp, monkeypatch):
+    async def broken_llm(title, extra, html):
+        raise HTTPException(502, "omniroute gateway request failed")
+
+    fake_wp({16: "<p>The festival drew huge crowds to Chiang Mai.</p>"})
+    monkeypatch.setattr(thailandnow, "_seo_vibe_anchor", broken_llm)
+    r = client.post("/api/thailandnow/seo/bulk-link", json={
+        "orphan_title": "Some totally unrelated orphan headline",
+        "orphan_link": ORPHAN_LINK, "hosts": _hosts(16), "dry_run": False, "vibe": True,
+    })
+    d = r.json()
+    assert d["failed"] == 1 and d["linked"] == 0, d  # continue-on-error contains it
+
+
 def test_bulk_link_all_job_runs_and_reports(client, fake_wp):
     wp = fake_wp({11: HOST_WITH, 21: "<p>Read more about Orphan 2 here.</p>", 22: HOST_WITHOUT})
     orphans = [

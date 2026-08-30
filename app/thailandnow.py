@@ -5113,12 +5113,66 @@ def _seo_orphan_tier(n_usable_hosts: int, has_exact: bool, has_related: bool) ->
     return "vibe" if n_usable_hosts else "dead-end"
 
 
+def _seo_phrase_pick(phrase: str, host_html: str) -> dict | None:
+    """Pure: does ``phrase`` occur at a VALID region of host_html? Returns
+    {"phrase", "count", "snippet"} or None — the verification gate for
+    LLM-nominated (vibe) anchors: an LLM hallucination simply never picks."""
+    if not phrase or not host_html:
+        return None
+    pat = re.compile(re.escape(phrase), re.IGNORECASE)
+    count = 0
+    first = -1
+    for start, end in _seo_valid_regions(host_html):
+        for m in pat.finditer(host_html, start, end):
+            if first == -1:
+                first = m.start()
+            count += 1
+    if count == 0:
+        return None
+    snippet = host_html[max(0, first - 30):min(len(host_html), first + len(phrase) + 30)]
+    return {"phrase": phrase, "count": count, "snippet": snippet}
+
+
+async def _seo_vibe_anchor(orphan_title: str, extra_text: str | None, host_html: str) -> str | None:
+    """VIBE tier: ask the LLM (OmniRoute gateway, free-first) to nominate ONE
+    phrase that literally occurs in the host content and would serve as a
+    natural inline anchor to the orphan. Returns the phrase or None. The caller
+    still verifies it via _seo_phrase_pick / _seo_insert_link — the LLM can
+    only NOMINATE, never write. Model: opts seo_vibe_llm.model
+    (default glm/glm-5.2 — gemini flash ids are 403-blocked on this gateway key)."""
+    model = (_opts().get("seo_vibe_llm") or {}).get("model") or "glm/glm-5.2"
+    excerpt = " ".join(re.sub(r"<[^>]+>", " ", extra_text or "").split())[:300]
+    prompt = (
+        "You are an SEO editor placing one inline link.\n"
+        f"TARGET ARTICLE the link will point to: \"{orphan_title}\"\n"
+        + (f"Target article summary: {excerpt}\n" if excerpt else "")
+        + "HOST ARTICLE (the page that will contain the link):\n---\n"
+        + host_html[:6000]
+        + "\n---\n"
+        "Pick ONE phrase of 2-6 words that appears VERBATIM in the host article "
+        "above and could naturally serve as inline link anchor text pointing to "
+        "the target article.\n"
+        "Rules:\n"
+        "- The phrase must be an EXACT character-for-character substring of the host article.\n"
+        "- It must not start or end with punctuation.\n"
+        "- It must be a content phrase (no full sentences, no 'he said' filler).\n"
+        "- If nothing is suitable, reply with exactly: NONE\n"
+        "Reply with ONLY the phrase (or NONE)."
+    )
+    raw = await zai_message(prompt, max_tokens=60, model=model, timeout=60)
+    phrase = (raw or "").strip().strip("\"'`").rstrip(".").strip()
+    if not phrase or phrase.upper() == "NONE" or "\n" in phrase or len(phrase) < 4 or len(phrase) > 60:
+        return None
+    return phrase
+
+
 async def _seo_bulk_link_host(host: dict, orphan_title: str, orphan_link: str,
                               dry_run: bool, extra_text: str | None = None,
-                              related: bool = False) -> dict:
+                              related: bool = False, vibe: bool = False) -> dict:
     """One host: fetch raw content, auto-pick the best anchor — exact
     title/excerpt phrase first, else (related=True) a topical phrase via
-    _seo_related_candidates. dry_run reports it; apply wraps the first valid
+    _seo_related_candidates, else (vibe=True) an LLM-nominated phrase verified
+    against valid regions. dry_run reports it; apply wraps the first valid
     occurrence and PUTs. Raises on WP errors — continue-on-error lives with
     the caller."""
     out: dict = {"host_id": host["id"], "host_title": host["title"], "host_link": host["link"]}
@@ -5133,6 +5187,12 @@ async def _seo_bulk_link_host(host: dict, orphan_title: str, orphan_link: str,
     if not cands and related:
         cands = _seo_related_candidates(orphan_title, extra_text, raw_content, cap=1)
         out["mode"] = "related"
+    if not cands and vibe:
+        phrase = await _seo_vibe_anchor(orphan_title, extra_text, raw_content)
+        pick = _seo_phrase_pick(phrase, raw_content) if phrase else None
+        if pick:
+            cands = [pick]
+            out["mode"] = "vibe"
     out["ok"] = True
     if not cands:
         out["matches"] = 0  # no valid spot → noop (nothing to write)
@@ -5154,7 +5214,7 @@ async def _seo_bulk_link_host(host: dict, orphan_title: str, orphan_link: str,
 async def _seo_bulk_link_orphan(orphan_title: str, orphan_link: str,
                                 hosts: list[dict], dry_run: bool,
                                 extra_text: str | None = None,
-                                related: bool = False) -> dict:
+                                related: bool = False, vibe: bool = False) -> dict:
     """All hosts for one orphan: sequential (WP-friendly), continue-on-error.
     ``hosts`` is pre-normalized via _seo_bulk_hosts. matches: 1 written,
     0 noop, None dry-run-picked."""
@@ -5162,7 +5222,8 @@ async def _seo_bulk_link_orphan(orphan_title: str, orphan_link: str,
     for h in hosts:
         try:
             results.append(await _seo_bulk_link_host(h, orphan_title, orphan_link, dry_run,
-                                                     extra_text=extra_text, related=related))
+                                                     extra_text=extra_text, related=related,
+                                                     vibe=vibe))
         except HTTPException as e:
             results.append({"host_id": h["id"], "host_title": h["title"],
                             "host_link": h["link"], "ok": False, "error": str(e.detail)})
@@ -5187,6 +5248,7 @@ class SeoBulkLinkReq(BaseModel):
     orphan_description: str = ""  # orphan's excerpt — extra anchor-phrase source
     dry_run: bool = True
     related: bool = False  # fall back to topical anchors when exact phrases miss
+    vibe: bool = False     # last resort: LLM-nominated anchor, code-verified
 
 
 @router.post("/api/thailandnow/seo/bulk-link")
@@ -5202,13 +5264,15 @@ async def seo_bulk_link(req: SeoBulkLinkReq):
     if not hosts:
         raise HTTPException(400, "no usable suggested hosts (need resolvable ids; cannot link to self)")
     return await _seo_bulk_link_orphan(req.orphan_title, req.orphan_link, hosts, req.dry_run,
-                                       extra_text=req.orphan_description, related=req.related)
+                                       extra_text=req.orphan_description, related=req.related,
+                                       vibe=req.vibe)
 
 
 class SeoBulkLinkAllReq(BaseModel):
     orphans: list[dict]  # {title, link, description, suggested: [{id, title, link}]}
     cap: int = 25        # max orphans this run processes (safety valve; 0 = all)
     related: bool = False  # fall back to topical anchors when exact phrases miss
+    vibe: bool = False     # last resort: LLM-nominated anchor, code-verified
 
 
 @router.get("/api/thailandnow/seo/bulk-link/report/{jid}")
@@ -5248,7 +5312,7 @@ async def seo_bulk_link_all(req: SeoBulkLinkAllReq):
             try:
                 res = await _seo_bulk_link_orphan(o.get("title", ""), o["link"], hosts, False,
                                                   extra_text=o.get("description") or "",
-                                                  related=req.related)
+                                                  related=req.related, vibe=req.vibe)
             except Exception as e:  # noqa: BLE001 — one bad orphan never kills the run
                 results.append({"orphan_link": o["link"], "error": str(e) or e.__class__.__name__})
                 continue
