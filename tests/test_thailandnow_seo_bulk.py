@@ -140,7 +140,7 @@ def test_bulk_link_description_phrase_links_when_title_misses(client, fake_wp):
 def test_bulk_link_related_fallback(client, fake_wp):
     """related=True: a host sharing NO verbatim title/excerpt phrase but
     topical words gets a related anchor; default (False) stays noop."""
-    wp = fake_wp({14: "<p>Border security cooperation deepened this year.</p>"})
+    wp = fake_wp({14: "<p>Myanmar cooperation deepened this year.</p>"})
     body = {
         "orphan_title": "Myanmar border talks resume",
         "orphan_link": ORPHAN_LINK,
@@ -155,7 +155,7 @@ def test_bulk_link_related_fallback(client, fake_wp):
     d2 = r2.json()
     assert d2["linked"] == 1, d2
     linked = d2["results"][0]
-    assert linked["mode"] == "related" and linked["phrase"].lower().startswith("border security"), linked
+    assert linked["mode"] == "related" and linked["phrase"] == "Myanmar cooperation", linked
     assert f'<a href="{ORPHAN_LINK}">' in wp.puts[0][1]
 
 

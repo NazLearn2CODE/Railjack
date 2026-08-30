@@ -4738,7 +4738,7 @@ def _seo_related_candidates(orphan_title: str, extra_text: str | None, host_html
                             cap: int = 1) -> list[dict]:
     """Pure: host phrases topically RELATED to the orphan (token overlap with its
     title+excerpt) for hosts where no verbatim title/excerpt phrase occurs.
-    Eligibility: >=2 shared content tokens, or one shared token >=5 chars with a
+    Eligibility: >=2 shared content tokens, or one shared token >=7 chars with a
     <=3-word phrase (rare-word anchors like "Songkran"). Ranks by (overlap desc,
     shorter phrase, first position), then verifies each nominee occurs at a valid
     region in the raw HTML (same doctrine as exact candidates). Output shape
@@ -4754,7 +4754,11 @@ def _seo_related_candidates(orphan_title: str, extra_text: str | None, host_html
     scored: list[tuple[float, int, int, str]] = []  # (-shared[-0.5 if 1gram], len, first_pos, phrase)
     for n in list(range(2, 5)) + [1]:  # 2..4-grams by rule; 1-grams only via rare rule
         for i in range(0, len(words) - n + 1):
-            phrase = " ".join(words[i:i + n])
+            # strip leading/trailing punctuation so anchors never wrap a comma
+            # or em-dash ("clean energy," → "clean energy")
+            phrase = " ".join(words[i:i + n]).strip(" \t,;:.!?—–\"'()[]…")
+            if not phrase or len(phrase.split()) != n:
+                continue  # shrank to fewer words (edge phrase was punctuation)
             if phrase in seen or len(seen) >= 5000:
                 continue
             seen.add(phrase)
@@ -4767,7 +4771,7 @@ def _seo_related_candidates(orphan_title: str, extra_text: str | None, host_html
                 continue
             shared = ptoks & topic
             if len(shared) < 2 and not (
-                len(shared) == 1 and max(len(t) for t in shared) >= 5 and n <= 3
+                len(shared) == 1 and max(len(t) for t in shared) >= 7 and n <= 3
             ):
                 continue
             # 1-word candidates rank below any multi-word phrase with the same
