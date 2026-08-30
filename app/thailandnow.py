@@ -4759,6 +4759,8 @@ def _seo_related_candidates(orphan_title: str, extra_text: str | None, host_html
             phrase = " ".join(words[i:i + n]).strip(" \t,;:.!?—–\"'()[]…")
             if not phrase or len(phrase.split()) != n:
                 continue  # shrank to fewer words (edge phrase was punctuation)
+            if re.search(r"[,;:.!?…—]", phrase):
+                continue  # internal punctuation = crosses a sentence/clause boundary
             if phrase in seen or len(seen) >= 5000:
                 continue
             seen.add(phrase)
