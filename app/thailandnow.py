@@ -4933,6 +4933,164 @@ async def seo_apply_insert(req: SeoInsertReq):
     }
 
 
+# --- SEO bulk un-orphan (BULK LINK): auto-pick the best anchor phrase per
+# suggested host and insert inbound links in one gated action. Same doctrine as
+# the single flow — deterministic n-gram matcher, valid regions only, bare
+# <a href>, 1 insert/host. dry_run returns the chosen anchors without writing;
+# apply re-fetches + re-picks (safe if content drifted since the preview).
+
+def _seo_bulk_hosts(orphan_link: str, suggested: list[dict]) -> list[dict]:
+    """Pure: usable hosts for one orphan — resolvable id, never the orphan
+    itself, deduped by id. Entries are {id, title, link}; id-less ones (host
+    post the REST map couldn't resolve) are dropped."""
+    out: list[dict] = []
+    seen: set = set()
+    for s in suggested or []:
+        hid = s.get("id")
+        if not hid or hid in seen:
+            continue
+        if s.get("link") and s.get("link") == orphan_link:
+            continue
+        seen.add(hid)
+        out.append({"id": hid, "title": s.get("title") or "", "link": s.get("link") or ""})
+    return out
+
+
+async def _seo_bulk_link_host(host: dict, orphan_title: str, orphan_link: str,
+                              dry_run: bool) -> dict:
+    """One host: fetch raw content, auto-pick the best anchor (longest valid
+    title phrase — full title wins, else longest n-gram). dry_run reports it;
+    apply wraps the first valid occurrence and PUTs. Raises on WP errors —
+    continue-on-error lives with the caller."""
+    out: dict = {"host_id": host["id"], "host_title": host["title"], "host_link": host["link"]}
+    rb = await _wp_resolve_rest_base(host["id"])
+    post = await _wp("GET", f"/{rb}/{host['id']}", {"context": "edit"})
+    if not post or not isinstance(post, dict):
+        out.update(ok=False, error=f"host {host['id']} not found")
+        return out
+    raw_content = (post.get("content") or {}).get("raw", "")
+    cands = _seo_anchor_candidates(orphan_title, raw_content, cap=1)
+    out["ok"] = True
+    if not cands:
+        out["matches"] = 0  # no valid spot → noop (nothing to write)
+        return out
+    best = cands[0]
+    out.update(phrase=best["phrase"], count=best["count"], snippet=best["snippet"])
+    if dry_run:
+        out["matches"] = None  # null = picked but NOT written (dry run)
+        return out
+    new_html, matches, _, _ = _seo_insert_link(raw_content, best["phrase"], orphan_link)
+    if matches == 0:  # content drifted between candidates and insert (rare)
+        out["matches"] = 0
+        return out
+    await _wp("POST", f"/{rb}/{host['id']}", json_body={"content": new_html})
+    out["matches"] = 1
+    return out
+
+
+async def _seo_bulk_link_orphan(orphan_title: str, orphan_link: str,
+                                hosts: list[dict], dry_run: bool) -> dict:
+    """All hosts for one orphan: sequential (WP-friendly), continue-on-error.
+    ``hosts`` is pre-normalized via _seo_bulk_hosts. matches: 1 written,
+    0 noop, None dry-run-picked."""
+    results = []
+    for h in hosts:
+        try:
+            results.append(await _seo_bulk_link_host(h, orphan_title, orphan_link, dry_run))
+        except HTTPException as e:
+            results.append({"host_id": h["id"], "host_title": h["title"],
+                            "host_link": h["link"], "ok": False, "error": str(e.detail)})
+        except Exception as e:  # noqa: BLE001 — one bad host never kills the batch
+            results.append({"host_id": h["id"], "host_title": h["title"],
+                            "host_link": h["link"], "ok": False,
+                            "error": str(e) or e.__class__.__name__})
+    return {
+        "results": results,
+        "linked": len([r for r in results if r.get("ok") and r.get("matches") == 1]),
+        "noop": len([r for r in results if r.get("ok") and r.get("matches") == 0]),
+        "pending": len([r for r in results if r.get("ok") and r.get("matches") is None]),
+        "failed": len([r for r in results if not r.get("ok")]),
+        "total": len(results),
+    }
+
+
+class SeoBulkLinkReq(BaseModel):
+    orphan_title: str
+    orphan_link: str
+    hosts: list[dict] = []  # {id, title, link} — normalized via _seo_bulk_hosts
+    dry_run: bool = True
+
+
+@router.post("/api/thailandnow/seo/bulk-link")
+async def seo_bulk_link(req: SeoBulkLinkReq):
+    """BULK LINK one orphan: for each suggested host, auto-pick the best anchor
+    phrase from the orphan's title and — dry_run=false — insert
+    <a href="{orphan_link}"> around its first valid occurrence in that host.
+    dry_run=true (default) writes NOTHING; returns the would-be anchors."""
+    if _seo_classify(req.orphan_link, _wp_site_host()) != "internal":
+        raise HTTPException(400, "orphan_link is not an internal site link")
+    hosts = _seo_bulk_hosts(req.orphan_link, req.hosts)
+    if not hosts:
+        raise HTTPException(400, "no usable suggested hosts (need resolvable ids; cannot link to self)")
+    return await _seo_bulk_link_orphan(req.orphan_title, req.orphan_link, hosts, req.dry_run)
+
+
+class SeoBulkLinkAllReq(BaseModel):
+    orphans: list[dict]  # {title, link, suggested: [{id, title, link}]}
+    cap: int = 25        # max orphans this run processes (safety valve; 0 = all)
+
+
+@router.get("/api/thailandnow/seo/bulk-link/report/{jid}")
+async def seo_bulk_link_report(jid: str):
+    """Finished BULK LINK ALL result for a job (404 no such job; 409 not done)."""
+    job = _TN_JOBS.get(jid)
+    if not job or job.kind != "seo-bulk-link":
+        raise HTTPException(404, "no such BULK LINK job")
+    if job.status != "done":
+        raise HTTPException(409, f"job is {job.status}; not ready")
+    return job.result
+
+
+@router.post("/api/thailandnow/seo/bulk-link-all")
+async def seo_bulk_link_all(req: SeoBulkLinkAllReq):
+    """LINK ALL ORPHANS: async job (kind=seo-bulk-link) running the per-orphan
+    BULK LINK apply over the report's orphans, cap-bounded. Writes the best
+    anchor per host that has a valid spot. 409 if one is already running."""
+    if any(j.kind == "seo-bulk-link" and j.status in _TN_RUNNING for j in _TN_JOBS.values()):
+        raise HTTPException(409, "a BULK LINK ALL job is already running")
+    linkable = [(o, _seo_bulk_hosts(o.get("link", ""), o.get("suggested") or []))
+                for o in req.orphans]
+    linkable = [(o, hs) for o, hs in linkable if hs]
+    if not linkable:
+        raise HTTPException(400, "no orphans with resolvable suggested hosts")
+    if req.cap > 0:
+        linkable = linkable[:req.cap]
+    skipped = len(req.orphans) - len(linkable)
+
+    async def flow(job: "TnJob") -> None:
+        linked_orphans: list[str] = []
+        results: list[dict] = []
+        for i, (o, hosts) in enumerate(linkable):
+            if job.cancel:
+                raise _TnCancelled()
+            job.progress = int(i * 100 / len(linkable))
+            try:
+                res = await _seo_bulk_link_orphan(o.get("title", ""), o["link"], hosts, False)
+            except Exception as e:  # noqa: BLE001 — one bad orphan never kills the run
+                results.append({"orphan_link": o["link"], "error": str(e) or e.__class__.__name__})
+                continue
+            if res["linked"] > 0:
+                linked_orphans.append(o["link"])
+            results.append({"orphan_link": o["link"], "title": o.get("title", ""),
+                            "linked": res["linked"], "noop": res["noop"],
+                            "failed": res["failed"]})
+        job.result = {"processed": len(results), "orphans_linked": len(linked_orphans),
+                      "linked_orphans": linked_orphans, "skipped": skipped,
+                      "results": results}
+
+    return _tn_spawn("seo-bulk-link", f"BULK LINK ALL ({len(linkable)} orphans)", flow)
+
+
 # --- TRAFFIC sub-module (daily GA4 cumulative totals → Analytics & Boosting sheet)
 # Replaces the manual ritual: GA4 Total Users (cumulative since contract start)
 # per picked date → diff preview vs the sheet → confirmed apply. Service-account
@@ -6841,6 +6999,19 @@ if __name__ == "__main__":
         "tail of a tag with quoted '>' must stay invalid"
     gh, gm, _, _ = _seo_insert_link(gt_html, "b\" src=\"/x.jpg", "/o/")
     assert gm == 0, "no wrapping inside a quoted-'>' tag tail"
+    # BULK LINK: host normalization (pure core of the bulk flow) — id-less,
+    # self-link and dupe-id hosts dropped; first-seen order kept
+    bh = _seo_bulk_hosts("/orphan/", [
+        {"id": 7, "title": "Host A", "link": "/host-a/"},
+        {"title": "no id", "link": "/x/"},
+        {"id": 7, "title": "dupe", "link": "/dupe/"},
+        {"id": 8, "title": "self", "link": "/orphan/"},
+        {"id": None, "title": "null id", "link": "/y/"},
+    ])
+    assert [h["id"] for h in bh] == [7], bh
+    assert bh[0]["title"] == "Host A" and bh[0]["link"] == "/host-a/", bh
+    assert _seo_bulk_hosts("/orphan/", []) == [], "no suggested → no hosts"
+    assert _seo_bulk_hosts("/orphan/", None) == [], "None suggested tolerated"
     # R1: month override
     assert _mon_for("202608") == "AUG"
     assert _mon_for("202613") is None and _mon_for("garbage") is None

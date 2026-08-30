@@ -393,6 +393,38 @@ interface InsertPreview {
   applied?: boolean;
 }
 
+/** BULK LINK (bulk un-orphan): one host's outcome — matches: 1 written,
+ *  0 no valid spot, null dry-run-picked (phrase chosen, not yet written). */
+interface BulkLinkHostResult {
+  host_id: number;
+  host_title?: string;
+  host_link?: string;
+  ok?: boolean;
+  error?: string;
+  phrase?: string | null;
+  count?: number;
+  snippet?: string;
+  matches?: number | null;
+}
+
+interface BulkLinkData {
+  orphanLink: string;
+  loading: boolean;
+  applying: boolean; // an apply (write) call is in flight
+  applied: boolean;  // apply finished — panel shows the outcome
+  error?: string;
+  hosts: BulkLinkHostResult[];
+  linked: number; noop: number; pending: number; failed: number; total: number;
+}
+
+/** LINK ALL ORPHANS job result (GET /seo/bulk-link/report/{jid}). */
+interface BulkLinkAllResult {
+  processed: number;
+  orphans_linked: number;
+  linked_orphans: string[];
+  skipped?: number;
+}
+
 function PreviewBlock({
   activePreview,
   confirmLabel = "CONFIRM REMOVE",
@@ -544,6 +576,16 @@ function HealthSubTab() {
   const [anchorData, setAnchorData] = useState<AnchorData | null>(null);
   const [insertPreview, setInsertPreview] = useState<InsertPreview | null>(null);
 
+  // BULK LINK: auto-pick the best anchor per suggested host. Per-orphan = dry-run
+  // preview → CONFIRM BULK INSERT. LINK ALL = async job (kind=seo-bulk-link)
+  // over the report's orphans, cap-bounded, progress + cancel via jobs polling.
+  const [bulkData, setBulkData] = useState<BulkLinkData | null>(null);
+  const [bulkAllConfirm, setBulkAllConfirm] = useState(false);
+  const [bulkAllCap, setBulkAllCap] = useState(25);
+  const [bulkAllResult, setBulkAllResult] = useState<BulkLinkAllResult | null>(null);
+  const bulkJob = jobs.find((j) => j.kind === "seo-bulk-link") ?? null;
+  const bulkRunning = !!bulkJob && (bulkJob.status === "queued" || bulkJob.status === "running");
+
   const trimFixedFromReport = useCallback(
     (fixes: { post_id: number; kind: "link" | "image"; target: string; removed: boolean }[]) =>
       setReport((prev) => (prev ? trimFixed(prev, fixes) : prev)),
@@ -581,6 +623,7 @@ function HealthSubTab() {
 
   const handleAnalyze = async (hostId: number, orphanTitle: string, orphanLink: string) => {
     setInsertPreview(null);
+    setBulkData(null);
     setAnchorData({ hostId, orphanLink, loading: true, candidates: [] });
     const res = await post<{ candidates: { phrase: string; count: number; snippet: string }[] }>(
       "/api/thailandnow/seo/analyze-anchors",
@@ -621,6 +664,7 @@ function HealthSubTab() {
           : prev);
         setAnchorData(null);
         setInsertPreview(null);
+        setBulkData(null);
         setExpandedOrphan(null);
       } else {
         setInsertPreview((prev) => prev ? {
@@ -631,6 +675,60 @@ function HealthSubTab() {
     } else {
       setInsertPreview((prev) => prev ? { ...prev, loading: false, error: res.error || "Failed to apply insert" } : null);
     }
+  };
+
+  const handleBulkLink = async (orphan: HealthOrphan, dryRun: boolean) => {
+    setAnchorData(null);
+    setInsertPreview(null);
+    setBulkData({
+      orphanLink: orphan.link, loading: true, applying: !dryRun, applied: false, hosts: [],
+      linked: 0, noop: 0, pending: 0, failed: 0, total: 0,
+    });
+    const res = await post<{ results: BulkLinkHostResult[]; linked: number; noop: number; pending: number; failed: number; total: number }>(
+      "/api/thailandnow/seo/bulk-link",
+      {
+        orphan_title: orphan.title, orphan_link: orphan.link, dry_run: dryRun,
+        hosts: orphan.suggested.filter((s) => s.id).map((s) => ({ id: s.id!, title: s.title, link: s.link })),
+      },
+    );
+    if (res.ok && res.data) {
+      setBulkData({
+        orphanLink: orphan.link, loading: false, applying: false, applied: !dryRun,
+        hosts: res.data.results, linked: res.data.linked, noop: res.data.noop,
+        pending: res.data.pending, failed: res.data.failed, total: res.data.total,
+      });
+    } else {
+      setBulkData({
+        orphanLink: orphan.link, loading: false, applying: false, applied: false, hosts: [],
+        linked: 0, noop: 0, pending: 0, failed: 0, total: 0,
+        error: res.error || "BULK LINK failed",
+      });
+    }
+  };
+
+  const closeBulkLink = () => {
+    // after a successful apply the orphan has an inbound link now — dropping the
+    // panel also drops it from the (stale) report; otherwise just close
+    if (bulkData?.applied && bulkData.linked > 0) {
+      const link = bulkData.orphanLink;
+      setReport((prev) => (prev ? { ...prev, orphans: prev.orphans.filter((o) => o.link !== link) } : prev));
+    }
+    setBulkData(null);
+  };
+
+  const handleBulkLinkAll = async () => {
+    if (!r) return;
+    setBulkAllConfirm(false);
+    setBulkAllResult(null);
+    const res = await post<{ id: string }>("/api/thailandnow/seo/bulk-link-all", {
+      orphans: r.orphans.map((o) => ({
+        title: o.title, link: o.link,
+        suggested: o.suggested.filter((s) => s.id).map((s) => ({ id: s.id!, title: s.title, link: s.link })),
+      })),
+      cap: bulkAllCap,
+    });
+    if (!res.ok) { setErr(res.error ?? "BULK LINK ALL failed to start"); return; }
+    await refetchJobs();
   };
 
   const startScan = useCallback(async () => {
@@ -651,6 +749,26 @@ function HealthSubTab() {
       fetchJSON<HealthReport>(`/api/thailandnow/seo/report/${j.id}`)
         .then(setReport)
         .catch(() => setErr("failed to fetch the report"));
+    }
+  }, [jobs, setReport]);
+
+  // on a seo-bulk-link job flipping to done, fetch its result once: trim the
+  // linked orphans from the report + surface the summary
+  const prevBulkDone = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    const doneIds = new Set(jobs.filter((j) => j.status === "done").map((j) => j.id));
+    const newly = jobs.filter((j) => doneIds.has(j.id) && !prevBulkDone.current.has(j.id));
+    prevBulkDone.current = doneIds;
+    for (const j of newly) {
+      if (j.kind !== "seo-bulk-link") continue;
+      fetchJSON<BulkLinkAllResult>(`/api/thailandnow/seo/bulk-link/report/${j.id}`)
+        .then((res) => {
+          setBulkAllResult(res);
+          setReport((prev) => prev
+            ? { ...prev, orphans: prev.orphans.filter((o) => !res.linked_orphans.includes(o.link)) }
+            : prev);
+        })
+        .catch(() => setErr("failed to fetch the BULK LINK ALL report"));
     }
   }, [jobs, setReport]);
 
@@ -698,7 +816,57 @@ function HealthSubTab() {
           </div>
 
           <HealthList title="ORPHAN ARTICLES" count={r.orphans.length} accent="var(--color-critical)"
-            hint="zero inbound internal links — the SEO priority. ✎ opens the editor to un-orphan by hand; click an article to analyze where to embed an inbound link.">
+            hint="zero inbound internal links — the SEO priority. ✎ opens the editor to un-orphan by hand; click an article to analyze where to embed an inbound link."
+            action={
+              bulkRunning && bulkJob ? (
+                <span className="flex items-center gap-2">
+                  <span className="mono text-xs" style={{ color: "var(--color-signal)" }}>BULK LINKING… {bulkJob.progress}%</span>
+                  <button className="btn btn--compact btn--crit" onClick={() =>
+                    fetchJSON(`/api/thailandnow/jobs/${bulkJob.id}/cancel`, { method: "POST" }).catch(() => {})
+                  }>CANCEL</button>
+                </span>
+              ) : (
+                r.orphans.length > 0 && (
+                  <button className="btn btn--compact btn--crit"
+                    onClick={() => { setBulkAllConfirm(true); setBulkAllResult(null); }}>
+                    LINK ALL ({r.orphans.length})
+                  </button>
+                )
+              )
+            }>
+            {bulkAllConfirm && (
+              <div className="p-2 border bg-shade flex flex-col gap-2 my-1" style={{ borderColor: "var(--color-critical)" }}>
+                <div className="mono text-xs font-bold" style={{ color: "var(--color-critical)" }}>
+                  CONFIRM BULK LINK ALL ({r.orphans.length} orphans)
+                </div>
+                <div className="mono text-xs text-muted">
+                  Background job: for each orphan, analyzes its suggested hosts (top-3 related articles) and inserts
+                  the best title anchor into each host that has a valid spot (~3 WP writes per orphan, cancel mid-run).
+                  Cap limits how many orphans this run processes.
+                </div>
+                <label className="mono text-xs flex items-center gap-2">
+                  CAP (orphans this run):
+                  <input type="number" min={1} max={r.orphans.length} value={bulkAllCap}
+                    onChange={(e) => setBulkAllCap(Math.max(1, parseInt(e.target.value || "1", 10)))} />
+                </label>
+                <div className="flex gap-2">
+                  <button className="btn btn--crit" onClick={() => void handleBulkLinkAll()}>CONFIRM — START JOB</button>
+                  <button className="btn" onClick={() => setBulkAllConfirm(false)}>CANCEL</button>
+                </div>
+              </div>
+            )}
+            {bulkJob?.status === "error" && (
+              <div className="mono text-xs" style={{ color: "var(--color-critical)" }}>BULK LINK ALL failed: {bulkJob.error}</div>
+            )}
+            {bulkJob?.status === "cancelled" && (
+              <div className="mono text-xs" style={{ color: "var(--color-hazard)" }}>BULK LINK ALL cancelled — hosts already linked stay linked; re-scan to refresh.</div>
+            )}
+            {bulkAllResult && (
+              <div className="mono text-xs" style={{ color: "var(--color-go)" }}>
+                ✓ BULK LINK ALL: linked {bulkAllResult.orphans_linked}/{bulkAllResult.processed} orphans
+                {bulkAllResult.skipped ? ` · ${bulkAllResult.skipped} skipped (no usable hosts)` : ""} — re-scan to refresh the report.
+              </div>
+            )}
             {r.orphans.map((o) => {
               const expanded = expandedOrphan === o.link;
               return (
@@ -724,6 +892,70 @@ function HealthSubTab() {
                       </span>
                     )}
                   </div>
+                  {expanded && o.suggested.some((s) => s.id) && (
+                    <div className="pl-3">
+                      <button className="btn btn--compact btn--signal"
+                        disabled={!!bulkData && (bulkData.loading || bulkData.applying)}
+                        onClick={() => void handleBulkLink(o, true)}>
+                        BULK LINK ({o.suggested.filter((s) => s.id).length} hosts)
+                      </button>
+                      <span className="mono text-xs ml-1" style={{ color: "var(--color-muted)" }}>
+                        auto-pick the best anchor per host — preview, nothing written yet
+                      </span>
+                    </div>
+                  )}
+                  {expanded && bulkData && bulkData.orphanLink === o.link && (
+                    <div className="p-2 border bg-shade flex flex-col gap-1" style={{ borderColor: "var(--color-signal)" }}>
+                      {bulkData.loading && (
+                        <div className="mono text-xs" style={{ color: "var(--color-muted)" }}>Analyzing hosts for anchors…</div>
+                      )}
+                      {bulkData.error && (
+                        <div className="mono text-xs" style={{ color: "var(--color-critical)" }}>{bulkData.error}</div>
+                      )}
+                      {bulkData.hosts.map((h) => (
+                        <div key={h.host_id} className="mono text-xs flex flex-col gap-0.5 pl-1">
+                          <div>
+                            <span style={{ color: "var(--color-phosphor-dim)" }}>▸ {h.host_title || `host #${h.host_id}`}</span>
+                            {!h.ok && <span style={{ color: "var(--color-critical)" }}> — error: {h.error}</span>}
+                            {h.ok && h.matches === 0 && <span style={{ color: "var(--color-muted)" }}> — no valid anchor spot</span>}
+                            {h.ok && h.matches === 1 && (
+                              <span style={{ color: "var(--color-go)" }}> — ✓ linked with "{h.phrase}"</span>
+                            )}
+                            {h.ok && h.matches == null && (
+                              <span> — best anchor: <b>{h.phrase}</b> ×{h.count}</span>
+                            )}
+                          </div>
+                          {h.ok && h.matches == null && h.snippet && (
+                            <div style={{ color: "var(--color-muted)" }}>{h.snippet}</div>
+                          )}
+                        </div>
+                      ))}
+                      {!bulkData.loading && !bulkData.applied && (
+                        <div className="flex items-center gap-2 mt-1">
+                          <button className="btn btn--crit" disabled={bulkData.pending === 0}
+                            onClick={() => {
+                              const orphan = r.orphans.find((x) => x.link === bulkData.orphanLink);
+                              if (orphan) void handleBulkLink(orphan, false);
+                            }}>
+                            CONFIRM BULK INSERT ({bulkData.pending})
+                          </button>
+                          <button className="btn" onClick={() => setBulkData(null)}>CANCEL</button>
+                        </div>
+                      )}
+                      {!bulkData.loading && bulkData.applied && (
+                        <div className="flex items-center gap-2 mt-1 flex-wrap">
+                          <span className="mono text-xs" style={{ color: bulkData.linked > 0 ? "var(--color-go)" : "var(--color-hazard)" }}>
+                            {bulkData.linked > 0
+                              ? `✓ Linked from ${bulkData.linked}/${bulkData.total} hosts`
+                              : "Nothing inserted"}
+                            {bulkData.noop ? ` · ${bulkData.noop} no spot` : ""}
+                            {bulkData.failed ? ` · ${bulkData.failed} failed` : ""}
+                          </span>
+                          <button className="btn btn--compact" onClick={closeBulkLink}>DONE</button>
+                        </div>
+                      )}
+                    </div>
+                  )}
                   {expanded && o.suggested.map((s) => {
                     const analyzing = !!anchorData && !!s.id && anchorData.hostId === s.id && anchorData.orphanLink === o.link;
                     return (
