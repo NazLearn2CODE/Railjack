@@ -74,7 +74,7 @@ modules:
       gem_path: app/gems/event-publicity.md                     # read fresh each /events/publicize call
       notebooklm_notebook_id: ""                                # R6: DEEP RESEARCH notebook (created + cached on first use)
       archive_gem_path: app/gems/event-archive-qa.md            # Stage 2: source-only Q&A gem
-      archive_folder_id: 1MVYNNOaev_0P972YbwM01XGGLWPBP1vJ   # wider comprehensive Event archive (was: tian desk's event-docs folder)
+      archive_folder_id: 1RTW44D-Ygjf-GQC8Wj_s6tX0elhNx2vI   # 'Thailand NOW 2025-26' folder, owner thailandnow.info; n.rojanasuvan granted writer 2026-08-30 (was: 'TN Content' 1MVYNNOaev_0P972YbwM01XGGLWPBP1vJ)
       # --- STORY SCOUT (news pitch discovery + make-a-pitch) ---
       scout_llm:
         model: glm-5      # /scout/pitch; routes through app/zai.py (same gateway/combo as publicity_llm)
