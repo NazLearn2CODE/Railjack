@@ -4711,6 +4711,69 @@ def _seo_anchor_candidates(orphan_title: str, host_html: str, cap: int = 8,
     return out
 
 
+def _seo_related_candidates(orphan_title: str, extra_text: str | None, host_html: str,
+                            cap: int = 1) -> list[dict]:
+    """Pure: host phrases topically RELATED to the orphan (token overlap with its
+    title+excerpt) for hosts where no verbatim title/excerpt phrase occurs.
+    Eligibility: >=2 shared content tokens, or one shared token >=5 chars with a
+    <=3-word phrase (rare-word anchors like "Songkran"). Ranks by (overlap desc,
+    shorter phrase, first position), then verifies each nominee occurs at a valid
+    region in the raw HTML (same doctrine as exact candidates). Output shape
+    matches _seo_anchor_candidates plus score/related. Pure-Thai topics have no
+    latin topic tokens -> [] (exact mode still covers Thai via full-string
+    match). ponytail: candidate scan capped at 5000 unique n-grams."""
+    topic = _seo_tokens(orphan_title) | _seo_tokens(extra_text or "")
+    if not topic or not host_html:
+        return []
+    clean = " ".join(re.sub(r"<[^>]+>", " ", host_html).split())
+    words = clean.split()
+    seen: set[str] = set()
+    scored: list[tuple[float, int, int, str]] = []  # (-shared[-0.5 if 1gram], len, first_pos, phrase)
+    for n in list(range(2, 5)) + [1]:  # 2..4-grams by rule; 1-grams only via rare rule
+        for i in range(0, len(words) - n + 1):
+            phrase = " ".join(words[i:i + n])
+            if phrase in seen or len(seen) >= 5000:
+                continue
+            seen.add(phrase)
+            # anchors must not lead/trail with a function word ("when Songkran"
+            # reads badly; "Songkran arrives" or "border security" don't)
+            if words[i].lower() in _SEO_STOP or words[i + n - 1].lower() in _SEO_STOP:
+                continue
+            ptoks = _seo_tokens(phrase)
+            if not ptoks:
+                continue
+            shared = ptoks & topic
+            if len(shared) < 2 and not (
+                len(shared) == 1 and max(len(t) for t in shared) >= 5 and n <= 3
+            ):
+                continue
+            # 1-word candidates rank below any multi-word phrase with the same
+            # overlap ("Border security" beats bare "Border")
+            scored.append((-len(shared) + (0.5 if n == 1 else 0.0), len(phrase), i, phrase))
+    if not scored:
+        return []
+    scored.sort()
+    regions = _seo_valid_regions(host_html)
+    out: list[dict] = []
+    for neg, plen, pos, phrase in scored:
+        pat = re.compile(re.escape(phrase), re.IGNORECASE)
+        count = 0
+        first = -1
+        for start, end in regions:
+            for m in pat.finditer(host_html, start, end):
+                if first == -1:
+                    first = m.start()
+                count += 1
+        if count == 0:
+            continue  # cleaned-text artifact (e.g. phrase spanned a tag) — skip
+        snippet = host_html[max(0, first - 30):min(len(host_html), first + len(phrase) + 30)]
+        out.append({"phrase": phrase, "count": count, "snippet": snippet,
+                    "score": -neg, "related": True})
+        if len(out) >= cap:
+            break
+    return out
+
+
 def _seo_insert_link(html: str, phrase: str, href: str) -> tuple[str, int, str, str]:
     """Pure, mirrors _seo_strip_target: wrap the FIRST case-insensitive occurrence
     of phrase at a valid position as <a href="{href}">{original_text}</a> (original
@@ -4990,11 +5053,13 @@ def _seo_bulk_hosts(orphan_link: str, suggested: list[dict]) -> list[dict]:
 
 
 async def _seo_bulk_link_host(host: dict, orphan_title: str, orphan_link: str,
-                              dry_run: bool, extra_text: str | None = None) -> dict:
-    """One host: fetch raw content, auto-pick the best anchor (longest valid
-    title phrase — full title wins, else longest n-gram; excerpt phrases fill
-    in after). dry_run reports it; apply wraps the first valid occurrence and
-    PUTs. Raises on WP errors — continue-on-error lives with the caller."""
+                              dry_run: bool, extra_text: str | None = None,
+                              related: bool = False) -> dict:
+    """One host: fetch raw content, auto-pick the best anchor — exact
+    title/excerpt phrase first, else (related=True) a topical phrase via
+    _seo_related_candidates. dry_run reports it; apply wraps the first valid
+    occurrence and PUTs. Raises on WP errors — continue-on-error lives with
+    the caller."""
     out: dict = {"host_id": host["id"], "host_title": host["title"], "host_link": host["link"]}
     rb = await _wp_resolve_rest_base(host["id"])
     post = await _wp("GET", f"/{rb}/{host['id']}", {"context": "edit"})
@@ -5003,6 +5068,10 @@ async def _seo_bulk_link_host(host: dict, orphan_title: str, orphan_link: str,
         return out
     raw_content = (post.get("content") or {}).get("raw", "")
     cands = _seo_anchor_candidates(orphan_title, raw_content, cap=1, extra_text=extra_text)
+    out["mode"] = "exact"
+    if not cands and related:
+        cands = _seo_related_candidates(orphan_title, extra_text, raw_content, cap=1)
+        out["mode"] = "related"
     out["ok"] = True
     if not cands:
         out["matches"] = 0  # no valid spot → noop (nothing to write)
@@ -5023,7 +5092,8 @@ async def _seo_bulk_link_host(host: dict, orphan_title: str, orphan_link: str,
 
 async def _seo_bulk_link_orphan(orphan_title: str, orphan_link: str,
                                 hosts: list[dict], dry_run: bool,
-                                extra_text: str | None = None) -> dict:
+                                extra_text: str | None = None,
+                                related: bool = False) -> dict:
     """All hosts for one orphan: sequential (WP-friendly), continue-on-error.
     ``hosts`` is pre-normalized via _seo_bulk_hosts. matches: 1 written,
     0 noop, None dry-run-picked."""
@@ -5031,7 +5101,7 @@ async def _seo_bulk_link_orphan(orphan_title: str, orphan_link: str,
     for h in hosts:
         try:
             results.append(await _seo_bulk_link_host(h, orphan_title, orphan_link, dry_run,
-                                                     extra_text=extra_text))
+                                                     extra_text=extra_text, related=related))
         except HTTPException as e:
             results.append({"host_id": h["id"], "host_title": h["title"],
                             "host_link": h["link"], "ok": False, "error": str(e.detail)})
@@ -5055,6 +5125,7 @@ class SeoBulkLinkReq(BaseModel):
     hosts: list[dict] = []  # {id, title, link} — normalized via _seo_bulk_hosts
     orphan_description: str = ""  # orphan's excerpt — extra anchor-phrase source
     dry_run: bool = True
+    related: bool = False  # fall back to topical anchors when exact phrases miss
 
 
 @router.post("/api/thailandnow/seo/bulk-link")
@@ -5062,19 +5133,21 @@ async def seo_bulk_link(req: SeoBulkLinkReq):
     """BULK LINK one orphan: for each suggested host, auto-pick the best anchor
     phrase from the orphan's title (+ excerpt n-grams) and — dry_run=false —
     insert <a href="{orphan_link}"> around its first valid occurrence in that
-    host. dry_run=true (default) writes NOTHING; returns the would-be anchors."""
+    host. related=True falls back to topical anchors when no exact phrase
+    occurs. dry_run=true (default) writes NOTHING; returns the would-be anchors."""
     if _seo_classify(req.orphan_link, _wp_site_host()) != "internal":
         raise HTTPException(400, "orphan_link is not an internal site link")
     hosts = _seo_bulk_hosts(req.orphan_link, req.hosts)
     if not hosts:
         raise HTTPException(400, "no usable suggested hosts (need resolvable ids; cannot link to self)")
     return await _seo_bulk_link_orphan(req.orphan_title, req.orphan_link, hosts, req.dry_run,
-                                       extra_text=req.orphan_description)
+                                       extra_text=req.orphan_description, related=req.related)
 
 
 class SeoBulkLinkAllReq(BaseModel):
-    orphans: list[dict]  # {title, link, suggested: [{id, title, link}]}
+    orphans: list[dict]  # {title, link, description, suggested: [{id, title, link}]}
     cap: int = 25        # max orphans this run processes (safety valve; 0 = all)
+    related: bool = False  # fall back to topical anchors when exact phrases miss
 
 
 @router.get("/api/thailandnow/seo/bulk-link/report/{jid}")
@@ -5113,7 +5186,8 @@ async def seo_bulk_link_all(req: SeoBulkLinkAllReq):
             job.progress = int(i * 100 / len(linkable))
             try:
                 res = await _seo_bulk_link_orphan(o.get("title", ""), o["link"], hosts, False,
-                                                  extra_text=o.get("description") or "")
+                                                  extra_text=o.get("description") or "",
+                                                  related=req.related)
             except Exception as e:  # noqa: BLE001 — one bad orphan never kills the run
                 results.append({"orphan_link": o["link"], "error": str(e) or e.__class__.__name__})
                 continue
@@ -7069,6 +7143,20 @@ if __name__ == "__main__":
     assert _seo_anchor_candidates("Completely unrelated title words",
                                   "<p>Supply chains are shifting again.</p>") == [], \
         "without extra_text the description-only match stays hidden"
+    # RELATED scorer: topical host phrase wins when no verbatim phrase occurs
+    rel_html = "<p>Border security cooperation between the two neighbours deepened.</p>"
+    rel = _seo_related_candidates("Myanmar border talks resume",
+                                  "deepening cooperation along the frontier", rel_html)
+    assert rel and rel[0]["phrase"].lower() == "border security cooperation", rel
+    assert rel[0]["related"] is True and rel[0]["score"] == 2 and rel[0]["count"] == 1, rel
+    assert _seo_related_candidates("Ancient pottery discovery",
+                                   "museum exhibition opens soon", rel_html) == [], \
+        "below-overlap topics must not anchor"
+    rel1 = _seo_related_candidates("Songkran festival origins", None,
+                                   "<p>when Songkran arrives in April</p>")
+    assert rel1 and rel1[0]["phrase"].startswith("Songkran"), rel1  # rare-token rule, no stopword lead
+    assert _seo_related_candidates("เที่ยวขอนแก่น", None, rel_html) == [], \
+        "pure-Thai topic has no latin tokens → related stays silent"
     # R1: month override
     assert _mon_for("202608") == "AUG"
     assert _mon_for("202613") is None and _mon_for("garbage") is None

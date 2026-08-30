@@ -394,7 +394,8 @@ interface InsertPreview {
 }
 
 /** BULK LINK (bulk un-orphan): one host's outcome — matches: 1 written,
- *  0 no valid spot, null dry-run-picked (phrase chosen, not yet written). */
+ *  0 no valid spot, null dry-run-picked (phrase chosen, not yet written).
+ *  mode: "exact" (title/excerpt phrase) | "related" (topical fallback). */
 interface BulkLinkHostResult {
   host_id: number;
   host_title?: string;
@@ -405,6 +406,8 @@ interface BulkLinkHostResult {
   count?: number;
   snippet?: string;
   matches?: number | null;
+  mode?: string;
+  score?: number;
 }
 
 interface BulkLinkData {
@@ -582,6 +585,7 @@ function HealthSubTab() {
   const [bulkData, setBulkData] = useState<BulkLinkData | null>(null);
   const [bulkAllConfirm, setBulkAllConfirm] = useState(false);
   const [bulkAllCap, setBulkAllCap] = useState(25);
+  const [bulkAllRelated, setBulkAllRelated] = useState(false);
   const [bulkAllResult, setBulkAllResult] = useState<BulkLinkAllResult | null>(null);
   const bulkJob = jobs.find((j) => j.kind === "seo-bulk-link") ?? null;
   const bulkRunning = !!bulkJob && (bulkJob.status === "queued" || bulkJob.status === "running");
@@ -690,6 +694,7 @@ function HealthSubTab() {
       {
         orphan_title: orphan.title, orphan_link: orphan.link, dry_run: dryRun,
         orphan_description: orphan.description ?? "",
+        related: true, // per-orphan preview always shows RELATED fallbacks, tagged
         hosts: orphan.suggested.filter((s) => s.id).map((s) => ({ id: s.id!, title: s.title, link: s.link })),
       },
     );
@@ -728,6 +733,7 @@ function HealthSubTab() {
         suggested: o.suggested.filter((s) => s.id).map((s) => ({ id: s.id!, title: s.title, link: s.link })),
       })),
       cap: bulkAllCap,
+      related: bulkAllRelated,
     });
     if (!res.ok) { setErr(res.error ?? "BULK LINK ALL failed to start"); return; }
     await refetchJobs();
@@ -851,6 +857,12 @@ function HealthSubTab() {
                   <input type="number" min={1} max={r.orphans.length} value={bulkAllCap}
                     onChange={(e) => setBulkAllCap(Math.max(1, parseInt(e.target.value || "1", 10)))} />
                 </label>
+                <label className="mono text-xs flex items-center gap-2" style={{ color: "var(--color-hazard)" }}>
+                  <input type="checkbox" checked={bulkAllRelated}
+                    onChange={(e) => setBulkAllRelated(e.target.checked)} />
+                  FALL BACK TO RELATED ANCHORS when exact title/excerpt phrases miss
+                  (topical phrases from host content — review a per-orphan BULK LINK preview first)
+                </label>
                 <div className="flex gap-2">
                   <button className="btn btn--crit" onClick={() => void handleBulkLinkAll()}>CONFIRM — START JOB</button>
                   <button className="btn" onClick={() => setBulkAllConfirm(false)}>CANCEL</button>
@@ -921,10 +933,10 @@ function HealthSubTab() {
                             {!h.ok && <span style={{ color: "var(--color-critical)" }}> — error: {h.error}</span>}
                             {h.ok && h.matches === 0 && <span style={{ color: "var(--color-muted)" }}> — no valid anchor spot</span>}
                             {h.ok && h.matches === 1 && (
-                              <span style={{ color: "var(--color-go)" }}> — ✓ linked with "{h.phrase}"</span>
+                              <span style={{ color: "var(--color-go)" }}> — ✓ linked with "{h.phrase}"{h.mode === "related" ? " (related)" : ""}</span>
                             )}
                             {h.ok && h.matches == null && (
-                              <span> — best anchor: <b>{h.phrase}</b> ×{h.count}</span>
+                              <span> — {h.mode === "related" ? <b style={{ color: "var(--color-signal)" }}>RELATED:</b> : "best anchor:"} <b>{h.phrase}</b> ×{h.count}</span>
                             )}
                           </div>
                           {h.ok && h.matches == null && h.snippet && (

@@ -137,6 +137,28 @@ def test_bulk_link_description_phrase_links_when_title_misses(client, fake_wp):
     assert f'<a href="{ORPHAN_LINK}">standfirst words appear</a>' in wp.puts[0][1]
 
 
+def test_bulk_link_related_fallback(client, fake_wp):
+    """related=True: a host sharing NO verbatim title/excerpt phrase but
+    topical words gets a related anchor; default (False) stays noop."""
+    wp = fake_wp({14: "<p>Border security cooperation deepened this year.</p>"})
+    body = {
+        "orphan_title": "Myanmar border talks resume",
+        "orphan_link": ORPHAN_LINK,
+        "hosts": _hosts(14),
+        "dry_run": False,
+    }
+    r = client.post("/api/thailandnow/seo/bulk-link", json=body)
+    d = r.json()
+    assert (d["linked"], d["noop"]) == (0, 1), d  # default: no verbatim phrase → noop
+
+    r2 = client.post("/api/thailandnow/seo/bulk-link", json={**body, "related": True})
+    d2 = r2.json()
+    assert d2["linked"] == 1, d2
+    linked = d2["results"][0]
+    assert linked["mode"] == "related" and linked["phrase"].lower().startswith("border security"), linked
+    assert f'<a href="{ORPHAN_LINK}">' in wp.puts[0][1]
+
+
 def test_bulk_link_all_job_runs_and_reports(client, fake_wp):
     wp = fake_wp({11: HOST_WITH, 21: "<p>Read more about Orphan 2 here.</p>", 22: HOST_WITHOUT})
     orphans = [
