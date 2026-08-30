@@ -166,7 +166,7 @@ interface FiresideEditNotesResp {
 // SEO HEALTH report (THAILAND NOW → SEO tab → HEALTH)
 interface HealthSource { from: string; from_id?: number; from_title?: string }
 interface HealthSuggestion { link: string; title: string; id?: number }
-interface HealthOrphan { id?: number; link: string; title: string; suggested: HealthSuggestion[] }
+interface HealthOrphan { id?: number; link: string; title: string; suggested: HealthSuggestion[]; description?: string }
 interface HealthReport {
   post_count: number; page_count: number; event_count: number; other_cpt_count?: number; valid_paths: number;
   broken_internal_links: { from: string; from_id?: number; from_title: string; to: string; href?: string; reason?: string }[];
@@ -621,13 +621,14 @@ function HealthSubTab() {
     }
   };
 
-  const handleAnalyze = async (hostId: number, orphanTitle: string, orphanLink: string) => {
+  const handleAnalyze = async (hostId: number, orphanTitle: string, orphanLink: string,
+                               orphanDescription = "") => {
     setInsertPreview(null);
     setBulkData(null);
     setAnchorData({ hostId, orphanLink, loading: true, candidates: [] });
     const res = await post<{ candidates: { phrase: string; count: number; snippet: string }[] }>(
       "/api/thailandnow/seo/analyze-anchors",
-      { host_id: hostId, orphan_title: orphanTitle, orphan_link: orphanLink },
+      { host_id: hostId, orphan_title: orphanTitle, orphan_link: orphanLink, orphan_description: orphanDescription },
     );
     if (res.ok && res.data) {
       setAnchorData({ hostId, orphanLink, loading: false, candidates: res.data.candidates });
@@ -688,6 +689,7 @@ function HealthSubTab() {
       "/api/thailandnow/seo/bulk-link",
       {
         orphan_title: orphan.title, orphan_link: orphan.link, dry_run: dryRun,
+        orphan_description: orphan.description ?? "",
         hosts: orphan.suggested.filter((s) => s.id).map((s) => ({ id: s.id!, title: s.title, link: s.link })),
       },
     );
@@ -722,7 +724,7 @@ function HealthSubTab() {
     setBulkAllResult(null);
     const res = await post<{ id: string }>("/api/thailandnow/seo/bulk-link-all", {
       orphans: r.orphans.map((o) => ({
-        title: o.title, link: o.link,
+        title: o.title, link: o.link, description: o.description ?? "",
         suggested: o.suggested.filter((s) => s.id).map((s) => ({ id: s.id!, title: s.title, link: s.link })),
       })),
       cap: bulkAllCap,
@@ -963,7 +965,7 @@ function HealthSubTab() {
                         <div className="mono text-xs flex items-center gap-1" style={{ color: "var(--color-muted)" }}>
                           <span>▸ {s.title}</span>
                           {s.id && (
-                            <button className="btn btn--compact" onClick={() => handleAnalyze(s.id!, o.title, o.link)}>
+                            <button className="btn btn--compact" onClick={() => handleAnalyze(s.id!, o.title, o.link, o.description ?? "")}>
                               ANALYZE
                             </button>
                           )}

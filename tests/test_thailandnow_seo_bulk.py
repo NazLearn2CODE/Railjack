@@ -119,6 +119,24 @@ def test_bulk_link_drops_self_dupe_and_idless(client, fake_wp):
     assert d["total"] == 1
 
 
+def test_bulk_link_description_phrase_links_when_title_misses(client, fake_wp):
+    """The excerpt (orphan_description) extends the anchor pool: a host that
+    shares no title phrase but repeats standfirst prose still gets linked."""
+    wp = fake_wp({13: "<p>The standfirst words appear here.</p>"})
+    r = client.post("/api/thailandnow/seo/bulk-link", json={
+        "orphan_title": "Totally different headline text",
+        "orphan_link": ORPHAN_LINK,
+        "orphan_description": "standfirst words appear",
+        "dry_run": False,
+        "hosts": _hosts(13),
+    })
+    d = r.json()
+    assert (d["linked"], d["failed"]) == (1, 0), d
+    linked = next(x for x in d["results"] if x["host_id"] == 13)
+    assert linked["phrase"] == "standfirst words appear", linked
+    assert f'<a href="{ORPHAN_LINK}">standfirst words appear</a>' in wp.puts[0][1]
+
+
 def test_bulk_link_all_job_runs_and_reports(client, fake_wp):
     wp = fake_wp({11: HOST_WITH, 21: "<p>Read more about Orphan 2 here.</p>", 22: HOST_WITHOUT})
     orphans = [

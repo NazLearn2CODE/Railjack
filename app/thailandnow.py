@@ -4200,10 +4200,10 @@ async def _seo_fetch_all() -> tuple[list[dict], list[dict], list[dict], list[dic
     + the media set + category/tag archive paths. Content types feed parsing; their
     paths plus the taxonomy paths form the valid-internal-path set. Soft on the
     optional types — event/cpts/categories/tags that aren't REST-enabled are skipped."""
-    posts = await _wp_list_all("/posts", "id,link,slug,title,content")
+    posts = await _wp_list_all("/posts", "id,link,slug,title,content,excerpt")
     pages = await _wp_list_all("/pages", "id,link,slug,title,content")
     try:
-        events = await _wp_list_all("/event", "id,link,slug,title,content")
+        events = await _wp_list_all("/event", "id,link,slug,title,content,excerpt")
     except HTTPException:
         events = []
 
@@ -4224,7 +4224,7 @@ async def _seo_fetch_all() -> tuple[list[dict], list[dict], list[dict], list[dic
                 # rest_base presence only (+ skip builtins).
                 if rest_base and slug not in _skip_types:
                     try:
-                        cpt_items = await _wp_list_all(f"/{rest_base}", "id,link,slug,title,content")
+                        cpt_items = await _wp_list_all(f"/{rest_base}", "id,link,slug,title,content,excerpt")
                         other_cpts.extend(cpt_items)
                     except HTTPException:
                         pass
@@ -4392,11 +4392,15 @@ async def _flow_seo_health(job: "TnJob") -> None:
     titles = [(p.get("link", ""), (p.get("title") or {}).get("rendered", ""))
               for p in (posts + events + other_cpts) if p.get("link")]
     link_ids = {p.get("link", ""): p.get("id") for p in (posts + events + other_cpts)}
+    # excerpt (standfirst prose) → extra anchor-phrase source for BULK LINK
+    link_desc = {p.get("link", ""): (p.get("excerpt") or {}).get("rendered", "")
+                 for p in (posts + events + other_cpts)}
     for o in rep["orphans"]:
         cands = [(lnk, t) for (lnk, t) in titles if lnk != o["link"]]
         o["suggested"] = _seo_suggest(o["title"], cands, n=3)
         for s in o["suggested"]:  # host id → anchor ANALYZE endpoint
             s["id"] = link_ids.get(s["link"])
+        o["description"] = link_desc.get(o["link"], "")
     job.progress = 50
     # HTTP-verify external links/images, internal image candidates, AND internal
     # link candidates (Fix 1). Internal links use authed probe (Sucuri bypass).
@@ -4624,42 +4628,69 @@ def _seo_valid_regions(html: str) -> list[tuple[int, int]]:
     return out
 
 
-def _seo_anchor_phrases(orphan_title: str) -> list[str]:
-    """Pure: candidate anchor phrases from the orphan title — the full
-    whitespace-normalized title plus every contiguous token n-gram of length
-    >= 2 (Thai titles are one long token, so the full title covers Thai).
-    Drops stopword-only phrases (per _SEO_STOP; phrases with no latin tokens,
-    i.e. Thai, are kept) and phrases shorter than 4 chars. Deduped, longest-first."""
+def _seo_anchor_phrases(orphan_title: str, extra_text: str | None = None) -> list[str]:
+    """Pure: candidate anchor phrases — the full whitespace-normalized title plus
+    every contiguous token n-gram of length >= 2 (Thai titles are one long token,
+    so the full title covers Thai). With ``extra_text`` (the orphan's excerpt),
+    its full text + 2..6-token n-grams join the pool AFTER the title phrases
+    (longest-first within each group) — hand-written standfirst prose yields
+    anchors the raw title misses. Drops stopword-only phrases (per _SEO_STOP;
+    phrases with no latin tokens, i.e. Thai, are kept) and phrases shorter than
+    4 chars. Deduped across groups. ponytail: extra pool capped at 150 — scan
+    cost is linear in pool size; upgrade path = combined alternation regex."""
+
+    def _filtered(phrases: list[str], seen: set[str]) -> list[str]:
+        out: list[str] = []
+        for p in phrases:
+            toks = re.findall(r"[a-z0-9]+", p.lower())
+            if toks and all(t in _SEO_STOP for t in toks):
+                continue
+            if len(p) < 4 or p in seen:
+                continue
+            seen.add(p)
+            out.append(p)
+        return out
+
     title = " ".join((orphan_title or "").split())
     if not title:
         return []
     tokens = title.split()
-    phrases = [title] + [
-        " ".join(tokens[i:i + n])
-        for n in range(2, len(tokens) + 1)
-        for i in range(0, len(tokens) - n + 1)
-    ]
-    seen: set[str] = set()
-    out: list[str] = []
-    for p in phrases:
-        toks = re.findall(r"[a-z0-9]+", p.lower())
-        if toks and all(t in _SEO_STOP for t in toks):
-            continue
-        if len(p) < 4 or p in seen:
-            continue
-        seen.add(p)
-        out.append(p)
-    out.sort(key=len, reverse=True)
-    return out
+    head = _filtered(
+        [title] + [
+            " ".join(tokens[i:i + n])
+            for n in range(2, len(tokens) + 1)
+            for i in range(0, len(tokens) - n + 1)
+        ],
+        seen=set(),
+    )
+    head.sort(key=len, reverse=True)
+    tail: list[str] = []
+    if extra_text:
+        etoks = re.sub(r"<[^>]+>", " ", html.unescape(extra_text or "")).split()
+        etoks = [t for t in etoks if t]
+        if etoks:
+            tail = _filtered(
+                [" ".join(etoks)] + [
+                    " ".join(etoks[i:i + n])
+                    for n in range(2, min(6, len(etoks)) + 1)
+                    for i in range(0, len(etoks) - n + 1)
+                ],
+                seen=set(head),
+            )
+            tail.sort(key=len, reverse=True)
+            tail = tail[:150]
+    return head + tail
 
 
-def _seo_anchor_candidates(orphan_title: str, host_html: str, cap: int = 8) -> list[dict]:
+def _seo_anchor_candidates(orphan_title: str, host_html: str, cap: int = 8,
+                           extra_text: str | None = None) -> list[dict]:
     """Pure: phrases from _seo_anchor_phrases with >=1 case-insensitive occurrence
     at a valid position in host_html. Returns [{"phrase", "count", "snippet"}]
-    (~60-char context around the first valid occurrence), longest-first, capped."""
+    (~60-char context around the first valid occurrence), pool-rank order
+    (title phrases longest-first, then excerpt phrases), capped."""
     regions = _seo_valid_regions(host_html)
     out: list[dict] = []
-    for phrase in _seo_anchor_phrases(orphan_title):
+    for phrase in _seo_anchor_phrases(orphan_title, extra_text):
         # offsets come from re on the ORIGINAL region text: no lower() index
         # drift (some chars change length when lowered) and non-overlapping
         # counts by finditer's default advance
@@ -4720,6 +4751,7 @@ class SeoAnchorAnalyzeReq(BaseModel):
     host_id: int
     orphan_title: str
     orphan_link: str
+    orphan_description: str = ""  # excerpt — extra anchor-phrase source
 
 
 class SeoInsertReq(BaseModel):
@@ -4863,7 +4895,8 @@ async def seo_analyze_anchors(req: SeoAnchorAnalyzeReq):
         "host_id": req.host_id,
         "orphan_title": req.orphan_title,
         "orphan_link": req.orphan_link,
-        "candidates": _seo_anchor_candidates(req.orphan_title, raw_content),
+        "candidates": _seo_anchor_candidates(req.orphan_title, raw_content,
+                                             extra_text=req.orphan_description),
     }
 
 
@@ -4957,11 +4990,11 @@ def _seo_bulk_hosts(orphan_link: str, suggested: list[dict]) -> list[dict]:
 
 
 async def _seo_bulk_link_host(host: dict, orphan_title: str, orphan_link: str,
-                              dry_run: bool) -> dict:
+                              dry_run: bool, extra_text: str | None = None) -> dict:
     """One host: fetch raw content, auto-pick the best anchor (longest valid
-    title phrase — full title wins, else longest n-gram). dry_run reports it;
-    apply wraps the first valid occurrence and PUTs. Raises on WP errors —
-    continue-on-error lives with the caller."""
+    title phrase — full title wins, else longest n-gram; excerpt phrases fill
+    in after). dry_run reports it; apply wraps the first valid occurrence and
+    PUTs. Raises on WP errors — continue-on-error lives with the caller."""
     out: dict = {"host_id": host["id"], "host_title": host["title"], "host_link": host["link"]}
     rb = await _wp_resolve_rest_base(host["id"])
     post = await _wp("GET", f"/{rb}/{host['id']}", {"context": "edit"})
@@ -4969,7 +5002,7 @@ async def _seo_bulk_link_host(host: dict, orphan_title: str, orphan_link: str,
         out.update(ok=False, error=f"host {host['id']} not found")
         return out
     raw_content = (post.get("content") or {}).get("raw", "")
-    cands = _seo_anchor_candidates(orphan_title, raw_content, cap=1)
+    cands = _seo_anchor_candidates(orphan_title, raw_content, cap=1, extra_text=extra_text)
     out["ok"] = True
     if not cands:
         out["matches"] = 0  # no valid spot → noop (nothing to write)
@@ -4989,14 +5022,16 @@ async def _seo_bulk_link_host(host: dict, orphan_title: str, orphan_link: str,
 
 
 async def _seo_bulk_link_orphan(orphan_title: str, orphan_link: str,
-                                hosts: list[dict], dry_run: bool) -> dict:
+                                hosts: list[dict], dry_run: bool,
+                                extra_text: str | None = None) -> dict:
     """All hosts for one orphan: sequential (WP-friendly), continue-on-error.
     ``hosts`` is pre-normalized via _seo_bulk_hosts. matches: 1 written,
     0 noop, None dry-run-picked."""
     results = []
     for h in hosts:
         try:
-            results.append(await _seo_bulk_link_host(h, orphan_title, orphan_link, dry_run))
+            results.append(await _seo_bulk_link_host(h, orphan_title, orphan_link, dry_run,
+                                                     extra_text=extra_text))
         except HTTPException as e:
             results.append({"host_id": h["id"], "host_title": h["title"],
                             "host_link": h["link"], "ok": False, "error": str(e.detail)})
@@ -5018,21 +5053,23 @@ class SeoBulkLinkReq(BaseModel):
     orphan_title: str
     orphan_link: str
     hosts: list[dict] = []  # {id, title, link} — normalized via _seo_bulk_hosts
+    orphan_description: str = ""  # orphan's excerpt — extra anchor-phrase source
     dry_run: bool = True
 
 
 @router.post("/api/thailandnow/seo/bulk-link")
 async def seo_bulk_link(req: SeoBulkLinkReq):
     """BULK LINK one orphan: for each suggested host, auto-pick the best anchor
-    phrase from the orphan's title and — dry_run=false — insert
-    <a href="{orphan_link}"> around its first valid occurrence in that host.
-    dry_run=true (default) writes NOTHING; returns the would-be anchors."""
+    phrase from the orphan's title (+ excerpt n-grams) and — dry_run=false —
+    insert <a href="{orphan_link}"> around its first valid occurrence in that
+    host. dry_run=true (default) writes NOTHING; returns the would-be anchors."""
     if _seo_classify(req.orphan_link, _wp_site_host()) != "internal":
         raise HTTPException(400, "orphan_link is not an internal site link")
     hosts = _seo_bulk_hosts(req.orphan_link, req.hosts)
     if not hosts:
         raise HTTPException(400, "no usable suggested hosts (need resolvable ids; cannot link to self)")
-    return await _seo_bulk_link_orphan(req.orphan_title, req.orphan_link, hosts, req.dry_run)
+    return await _seo_bulk_link_orphan(req.orphan_title, req.orphan_link, hosts, req.dry_run,
+                                       extra_text=req.orphan_description)
 
 
 class SeoBulkLinkAllReq(BaseModel):
@@ -5075,7 +5112,8 @@ async def seo_bulk_link_all(req: SeoBulkLinkAllReq):
                 raise _TnCancelled()
             job.progress = int(i * 100 / len(linkable))
             try:
-                res = await _seo_bulk_link_orphan(o.get("title", ""), o["link"], hosts, False)
+                res = await _seo_bulk_link_orphan(o.get("title", ""), o["link"], hosts, False,
+                                                  extra_text=o.get("description") or "")
             except Exception as e:  # noqa: BLE001 — one bad orphan never kills the run
                 results.append({"orphan_link": o["link"], "error": str(e) or e.__class__.__name__})
                 continue
@@ -7012,6 +7050,25 @@ if __name__ == "__main__":
     assert bh[0]["title"] == "Host A" and bh[0]["link"] == "/host-a/", bh
     assert _seo_bulk_hosts("/orphan/", []) == [], "no suggested → no hosts"
     assert _seo_bulk_hosts("/orphan/", None) == [], "None suggested tolerated"
+    # excerpt n-grams extend the anchor pool; title phrases keep rank
+    ap_e = _seo_anchor_phrases("Khon Kaen Street Food Guide",
+                               "Bilateral trade reached US$45 billion as Thailand aims")
+    assert ap_e[0] == "Khon Kaen Street Food Guide", ap_e[:2]
+    assert "Bilateral trade reached US$45 billion" in ap_e, "excerpt n-grams pooled"
+    assert "billion as Thailand" in ap_e, "excerpt 3-grams pooled"
+    assert ap_e.index("Khon Kaen Street Food Guide") < ap_e.index("Bilateral trade reached US$45 billion"), \
+        "title phrases rank above excerpt phrases"
+    assert _seo_anchor_phrases("Trade deal guide", "more Trade deal guide prose").count("Trade deal guide") == 1, \
+        "excerpt dupes of title phrases dropped"
+    assert _seo_anchor_phrases("T", "the and of to") == [], "stopword-only extra contributes nothing"
+    # candidates find excerpt-only anchors the title misses
+    dc = _seo_anchor_candidates("Completely unrelated title words",
+                                "<p>Supply chains are shifting again.</p>",
+                                extra_text="Supply chains are shifting")
+    assert dc and dc[0]["phrase"] == "Supply chains are shifting", dc
+    assert _seo_anchor_candidates("Completely unrelated title words",
+                                  "<p>Supply chains are shifting again.</p>") == [], \
+        "without extra_text the description-only match stays hidden"
     # R1: month override
     assert _mon_for("202608") == "AUG"
     assert _mon_for("202613") is None and _mon_for("garbage") is None
