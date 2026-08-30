@@ -36,3 +36,4 @@ scripts/screenshots/
 
 # stray local spec, not Railjack
 KANBAN-SEARCH-SPEC.md
+*.tsbuildinfo
