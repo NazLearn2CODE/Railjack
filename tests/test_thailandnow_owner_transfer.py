@@ -35,6 +35,7 @@ class _MockAsyncClient:
     calls: list = []  # (method, url, json_body)
     grant_fail = False
     accept_fail = False
+    style_fail = False
     recipient_known = True  # recipient already has a permission (inherited from folder)
 
     def __init__(self, *a, **kw):
@@ -68,6 +69,10 @@ class _MockAsyncClient:
                 return _MockResponse(200, {"id": "PERM_ANYONE"})
             assert body.get("emailAddress")
             return _MockResponse(200, {"id": "PERM_NEW"})
+        if url.endswith(":batchUpdate"):
+            if type(self).style_fail:
+                return _MockResponse(500, {}, text="500 styleRefused")
+            return _MockResponse(200, {"replies": [{}]})
         raise AssertionError(f"unexpected POST {url}")
 
     async def patch(self, url, headers=None, json=None, params=None):
@@ -91,6 +96,7 @@ def _patch_http(monkeypatch):
     _MockAsyncClient.calls = []
     _MockAsyncClient.grant_fail = False
     _MockAsyncClient.accept_fail = False
+    _MockAsyncClient.style_fail = False
     _MockAsyncClient.recipient_known = True
     monkeypatch.setattr(thailandnow.httpx, "AsyncClient", _MockAsyncClient)
 
@@ -163,3 +169,42 @@ async def test_transfer_not_requested(monkeypatch):
     link, status = await thailandnow._google_create_doc("tok", "FOLDER", "N", "")
     assert status == ""
     assert not [c for c in _MockAsyncClient.calls if c[2].get("pendingOwner")]
+
+
+# --- 1-inch margins (editor spec 2026-08-30) ---
+
+
+def _batch_update_calls():
+    return [c for c in _MockAsyncClient.calls
+            if c[0] == "POST" and c[1].endswith(":batchUpdate")]
+
+
+@pytest.mark.anyio
+async def test_margins_pinned_on_every_doc(monkeypatch):
+    async def tok():
+        return None
+    monkeypatch.setattr(thailandnow, "_google_owner_token", tok)
+    link, status = await thailandnow._google_create_doc(
+        "tok", "FOLDER", "N", "", transfer_to="x@gmail.com"
+    )
+    assert link  # doc survives regardless
+    batches = _batch_update_calls()
+    assert len(batches) == 1, "style update runs even with no body text"
+    style = batches[0][2]["requests"][0]["updateDocumentStyle"]
+    doc_style = style["documentStyle"]
+    assert style["fields"] == "marginTop,marginBottom,marginLeft,marginRight"
+    for side in ("Top", "Bottom", "Left", "Right"):
+        assert doc_style[f"margin{side}"] == {"magnitude": 72, "unit": "PT"}, \
+            f"margin{side} must be exactly 1 inch (72 pt)"
+    # style must land BEFORE the pendingOwner grant (edit rights still ours)
+    pend = [i for i, c in enumerate(_MockAsyncClient.calls)
+            if c[0] == "PATCH" and c[2].get("pendingOwner")]
+    assert pend and _MockAsyncClient.calls.index(batches[0]) < pend[0]
+
+
+@pytest.mark.anyio
+async def test_style_refused_is_soft(monkeypatch):
+    _MockAsyncClient.style_fail = True
+    link, status = await thailandnow._google_create_doc("tok", "FOLDER", "N", "")
+    assert link == "https://docs.google.com/document/d/DOC_X/edit"  # doc still ships
+    assert status == ""

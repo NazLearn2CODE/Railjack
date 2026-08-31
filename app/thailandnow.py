@@ -438,12 +438,30 @@ async def _google_create_doc(
             headers=hdr, params={"sendNotificationEmail": "false"},
             json={"role": "reader", "type": "anyone"},
         )
+        # Editor spec (2026-08-30): desk docs are 1-inch margins on all sides.
+        # Drive-created Docs inherit the creator account's Docs default, which is
+        # not guaranteed to be 1", so pin all four explicitly (1" = 72 pt).
+        # MUST run before any ownership transfer (while we still hold edit rights).
+        # Soft: a style refusal is logged and the doc still ships.
+        requests = [{"updateDocumentStyle": {
+            "documentStyle": {
+                "marginTop": {"magnitude": 72, "unit": "PT"},
+                "marginBottom": {"magnitude": 72, "unit": "PT"},
+                "marginLeft": {"magnitude": 72, "unit": "PT"},
+                "marginRight": {"magnitude": 72, "unit": "PT"},
+            },
+            "fields": "marginTop,marginBottom,marginLeft,marginRight",
+        }}]
         if body:
-            await c.post(
-                f"https://docs.googleapis.com/v1/documents/{doc_id}:batchUpdate",
-                headers=hdr,
-                json={"requests": [{"insertText": {"location": {"index": 1}, "text": body}}]},
-            )
+            requests.append(
+                {"insertText": {"location": {"index": 1}, "text": body}})
+        rr = await c.post(
+            f"https://docs.googleapis.com/v1/documents/{doc_id}:batchUpdate",
+            headers=hdr, json={"requests": requests},
+        )
+        if rr.status_code >= 400:
+            print(f"[thailandnow] WARNING margin/style update failed for {doc_id}: "
+                  f"{rr.status_code} {rr.text[:200]}")
         transfer = ""
         if transfer_to:
             # helper returns "" on success → surface that as "ok" so callers can
