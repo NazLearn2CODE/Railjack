@@ -66,6 +66,19 @@ _SLOP_PATTERNS = [
 ]
 _SLOP_RES = [(re.compile(p, re.I), hint) for p, hint in _SLOP_PATTERNS]
 
+# Spelled-out quantities — Naz 2026-08-31: "69 is easier to read than sixty nine".
+# Flags number-word compounds (sixty thousand, two hundred eighty thousand, sixty-nine).
+# Single bare number words ("fifteen years") stay unflagged — too noisy near names/idioms;
+# numeral+magnitude ("3.2 million") is gem-correct and never matches (digits, not words).
+_NUMWORD = (r"(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|"
+            r"fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|"
+            r"fifty|sixty|seventy|eighty|ninety)")
+_SPOKEN_NUMBER_RE = re.compile(
+    r"\b" + _NUMWORD + r"(?:[-\s]" + _NUMWORD + r")*\s+(?:hundred|thousand|million|billion)\b"
+    r"|\b(?:twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety)[-\s]"
+    r"(?:one|two|three|four|five|six|seven|eight|nine)\b",
+    re.I)
+
 _MAX_SENTENCE_WORDS = 25
 _WORD_RANGE = (180, 250)
 _PARAGRAPH_RANGE = (2, 4)
@@ -112,6 +125,14 @@ def check_style(text: str) -> dict:
         m = pattern.search(body)
         if m:
             warnings.append({"kind": "slop", "name": m.group(0), "detail": hint})
+
+    # 2b. spelled-out quantities — numerals only (69, not "sixty nine")
+    for m in _SPOKEN_NUMBER_RE.finditer(body):
+        warnings.append({
+            "kind": "number",
+            "name": m.group(0),
+            "detail": "write numbers as numerals — 60,000, not 'sixty thousand' (69, not 'sixty-nine')",
+        })
 
     # 3. rhythm + shape heuristics
     sents = _sentences(body)

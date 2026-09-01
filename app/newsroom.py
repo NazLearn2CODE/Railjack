@@ -17,12 +17,13 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+from datetime import datetime
 from pathlib import Path
 
 from fastapi import APIRouter, Body, HTTPException
 
 from . import zai
-from .name_check import check_rewritten
+from .name_check import _HONORIFICS, check_rewritten, load_registry
 from .style_check import check_style
 
 router = APIRouter()
@@ -640,6 +641,9 @@ async def api_rewrite(body: dict = Body(...)):
         "- Wrap every person's NAME in **double-stars** per the NAME OVERLAY rule below.\n"
         "- Wrap every date, time, and relative-time expression in ~~…~~ markers "
         "(e.g. ~~July 15, 2026~~, ~~3:00 PM~~, ~~next month~~). These become underlined in the Doc.\n"
+        "- Write every number as numerals with commas (60,000, 69, 15 years) — never spelled out "
+        "('sixty thousand', 'sixty-nine'); keep the words million/billion/trillion only after a "
+        "numeral ('3.2 million').\n"
         "- **double-stars** and ~~tildes~~ are the ONLY markup allowed in `body`; no other markdown.\n\n"
         "=== NAME OVERLAY RULE (persons AND places) ===\n"
         "For every PERSON or PLACE the source names — persons, and places such as "
@@ -897,3 +901,80 @@ async def api_probe() -> dict:
         return {"ok": rc == 0}
     except HTTPException:
         return {"ok": False}
+
+
+# ── ＋wiki name register (Naz 2026-09-01) ──────────────────────────────
+# Closes the name-check loop at the point of pain: the checker flags
+# unverified names, the IDE lane verifies the English form but is read-only
+# on the vault — so verified names never landed in the registry. The panel's
+# ＋wiki button posts the verified pair here; the note lands in the vault
+# name-wiki and the next check reads clean.
+
+_NAME_WIKI = Path.home() / "Cephalon" / "10-knowledge" / "name-wiki"
+
+
+def _name_slug(english: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", english.lower()).strip("-")
+
+
+@router.post("/api/newsroom/namecheck/register")
+async def namecheck_register(body: dict = Body(...)) -> dict:
+    """Register a verified ``{english, thai, kind, source}`` pair in the vault
+    name-wiki (one template note, atomic tmp+mv). Refusals — duplicate Thai
+    key, title-carrying name, slug collision — return ``ok:false`` with a
+    reason; only malformed input raises 400. Advisory tool, never blocking."""
+    english = (body.get("english") or "").strip()
+    thai = (body.get("thai") or "").strip()
+    kind = (body.get("kind") or "person").strip()
+    source = (body.get("source") or "").strip()
+    if not english or not re.search(r"[A-Za-z]", english):
+        raise HTTPException(400, "english name missing")
+    if len(english) > 120 or len(thai) > 120 or len(source) > 500:
+        raise HTTPException(400, "field too long")
+    if re.search(r"[\u0e00-\u0e7f]", english):
+        raise HTTPException(400, "english name must be Latin")
+    if not re.search(r"[\u0e00-\u0e7f]", thai):
+        raise HTTPException(400, "thai name missing — the bracket Thai is the registry key")
+    if kind not in ("person", "place"):
+        raise HTTPException(400, "kind must be person or place")
+    if thai.startswith(_HONORIFICS):
+        return {
+            "ok": False,
+            "reason": "thai name carries a title/rank — strip to the bare name",
+        }
+    reg, _ = load_registry(_NAME_WIKI)
+    if thai in reg:
+        return {
+            "ok": False,
+            "reason": f'already registered as "{reg[thai] or thai}"',
+        }
+    slug = _name_slug(english)
+    if not slug:
+        raise HTTPException(400, "english name must contain letters")
+    note = _NAME_WIKI / f"{slug}.md"
+    if note.exists():
+        return {"ok": False, "reason": f"note file {slug}.md already exists"}
+    today = datetime.now().strftime("%Y-%m-%d")
+    tags = "name-wiki, person" if kind == "person" else "name-wiki, place"
+    text = (
+        "---\n"
+        f'title: "{english}"\n'
+        f"date: {today}\n"
+        f"updated: {today}\n"
+        f"tags: [{tags}]\n"
+        "category: knowledge\n"
+        "status: active\n"
+        f'english: "{english}"\n'
+        f'thai: "{thai}"\n'
+        f"kind: {kind}\n"
+        f"first-seen: {today}\n"
+        f'source: "{source}"\n'
+        "---\n\n"
+        f"# {english} ({thai})\n\n"
+        f"Registered {today} via the NEWSROOM panel name-check (＋wiki button).\n"
+    )
+    _NAME_WIKI.mkdir(parents=True, exist_ok=True)
+    tmp = note.with_suffix(".md.tmp")
+    tmp.write_text(text, encoding="utf-8")
+    tmp.rename(note)
+    return {"ok": True, "file": note.name, "english": english, "thai": thai}

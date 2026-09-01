@@ -700,6 +700,10 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
   const [converting, setConverting] = useState(false);
   // Thai-name fact-check surfaced from CONVERT / rewrite (advisory, 2026-08-27)
   const [nameNote, setNameNote] = useState<string | null>(null);
+  // Structured unverified warnings for the ＋wiki register buttons (2026-09-01 port)
+  const [nameWarnings, setNameWarnings] = useState<
+    { kind: string; name?: string; english?: string | null }[]
+  >([]);
   const [styleNote, setStyleNote] = useState<string | null>(null);
   const [copiedQueuePrompt, setCopiedQueuePrompt] = useState(false);
 
@@ -1607,9 +1611,9 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
     const { N, M } = cheapCounts;
     const scoutN = curated ? N + REGULAR_LANE_BUFFER : N;
     const countClause = curated
-      ? `gather ${scoutN} results (aim for at least ${M} SEA-led) — a few MORE than the ${N} I need, so I can curate`
-      : `gather EXACTLY ${scoutN} results (${M} of them SEA-led)`;
-    const promptText = `Read \`10-knowledge/radio-news-antigravity-handoff.md\` in this vault. Scout TODAY-ONLY (published today, not yesterday — this airs same-day) news for category \`${newsCategory}\`, kind \`${kind}\` — ${countClause} — from the anchor outlets first, broadening to ANY reputable non-blacklisted source to fill the count; REJECT pure stock-market churn (daily index/earnings/share-price recaps); word floor ≥180, tiering DOWN (170/160/…) only if same-day supply is short (never relax same-day); tag each piece's \`word_floor\`. Rewrite each piece into Editor Ben's broadcast voice (≥ the piece's \`word_floor\`, ≤ 250 words; rules in that note) — never date events as "today"/"this morning"/"yesterday" (rule 14), no adjective stacking and no sentences over ~25 words (rule 15) — tag SEA pieces, and write the result to \`/tmp/railjack-radio-news/latest.json\` in the exact shape shown — \`"rewritten": true\` on every piece. Do not touch any Google Doc.`;
+      ? `gather ${scoutN} results (aim for at least ${M} SEA-led — Southeast Asia EXCLUDING Thailand) — a few MORE than the ${N} I need, so I can curate`
+      : `gather EXACTLY ${scoutN} results (${M} of them SEA-led — Southeast Asia excluding Thailand)`;
+    const promptText = `Read \`10-knowledge/radio-news-antigravity-handoff.md\` in this vault. Scout TODAY-ONLY (published today, not yesterday — this airs same-day) news for category \`${newsCategory}\`, kind \`${kind}\` — ${countClause} — from the anchor outlets first, broadening to ANY reputable non-blacklisted source to fill the count; REJECT pure stock-market churn (daily index/earnings/share-price recaps); EXCLUDE Thailand entirely — no Thai-government, Thai-agency, Bangkok-centred, or Thai-domestic stories (the National desk owns Thailand; Global/Business = the world and the region, never Thailand); word floor ≥180, tiering DOWN (170/160/…) only if same-day supply is short (never relax same-day); tag each piece's \`word_floor\`. Rewrite each piece into Editor Ben's broadcast voice (≥ the piece's \`word_floor\`, ≤ 250 words; rules in that note) — never date events as "today"/"this morning"/"yesterday" (rule 14), no adjective stacking and no sentences over ~25 words (rule 15) — tag SEA pieces, and write the result to \`/tmp/railjack-radio-news/latest.json\` in the exact shape shown — \`"rewritten": true\` on every piece. Do not touch any Google Doc.`;
     try {
       await navigator.clipboard.writeText(promptText);
       setError(null);
@@ -1772,6 +1776,55 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
     return lines.length ? lines.join(" · ") : null;
   };
 
+  // ＋wiki — register a verified name pair into the vault name-wiki
+  // (2026-09-01 port). The prompt is the verification gate: confirm the
+  // English form, paste the source URL; the note lands and the warning clears.
+  const registerName = async (
+    w: { kind: string; name?: string; english?: string | null },
+  ) => {
+    const m = (w.name || "").match(/^(.*) \((.*[\u0E00-\u0E7F].*)\)$/);
+    const english = m ? m[1] : w.english || "";
+    const thai = m ? m[2] : w.name || "";
+    if (!english || !thai) {
+      setError("cannot register — no English form to verify for this name");
+      return;
+    }
+    const src = window.prompt(
+      `Register "${english} (${thai})" in the name-wiki.\nPaste the source URL that verifies the English form:`,
+      "",
+    );
+    if (src === null) return;
+    setError(null);
+    try {
+      const res = await fetch("/api/newsroom/namecheck/register", {
+        method: "POST",
+        headers: CT,
+        body: JSON.stringify({ english, thai, source: src.trim() }),
+      });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setError(typeof d.detail === "string" ? d.detail : "register failed");
+        return;
+      }
+      if (!d.ok) {
+        setError(d.reason || "register refused");
+        return;
+      }
+      setNameWarnings((ws) => ws.filter((x) => x !== w));
+      setNameNote((prev) => {
+        if (!prev) return null;
+        const drop = `unverified: ${w.name}`;
+        const rest = prev
+          .split(" · ")
+          .filter((line) => line.trim() !== drop)
+          .join(" · ");
+        return rest || null;
+      });
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
   // REWRITE: POST the Script-box text to the backend Rules-Gem pass (which
   // rides the OmniRoute gateway), then render the finished two-layer script in
   // the iframe. Inlined (not via `post`) because we need the response body.
@@ -1795,6 +1848,7 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
         setRewritten(d.rewritten || "");
         setSeo(d.seo || "");
         setNameNote(checkNote(d.namecheck));
+        setNameWarnings(d.namecheck?.warnings ?? []);
         setStyleNote(checkNote(d.stylecheck));
       }
     } catch (e: unknown) {
@@ -1837,7 +1891,7 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
   // handoff note). Brief "COPIED ✓" flash. Disabled when the Script box is empty.
   const handleCopyQueueAntigravityPrompt = async () => {
     if (!sendText.trim()) return;
-    const promptText = `Read \`10-knowledge/newsroom-rewrite-antigravity-handoff.md\` in this vault. You are Ben, editor of Thailand NOW. Rewrite the source article below into a broadcast script + AI SEO block following that note (Ben's rules + voice + \`**name**\`/\`~~date~~\` markers + Thai-name overlay + EN/TH title pair + SEO Version A+B), matching the output format of \`app/newsroom.py::rewrite()\`. Write the result to \`/tmp/newsroom-rewrite/latest.json\` in the exact JSON shape shown in the note. Do NOT touch any Google Doc.\n\n=== SOURCE ARTICLE ===\n${sendText}`;
+    const promptText = `Read \`10-knowledge/newsroom-rewrite-antigravity-handoff.md\` in this vault. You are Ben, editor of Thailand NOW. Rewrite the source article below into a broadcast script + AI SEO block following that note (Ben's rules + voice + \`**name**\`/\`~~date~~\` markers + Thai-name overlay + EN/TH title pair + SEO Version A only), matching the output format of \`app/newsroom.py::rewrite()\`. Write the result to \`/tmp/newsroom-rewrite/latest.json\` in the exact JSON shape shown in the note. Do NOT touch any Google Doc.\n\n=== SOURCE ARTICLE ===\n${sendText}`;
     try {
       await navigator.clipboard.writeText(promptText);
       setError(null);
@@ -1864,6 +1918,7 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
       setRewritten(d.rewritten || "");
       setSeo(d.seo || "");
       setNameNote(checkNote(d.namecheck));
+      setNameWarnings(d.namecheck?.warnings ?? []);
       setStyleNote(checkNote(d.stylecheck));
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "convert failed");
@@ -4515,6 +4570,19 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
       {nameNote && (
         <div className="mono px-2 text-xs" style={{ color: "var(--color-hazard)" }}>
           ⚠ namecheck: {nameNote}
+          {nameWarnings
+            .filter((w) => w.kind === "unverified")
+            .map((w) => (
+              <button
+                key={w.name}
+                onClick={() => registerName(w)}
+                title="Verify the English form, then register it in the vault name-wiki"
+                className="ml-1 px-1 rounded"
+                style={{ color: "var(--color-accent)", border: "1px solid var(--color-accent)" }}
+              >
+                ＋wiki {w.english || w.name}
+              </button>
+            ))}
         </div>
       )}
       {styleNote && (

@@ -30,6 +30,9 @@ THAI = "\u0e00-\u0e7f"
 _THAI_RUN_RE = re.compile(rf"[{THAI}]+(?:[ \t]*[{THAI}]+)*")
 # A [...] group that actually contains Thai (the allowed overlay zone).
 _BRACKETED_THAI_RE = re.compile(rf"\[[^\][\n]*[{THAI}][^\][\n]*\]")
+# English hint: the Latin word-run before a bracket — the overlay's English
+# half in `**English Name [Thai]**` (bold open optional: rendered `English [Thai]`).
+_ENGLISH_HINT_RE = re.compile(r"(?:\*\*)?([A-Za-z][A-Za-z .'’\-]*[A-Za-z.])\s*$")
 _TITLE_LINE_RE = re.compile(r"^(?:EN|TH):")
 
 # Honorific/title prefixes that must never ride inside a name overlay.
@@ -134,6 +137,10 @@ def check_rewritten(text: str, registry_dir: Path | None = None) -> dict:
         if not raw or raw in seen:
             continue
         seen.add(raw)
+        # English hint for the panel's ＋wiki register button: the Latin run
+        # immediately before the bracket (None for bare-Thai brackets).
+        hint = _ENGLISH_HINT_RE.search(body[max(0, a - 100) : a])
+        english_hint = hint.group(1).strip() if hint else None
         # Legacy overlay shape `English(Thai)` (2026-08-26 rule): verify the
         # THAI part against the registry, surface the readable form, and guard
         # the english spelling against the registry's verified rendering.
@@ -169,6 +176,7 @@ def check_rewritten(text: str, registry_dir: Path | None = None) -> dict:
                 {
                     "kind": "unverified",
                     "name": display,
+                    "english": english_hint,
                     "detail": "not in name-wiki yet — verify the English form, then register",
                 }
             )

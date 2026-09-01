@@ -17,7 +17,7 @@ def _blob(body: str) -> str:
 def test_clean_blob_passes_with_no_warnings():
     p1 = (
         "Flooding swept through the market district of Chiang Mai on ~~Tuesday~~, "
-        "damaging more than two hundred stalls along the Ping river. City officials "
+        "damaging more than 200 stalls along the Ping river. City officials "
         "moved vendors to higher ground within hours and closed three riverside roads "
         "as the water kept rising. **Anutin Charnvirakul [อนุทิน ชาญวีรกูล]** chaired "
         "an emergency meeting by video link and ordered fast payments for the "
@@ -25,7 +25,7 @@ def test_clean_blob_passes_with_no_warnings():
         "arcade before dawn on ~~Wednesday~~."
     )
     p2 = (
-        "The Chiang Mai chamber of commerce estimates losses at forty million baht "
+        "The Chiang Mai chamber of commerce estimates losses at 40 million baht "
         "and asked the city to waive market fees for a month. Shop owners stacked "
         "sandbags along the arcade entrances while volunteers carried goods to the "
         "upper floor of the market hall. Forecasters expect the river to fall below "
@@ -98,3 +98,22 @@ def test_first_person_and_curly_quotes_warn():
     out = check_style(_blob("Our reporters saw the scene, and we counted “three” vans."))
     kinds = [w["kind"] for w in out["warnings"]]
     assert "first-person" in kinds and "quotes" in kinds
+
+
+def test_spelled_numbers_warn():
+    body = (
+        "The ministry paid sixty thousand baht for sixty-nine cameras. "
+        "Officials confirmed 3.2 million visitors and 205 billion dollars in trade."
+    )
+    res = check_style(_blob(body))
+    nums = [w for w in res["warnings"] if w["kind"] == "number"]
+    flagged = " | ".join(w["name"] for w in nums)
+    assert "sixty thousand" in flagged, flagged
+    assert "sixty-nine" in flagged, flagged
+    assert "3.2 million" not in flagged and "205 billion" not in flagged, flagged
+
+
+def test_numerals_clean_no_number_warning():
+    body = "Thailand will ship 60,000 tons of rice worth 69 million dollars."
+    res = check_style(_blob(body))
+    assert not [w for w in res["warnings"] if w["kind"] == "number"]
