@@ -19,7 +19,7 @@ def _client(monkeypatch, rc=0, out=b"{}", err=b""):
     """App with only the newsroom router; ``_run`` captures argv."""
     calls: list[list[str]] = []
 
-    async def fake_run(argv, timeout=90):
+    async def fake_run(argv, timeout=90, stdin=None):
         calls.append(list(argv))
         return rc, out, err
 

@@ -78,6 +78,114 @@ const renderRewritePreview = (text: string, seoBlock: string) => {
 const buildLoadText = (body: string, seoBlock: string, footage?: string) =>
   [footage?.trim(), body.trim(), seoBlock.trim()].filter(Boolean).join("\n\n");
 
+// ── INFOGRAPHICS ([inf]…[inf/] TV-safe PNG pipeline) — parity port of Somatic
+// fea25ee..58314bd. Option lists MIRROR the backend catalogs (newsroom.py
+// _INF_STYLES / _INF_MOTIONS) — keep in sync on any catalog edit.
+const INF_STYLE_OPTIONS = [
+  { id: "auto", label: "Auto (mood-matched)" },
+  { id: "flat-navy", label: "Flat Navy" },
+  { id: "editorial-print", label: "Editorial Print" },
+  { id: "swiss", label: "Swiss Grid" },
+  { id: "glass-panel", label: "Glass Panel" },
+  { id: "isometric", label: "Isometric" },
+  { id: "blueprint", label: "Blueprint" },
+  { id: "chalkboard", label: "Chalkboard" },
+  { id: "neon-data", label: "Neon Data" },
+  { id: "botanical", label: "Botanical Craft" },
+  { id: "line-art", label: "Line Art" },
+  { id: "mono-alert", label: "Mono Alert" },
+  { id: "papercut", label: "Papercut" },
+  { id: "retro-travel", label: "Retro Travel" },
+  { id: "brick-lab", label: "Brick Lab" },
+  { id: "anime-pop", label: "Anime Pop" },
+  { id: "kawaii", label: "Kawaii" },
+];
+
+// Mirrors backend _INF_MOTIONS (newsroom.py) — keep in sync on catalog edits.
+const INF_MOTION_OPTIONS = [
+  { id: "auto", label: "Auto (content+mood)" },
+  { id: "ticker", label: "Count-up ticker" },
+  { id: "bars-grow", label: "Sequential bar growth" },
+  { id: "chart-seq", label: "Guided chart sequence" },
+  { id: "pulse-points", label: "Pulsing data points" },
+  { id: "ring-fill", label: "Percentage ring fill" },
+  { id: "cycle-rotate", label: "Rotating cycle arc" },
+  { id: "connectors-draw", label: "Self-drawing connectors" },
+  { id: "step-cards", label: "Sequential step-card reveal" },
+  { id: "timeline-spine", label: "Timeline spine draw" },
+  { id: "cascade-build", label: "Cascade hierarchy build" },
+  { id: "arrow-flow", label: "Flowing chevrons" },
+  { id: "region-glow", label: "Region glow" },
+  { id: "route-draw", label: "Route draw" },
+  { id: "locator-pulse", label: "Locator pin pulse" },
+  { id: "parallax-drift", label: "2.5D parallax drift" },
+  { id: "cinemagraph", label: "Cinemagraph" },
+  { id: "grid-morph", label: "Grid morph" },
+  { id: "light-sweep", label: "Light sweep" },
+  { id: "float-bob", label: "Floating hero" },
+  { id: "breathing-glow", label: "Breathing glow" },
+  { id: "particles-drift", label: "Particle drift" },
+  { id: "cloud-drift", label: "Cloud shadow drift" },
+  { id: "water-ripple", label: "Water ripple" },
+  { id: "flag-wave", label: "Flag wave" },
+  { id: "steam-rise", label: "Steam and smoke" },
+  { id: "crowd-sway", label: "Crowd sway" },
+  { id: "traffic-flow", label: "Traffic flow" },
+  { id: "energy-pulse", label: "Energy pulse" },
+  { id: "weather-fall", label: "Rain and snow" },
+  { id: "day-night-shift", label: "Day-night light cycle" },
+  { id: "hologram-scan", label: "Hologram scanline" },
+  { id: "shimmer-detail", label: "Detail shimmer" },
+  { id: "archival-flicker", label: "Archival flicker" },
+  { id: "dust-motes", label: "Dust motes" },
+  { id: "ember-drift", label: "Ember drift" },
+  { id: "haze-drift", label: "Haze layers" },
+  { id: "light-rays", label: "Light rays" },
+  { id: "quote-reveal", label: "Quote word reveal" },
+  { id: "underline-sweep", label: "Underline sweep" },
+  { id: "headline-sheen", label: "Headline sheen" },
+];
+
+interface InfographicFile {
+  png: string;
+  loop_prompt: string;
+  filename?: string;
+  loop_filename?: string;
+  rel_png?: string;
+  rel_loop_prompt?: string;
+  motion?: {
+    id: string;
+    label: string;
+    kinds?: string[];
+    pick_source?: string;
+  };
+}
+
+interface InfographicResult {
+  slug: string;
+  dir: string;
+  blocks: number;
+  style?: {
+    id: string;
+    label: string;
+    preset?: string;
+    matched_moods?: string[];
+    pick_source?: string;
+  };
+  palette?: {
+    id: string;
+    name: string;
+    tone?: string;
+    accent?: string;
+    bg?: string[];
+    pick_source?: string;
+  };
+  files: InfographicFile[];
+  notebook_deleted: boolean;
+  errors: string[];
+  warnings: string[];
+}
+
 // Annotated-script preview: same mono shell as the rewrite preview, but the
 // ----- INFOGRAPHIC … ----- blocks and their field lines are amber so Naz can
 // see at a glance which paragraphs got picked.
@@ -706,6 +814,12 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
   >([]);
   const [styleNote, setStyleNote] = useState<string | null>(null);
   const [copiedQueuePrompt, setCopiedQueuePrompt] = useState(false);
+  const [infStyle, setInfStyle] = useState("auto");
+  const [infMotion, setInfMotion] = useState("auto");
+  const [copiedLoop, setCopiedLoop] = useState<number | null>(null);
+  const [infGenerating, setInfGenerating] = useState(false);
+  const [infResult, setInfResult] = useState<InfographicResult | null>(null);
+  const [copiedInfPath, setCopiedInfPath] = useState(false);
 
   // RADIO Document Generator state
   const now = new Date();
@@ -1927,6 +2041,32 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
     }
   };
 
+  // 🎨 INFOGRAPHICS — generate TV-safe motion infographic PNGs + loop prompts via NotebookLM CLI
+  const generateInfographics = async () => {
+    if (!sendText.trim()) return;
+    setInfGenerating(true);
+    setError(null);
+    setInfResult(null);
+    try {
+      const res = await fetch("/api/newsroom/infographic/generate", {
+        method: "POST",
+        headers: CT,
+        body: JSON.stringify({ text: sendText, style: infStyle, motion: infMotion }),
+      });
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({ detail: res.statusText }));
+        setError(typeof d.detail === "string" ? d.detail : JSON.stringify(d.detail));
+      } else {
+        const d = await res.json();
+        setInfResult(d);
+      }
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setInfGenerating(false);
+    }
+  };
+
   return (
     <div className="flex h-full w-full flex-col gap-2 overflow-auto p-3">
       {/* Tab toggle + author filter */}
@@ -2131,6 +2271,48 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
                           title="Mark which body paragraphs deserve a motion infographic (advisory — never rewrites the news)"
                         >
                           {infoSuggesting ? "READING…" : "📊 INFOGRAPHICS"}
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="lane">
+                      <span className="lane__tag">infographics</span>
+                      <div className="lane__row items-center gap-1">
+                        <select
+                          className="btn btn--compact"
+                          style={{ background: "var(--color-void)", color: "var(--color-phosphor)", padding: "2px 4px", fontSize: 11 }}
+                          value={infStyle}
+                          onChange={(e) => setInfStyle(e.target.value)}
+                          disabled={infGenerating}
+                          title="Auto = one random style drawn from the article's mood pool, shared by all blocks. Pick a style to force it."
+                        >
+                          {INF_STYLE_OPTIONS.map((opt) => (
+                            <option key={opt.id} value={opt.id}>
+                              {opt.label}
+                            </option>
+                          ))}
+                        </select>
+                        <select
+                          className="btn btn--compact"
+                          style={{ background: "var(--color-void)", color: "var(--color-signal)", padding: "2px 4px", fontSize: 11 }}
+                          value={infMotion}
+                          onChange={(e) => setInfMotion(e.target.value)}
+                          disabled={infGenerating}
+                          title="Motion style for the Flow loop prompts. Auto = picked per block from its content type (stat / process / map / photo / typography) and mood."
+                        >
+                          {INF_MOTION_OPTIONS.map((opt) => (
+                            <option key={opt.id} value={opt.id}>
+                              {opt.label}
+                            </option>
+                          ))}
+                        </select>
+                        <button
+                          className="btn btn--hazard"
+                          onClick={() => void generateInfographics()}
+                          disabled={infGenerating || !sendText.trim()}
+                          title="Generate TV-safe motion infographic PNGs and loop prompts for [inf]...[inf/] blocks"
+                        >
+                          {infGenerating ? "GENERATING…" : "🎨 INFOGRAPHICS"}
                         </button>
                       </div>
                     </div>
@@ -2397,6 +2579,117 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
                           background: "var(--color-void)",
                         }}
                       />
+                    </div>
+                  )}
+                  {(infGenerating || infResult) && (
+                    <div className="flex min-h-0 flex-col gap-2 border border-edge p-2" style={{ background: "var(--color-void)" }}>
+                      <div className="flex items-center gap-2">
+                        <span className="label">
+                          Infographics{infGenerating ? " — generating via NotebookLM…" : ""}
+                        </span>
+                        {infResult?.style && (
+                          <span
+                            className="label"
+                            style={{ color: "var(--color-muted)" }}
+                            title={`Preset: ${infResult.style.preset || "?"} · source: ${infResult.style.pick_source || "mood"}${infResult.palette?.bg ? ` · bg ${infResult.palette.bg.join(" → ")}` : ""}`}
+                          >
+                            🎨 {infResult.style.label}
+                            {infResult.palette ? ` · ${infResult.palette.name}` : ""}
+                            {infResult.style.matched_moods && infResult.style.matched_moods.length > 0
+                              ? ` · ${infResult.style.matched_moods.join(" / ")}`
+                              : ""}
+                          </span>
+                        )}
+                        {infResult?.dir && (
+                          <button
+                            className="btn btn--compact ml-auto"
+                            style={{ padding: "2px 8px", fontSize: 11 }}
+                            onClick={() => {
+                              void navigator.clipboard.writeText(infResult.dir);
+                              setCopiedInfPath(true);
+                              setTimeout(() => setCopiedInfPath(false), 2000);
+                            }}
+                            title="Copy output folder path"
+                          >
+                            {copiedInfPath ? "COPIED ✓" : "📁 copy path"}
+                          </button>
+                        )}
+                      </div>
+
+                      {infResult?.warnings && infResult.warnings.length > 0 && (
+                        <div className="flex flex-col gap-0.5 text-xs mono" style={{ color: "var(--color-hazard)" }}>
+                          {infResult.warnings.map((w, idx) => (
+                            <div key={idx}>⚠ {w}</div>
+                          ))}
+                        </div>
+                      )}
+                      {infResult?.errors && infResult.errors.length > 0 && (
+                        <div className="flex flex-col gap-0.5 text-xs mono" style={{ color: "#ef4444" }}>
+                          {infResult.errors.map((e, idx) => (
+                            <div key={idx}>✕ {e}</div>
+                          ))}
+                        </div>
+                      )}
+
+                      {infResult?.files && infResult.files.length > 0 && (
+                        <div className="flex flex-wrap gap-2 pt-1">
+                          {infResult.files.map((f, idx) => {
+                            const rel = f.rel_png || (infResult.slug ? `${infResult.slug}/${f.filename || `inf${idx + 1}.png`}` : f.png);
+                            return (
+                              <div
+                                key={idx}
+                                className="flex flex-col items-center gap-1 border border-edge p-1"
+                                style={{ background: "#0b0f14", maxWidth: 220 }}
+                              >
+                                <img
+                                  src={`/api/newsroom/infographic/file?f=${encodeURIComponent(rel)}`}
+                                  alt={`Infographic ${idx + 1}`}
+                                  style={{ width: 200, height: "auto", aspectRatio: "16/9", objectFit: "cover", display: "block" }}
+                                  onError={(e) => {
+                                    (e.target as HTMLElement).style.display = "none";
+                                  }}
+                                />
+                                <div className="flex w-full items-center justify-between mono text-xs px-1">
+                                  <span className="truncate" style={{ color: "var(--color-phosphor)", maxWidth: 160 }} title={f.filename || `inf${idx + 1}.png`}>
+                                    {f.filename || `inf${idx + 1}.png`}
+                                  </span>
+                                  <span style={{ color: "var(--color-signal)" }}>✓</span>
+                                </div>
+                                {f.motion && (
+                                  <div className="flex w-full items-center justify-between mono px-1" style={{ fontSize: 9 }}>
+                                    <span
+                                      className="truncate"
+                                      style={{ color: "var(--color-signal)", opacity: 0.85, maxWidth: 150 }}
+                                      title={`Motion: ${f.motion.id} (${f.motion.pick_source}) — recommended animation style for this block`}
+                                    >
+                                      🎬 {f.motion.label}
+                                    </span>
+                                    <button
+                                      className="btn btn--compact"
+                                      style={{ padding: "0 4px", fontSize: 9 }}
+                                      onClick={async () => {
+                                        if (!f.rel_loop_prompt) return;
+                                        try {
+                                          const r = await fetch(`/api/newsroom/infographic/file?f=${encodeURIComponent(f.rel_loop_prompt)}`);
+                                          const txt = await r.text();
+                                          await navigator.clipboard.writeText(txt);
+                                          setCopiedLoop(idx);
+                                          setTimeout(() => setCopiedLoop(null), 1500);
+                                        } catch {
+                                          /* fetch or clipboard denied — leave button state */
+                                        }
+                                      }}
+                                      title="Copy the Flow loop prompt (Frames-to-Video, first = last frame)"
+                                    >
+                                      {copiedLoop === idx ? "✓ copied" : "📋 loop"}
+                                    </button>
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
                     </div>
                   )}
                 </>

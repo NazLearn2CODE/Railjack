@@ -16,11 +16,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import random
 import re
 from datetime import datetime
 from pathlib import Path
 
 from fastapi import APIRouter, Body, HTTPException
+from fastapi.responses import FileResponse
 
 from . import zai
 from .name_check import _HONORIFICS, check_rewritten, load_registry
@@ -45,12 +47,14 @@ SEO_GEM = Path.home() / "Cephalon" / "10-knowledge" / "ai-workflow" / "gemini-ge
 PY = "python3"
 
 
-async def _run(argv: list[str], timeout: float = 90) -> tuple[int, bytes, bytes]:
+async def _run(argv: list[str], timeout: float = 90,
+               stdin: bytes | None = None) -> tuple[int, bytes, bytes]:
     proc = await asyncio.create_subprocess_exec(
         *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        stdin=asyncio.subprocess.PIPE if stdin is not None else None,
     )
     try:
-        out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        out, err = await asyncio.wait_for(proc.communicate(stdin), timeout=timeout)
     except asyncio.TimeoutError:
         proc.kill()
         raise HTTPException(504, "newsroom script timed out")
@@ -80,8 +84,8 @@ def _fail(out: bytes, err: bytes) -> str:
     return err.decode(errors="replace")[-300:].strip() or "script failed (no output)"
 
 
-async def _script(argv: list[str], timeout: float = 90):
-    rc, out, err = await _run(argv, timeout=timeout)
+async def _script(argv: list[str], timeout: float = 90, stdin: bytes | None = None):
+    rc, out, err = await _run(argv, timeout=timeout, stdin=stdin)
     if rc != 0:
         raise HTTPException(502, _fail(out, err))
     return _json(out)
@@ -133,7 +137,7 @@ async def api_append(body: dict = Body(...)):
     tab (default NL RUNDOWN; pass ``tab`` for AM/MID/EVE). `nl_append.py`
     resolves the doc (--today via Drive, or explicit --doc) and needs the
     google-workspace MCP OAuth creds on this machine."""
-    text = body.get("text", "")
+    text = _strip_inf(body.get("text", ""))
     if not text.strip():
         raise HTTPException(400, "text required")
     argv = [PY, str(APPEND)]
@@ -156,7 +160,7 @@ async def api_fill(body: dict = Body(...)):
     Calls ``nl_append.py fill --tab ... --slot N --today~~-doc ... --text ...``.
     400 if ``slot`` is missing or not an integer.
     """
-    text = body.get("text", "")
+    text = _strip_inf(body.get("text", ""))
     if not text.strip():
         raise HTTPException(400, "text required")
     slot = body.get("slot")
@@ -230,7 +234,7 @@ async def api_radio_fill(body: dict = Body(...)):
         raise HTTPException(400, "slot must be an integer: %s" % e)
     section = str(body["section"]).upper()
     block = str(body["block"]).upper()
-    text = (body.get("text") or "").strip()
+    text = _strip_inf((body.get("text") or "").strip())
     if not text:
         raise HTTPException(400, "text required")
     argv = [
@@ -810,9 +814,11 @@ _REWRITE_HANDOFF = Path("/tmp/newsroom-rewrite/latest.json")
 
 
 def _safe_namecheck(text: str) -> dict:
-    """Thai-name fact-check that can never kill a good rewrite (advisory hook)."""
+    """Thai-name fact-check that can never kill a good rewrite (advisory hook).
+    [inf] markers are stripped first — they are presentation, not checkable
+    script (parity with Somatic: markers never reach the checker)."""
     try:
-        return check_rewritten(text)
+        return check_rewritten(_strip_inf(text))
     except Exception as exc:  # pragma: no cover — checker is pure + tested
         return {
             "errors": [],
@@ -978,3 +984,952 @@ async def namecheck_register(body: dict = Body(...)) -> dict:
     tmp.write_text(text, encoding="utf-8")
     tmp.rename(note)
     return {"ok": True, "file": note.name, "english": english, "thai": thai}
+
+
+# ─────────────────────────────────────────────────────────────────────
+# INFOGRAPHICS — [inf]…[inf/] TV-safe PNG pipeline + Flow loop prompts.
+# Parity port of Somatic fea25ee..58314bd (2026-09-02, handoff via Naz).
+# Catalogs (_INF_STYLES/_INF_PALETTES/_INF_MOTIONS), art lines and the
+# _LOOP_CROSSFADE_CMD de-jerk cure are VERBATIM by invariant (panel must
+# mirror the motion catalog; the cure is lab-verified — do not "upgrade").
+# Wiring is Railjack-native: router routes, zai helper, _run/_script stdin.
+# ─────────────────────────────────────────────────────────────────────
+
+
+_INF_MARKER_RE = re.compile(r"(\[inf/?\])")
+
+
+def parse_inf_blocks(text: str) -> tuple[list[str], list[str]]:
+    """Parse [inf]...[inf/] blocks from text.
+
+    Markers work on their own lines (canonical) AND inline within a line.
+    Returns (blocks, warnings). An unclosed block runs to end of text with a
+    warning; a bare `[inf]` used as a closer auto-closes with a warning —
+    content is never lost either way.
+    """
+    blocks: list[str] = []
+    warnings: list[str] = []
+    if not text:
+        return blocks, warnings
+    in_block = False
+    current: list[str] = []
+
+    def _flush() -> None:
+        content = "\n".join(current).strip()
+        if content:
+            blocks.append(content)
+        else:
+            warnings.append("empty [inf] block")
+        current.clear()
+
+    for line in text.splitlines():
+        for token in _INF_MARKER_RE.split(line):
+            tok = token.strip()
+            if tok == "[inf]":
+                if in_block:
+                    warnings.append("unclosed [inf] block — auto-closing before new block")
+                    _flush()
+                in_block = True
+            elif tok == "[inf/]":
+                if in_block:
+                    _flush()
+                    in_block = False
+                # stray closer outside a block: ignore (lenient)
+            elif in_block and token.strip():
+                current.append(token.strip())
+
+    if in_block:
+        warnings.append("unclosed [inf] block — ran to end of text")
+        _flush()
+
+    return blocks, warnings
+
+
+def _strip_inf(text: str) -> str:
+    """Remove [inf]/[inf/] markers (own-line OR inline), keeping inner text.
+    Idempotent."""
+    if not text:
+        return ""
+    lines: list[str] = []
+    for line in text.splitlines():
+        if line.strip() in ("[inf]", "[inf/]"):
+            continue
+        if "[inf" in line:
+            stripped = _INF_MARKER_RE.sub("", line)
+            stripped = re.sub(r"\s{2,}", " ", stripped).strip()
+            lines.append(stripped)
+        else:
+            lines.append(line)
+    return "\n".join(lines)
+
+
+# Art-direction styles. `preset` MUST be one of the CLI's infographic --style
+# values (notebooklm 0.8.1 `generate infographic --help`: auto|sketch-note|
+# professional|bento-grid|editorial|instructional|bricks|clay|anime|kawaii|
+# scientific). `moods` gate the auto-pick; `general` = safe for neutral scripts.
+_INF_STYLES: list[dict] = [
+    # ── newsroom workhorses (neutral-safe) ──
+    {
+        "id": "flat-navy",
+        "label": "Flat Navy",
+        "preset": "professional",
+        "art": "flat vector motion-graphics; deep vertical gradient background over a faint thin-line geometric grid, clean sans-serif type, one bold accent.",
+        "moods": ["hard-news", "business", "science", "general"],
+        "bg_tone": "dark",
+    },
+    {
+        "id": "editorial-print",
+        "label": "Editorial Print",
+        "preset": "editorial",
+        "art": "editorial print-news look; warm paper background with a subtle tone-on-tone gradient and faint halftone dot texture, ink-drawn rules, serif display type.",
+        "moods": ["hard-news", "business", "culture", "general"],
+        "bg_tone": "light",
+    },
+    {
+        "id": "swiss",
+        "label": "Swiss Grid",
+        "preset": "bento-grid",
+        "art": "strict modernist grid; near-white background with a barely-there cool gradient and thin geometric section rules, heavy headline type, one bold accent.",
+        "moods": ["hard-news", "business", "sport", "general"],
+        "bg_tone": "light",
+    },
+    {
+        "id": "glass-panel",
+        "label": "Glass Panel",
+        "preset": "bento-grid",
+        "art": "frosted translucent panels floating over a deep gradient background with a faint geometric mesh; panels static, no shimmer.",
+        "moods": ["business", "tech", "science", "general"],
+        "bg_tone": "dark",
+    },
+    # ── science / tech / environment ──
+    {
+        "id": "isometric",
+        "label": "Isometric",
+        "preset": "scientific",
+        "art": "3D isometric flat-vector diorama on a deep gradient background with faint concentric geometric rings.",
+        "moods": ["science", "business", "tech", "environment"],
+        "bg_tone": "dark",
+    },
+    {
+        "id": "blueprint",
+        "label": "Blueprint",
+        "preset": "instructional",
+        "art": "architectural blueprint; deep background with a soft radial gradient under a precise thin grid, technical line drawings, dashed measure lines.",
+        "moods": ["science", "tech", "environment", "business"],
+        "bg_tone": "dark",
+    },
+    {
+        "id": "chalkboard",
+        "label": "Chalkboard",
+        "preset": "sketch-note",
+        "art": "classroom chalkboard; deep green-black gradient with faint chalk-dust texture, hand-drawn chalk strokes and arrows.",
+        "moods": ["science", "soft", "culture"],
+        "bg_tone": "dark",
+    },
+    {
+        "id": "neon-data",
+        "label": "Neon Data",
+        "preset": "bento-grid",
+        "art": "broadcast data-terminal; near-black gradient with a thin geometric grid and static glowing panel edges, no shimmer.",
+        "moods": ["tech", "business", "science"],
+        "bg_tone": "dark",
+    },
+    {
+        "id": "botanical",
+        "label": "Botanical Craft",
+        "preset": "clay",
+        "art": "botanical paper-craft; warm sand background with a soft daylight gradient and faint abstract leaf silhouettes, layered paper leaves.",
+        "moods": ["environment", "soft", "culture"],
+        "bg_tone": "light",
+    },
+    # ── hard-news urgency ──
+    {
+        "id": "line-art",
+        "label": "Line Art",
+        "preset": "sketch-note",
+        "art": "minimal line art; near-black gradient with a faint geometric dot lattice, thin elegant line work, one bright accent.",
+        "moods": ["hard-news", "science", "culture"],
+        "bg_tone": "dark",
+    },
+    {
+        "id": "mono-alert",
+        "label": "Mono Alert",
+        "preset": "professional",
+        "art": "wire-agency urgency; near-white diagonal gradient with hairline rules, heavy black headline type, one loud accent, zero decoration beyond the gradient.",
+        "moods": ["hard-news"],
+        "bg_tone": "light",
+    },
+    # ── culture / soft / celebration / sport ──
+    {
+        "id": "papercut",
+        "label": "Papercut",
+        "preset": "clay",
+        "art": "layered paper-cut craft diorama; cream background with a soft warm gradient and subtle paper-grain texture.",
+        "moods": ["culture", "soft", "celebration"],
+        "bg_tone": "light",
+    },
+    {
+        "id": "retro-travel",
+        "label": "Retro Travel",
+        "preset": "editorial",
+        "art": "1950s travel poster; sun-faded gradient background with vintage print texture and bold retro serif display type.",
+        "moods": ["culture", "soft", "celebration"],
+        "bg_tone": "light",
+    },
+    {
+        "id": "brick-lab",
+        "label": "Brick Lab",
+        "preset": "bricks",
+        "art": "toy building-brick diorama; light grey gradient with faint oversized brick-outline shapes, chunky brick builds, playful but tidy.",
+        "moods": ["soft", "celebration", "sport"],
+        "bg_tone": "light",
+    },
+    {
+        "id": "anime-pop",
+        "label": "Anime Pop",
+        "preset": "anime",
+        "art": "clean anime key-visual; cream background with a soft sunset gradient blush and static speed-line accents, bold linework.",
+        "moods": ["sport", "celebration", "culture"],
+        "bg_tone": "light",
+    },
+    {
+        "id": "kawaii",
+        "label": "Kawaii",
+        "preset": "kawaii",
+        "art": "soft pastel clay diorama; pastel gradient with a faint cloud-dot texture and rounded soft shapes.",
+        "moods": ["soft", "celebration"],
+        "bg_tone": "light",
+    },
+]
+_INF_STYLES_BY_ID = {s["id"]: s for s in _INF_STYLES}
+
+# Color-scheme layer — ROTATES INDEPENDENTLY of style. `tone` must match the
+# style's bg_tone (contrast safety: dark styles get light type, light styles
+# get dark type); `moods` gate the draw the same way style moods do.
+# bg = gradient pair; accent = the single loud color; type = text color.
+_INF_PALETTES: list[dict] = [
+    # ── dark-tone (light type) ──
+    {"id": "abyss-navy", "name": "Abyss Navy", "tone": "dark",
+     "bg": ["#0B1F3A", "#16345C"], "accent": "#56B4E9", "type": "#F2F6FA",
+     "moods": ["hard-news", "business", "science", "general"]},
+    {"id": "charcoal-mint", "name": "Charcoal Mint", "tone": "dark",
+     "bg": ["#1A1D21", "#0D1117"], "accent": "#3FB950", "type": "#EEF3EE",
+     "moods": ["tech", "business", "science", "general"]},
+    {"id": "midnight-magenta", "name": "Midnight Magenta", "tone": "dark",
+     "bg": ["#101820", "#1B1026"], "accent": "#DB61A2", "type": "#F5EEF5",
+     "moods": ["tech", "celebration", "culture"]},
+    {"id": "ink-crimson", "name": "Ink Crimson", "tone": "dark",
+     "bg": ["#141414", "#26100E"], "accent": "#E53935", "type": "#F5F0EE",
+     "moods": ["hard-news"]},
+    {"id": "deep-teal-amber", "name": "Deep Teal Amber", "tone": "dark",
+     "bg": ["#06323E", "#0A4A56"], "accent": "#E69F00", "type": "#EFF7F5",
+     "moods": ["science", "environment", "business"]},
+    {"id": "storm-blue", "name": "Storm Blue", "tone": "dark",
+     "bg": ["#1B2A3A", "#2E4A62"], "accent": "#A8C6E8", "type": "#EDF3F9",
+     "moods": ["hard-news", "science", "business"]},
+    {"id": "aubergine-gold", "name": "Aubergine Gold", "tone": "dark",
+     "bg": ["#241532", "#3A2150"], "accent": "#F0C24B", "type": "#F7F2EA",
+     "moods": ["culture", "celebration"]},
+    {"id": "forest-night", "name": "Forest Night", "tone": "dark",
+     "bg": ["#0E241A", "#16382A"], "accent": "#66BB6A", "type": "#EDF5EE",
+     "moods": ["environment", "soft", "science"]},
+    {"id": "espresso-rose", "name": "Espresso Rose", "tone": "dark",
+     "bg": ["#26191A", "#3B2527"], "accent": "#E08794", "type": "#F7EFF0",
+     "moods": ["soft", "culture"]},
+    {"id": "slate-signal", "name": "Slate Signal", "tone": "dark",
+     "bg": ["#23272E", "#343B45"], "accent": "#FF7043", "type": "#F0F2F5",
+     "moods": ["sport", "business", "tech"]},
+    # ── light-tone (dark type) ──
+    {"id": "paper-ink", "name": "Paper Ink", "tone": "light",
+     "bg": ["#F7F1E3", "#EFE5CF"], "accent": "#D55E00", "type": "#33302B",
+     "moods": ["culture", "business", "hard-news", "general"]},
+    {"id": "clinical-white", "name": "Clinical White", "tone": "light",
+     "bg": ["#FFFFFF", "#E9EBED"], "accent": "#C62828", "type": "#16181A",
+     "moods": ["hard-news", "science", "business", "general"]},
+    {"id": "sand-terracotta", "name": "Sand Terracotta", "tone": "light",
+     "bg": ["#F1E9DC", "#E7D8BE"], "accent": "#C96F4A", "type": "#2E2A24",
+     "moods": ["environment", "soft", "culture"]},
+    {"id": "mist-blue", "name": "Mist Blue", "tone": "light",
+     "bg": ["#EEF3F7", "#DCE6EF"], "accent": "#1F4E79", "type": "#1C2732",
+     "moods": ["business", "science", "tech", "general"]},
+    {"id": "blush-cream", "name": "Blush Cream", "tone": "light",
+     "bg": ["#FFF6EC", "#FFE2C6"], "accent": "#FF7043", "type": "#3A2A20",
+     "moods": ["soft", "celebration", "sport", "culture"]},
+    {"id": "mint-cream", "name": "Mint Cream", "tone": "light",
+     "bg": ["#F0F7F1", "#DFEEDF"], "accent": "#2E7D32", "type": "#1F2B20",
+     "moods": ["environment", "science", "soft"]},
+    {"id": "lavender-air", "name": "Lavender Air", "tone": "light",
+     "bg": ["#FDF2F4", "#F2E1EF"], "accent": "#8E4A8E", "type": "#332433",
+     "moods": ["soft", "celebration"]},
+    {"id": "butter-sky", "name": "Butter Sky", "tone": "light",
+     "bg": ["#FFF9E6", "#F5ECC8"], "accent": "#E8A100", "type": "#332B14",
+     "moods": ["celebration", "culture", "soft"]},
+    {"id": "gallery-grey", "name": "Gallery Grey", "tone": "light",
+     "bg": ["#F4F4F4", "#E4E4E6"], "accent": "#D32F2F", "type": "#1A1C1E",
+     "moods": ["hard-news", "business", "sport", "general"]},
+    {"id": "lagoon", "name": "Lagoon", "tone": "light",
+     "bg": ["#E6F4F1", "#CDE8E2"], "accent": "#0E6E62", "type": "#12312C",
+     "moods": ["environment", "soft", "celebration", "science"]},
+]
+_INF_PALETTES_BY_ID = {p["id"]: p for p in _INF_PALETTES}
+
+
+def _palette_desc(pal: dict) -> str:
+    tone_txt = ("light type on dark" if pal["tone"] == "dark"
+                else "dark type on light")
+    return (f"{pal['name']} — background gradient {pal['bg'][0]} to {pal['bg'][1]}, "
+            f"accent {pal['accent']}, type {pal['type']} ({tone_txt}). "
+            f"Use ONLY these colors; no others.")
+
+
+def _pick_palette(moods: list[str], tone: str) -> dict:
+    """Random palette matching the style's tone first (contrast safety),
+    the article's moods second; falls back to any palette of the tone."""
+    pool = [p for p in _INF_PALETTES
+            if p["tone"] == tone and any(m in p["moods"] for m in moods)]
+    if not pool:
+        pool = [p for p in _INF_PALETTES if p["tone"] == tone]
+    return dict(random.choice(pool))
+
+# Mood lexicon — one bucket per mood tag, matched against the WHOLE script.
+# Word-boundary, case-insensitive; a trailing * = any word suffix (touris*
+# hits tourist/tourists/tourism). Kept deliberately phrase-precise: a tag
+# firing widens the random style pool, it never narrows TV-safety.
+_MOOD_LEXICON: dict[str, tuple[str, ...]] = {
+    "hard-news": (
+        "war", "conflict", "clash", "attack", "airstrike", "military", "troop*",
+        "insurgent", "violence", "bombing", "shooting", "coup", "protest",
+        "crash", "accident", "derail*", "explosion", "flood", "earthquake",
+        "wildfire", "storm", "typhoon", "landslide", "drought", "evacuat*",
+        "casualt*", "killed", "death", "died", "injur*", "court", "police",
+        "arrest*", "trial", "sentenc*", "guilty", "fraud", "scam", "smuggl*",
+        "traffick*", "corruption", "lawsuit", "crisis", "election", "parliament",
+        "senate", "cabinet", "minister*", "policy", "border",
+    ),
+    "business": (
+        "econom*", "gdp", "export*", "import*", "trade", "invest*", "stock",
+        "baht", "inflation", "interest rate", "bank", "budget", "deficit",
+        "surplus", "revenue", "tariff*", "manufactur*", "factory",
+        "unemploym*", "jobless", "merger", "acquisition", "ipo", "subsid*",
+        "fiscal", "touris*", "market*", "compan*", "firm*", "ceo", "quarterly",
+    ),
+    "tech": (
+        "ai", "artificial intelligence", "tech", "digital", "innovation",
+        "startup*", "cyber", "data center", "robot*", "semiconductor", "5g",
+        "internet", "satellite", "app", "apps", "online", "platform*",
+    ),
+    "science": (
+        "research*", "scientif*", "laborator*", "health", "hospital*",
+        "disease", "virus", "vaccine", "outbreak", "medical", "patient*",
+        "mental", "epidemi*", "space", "climat*", "environment*", "carbon",
+        "emission*", "conservation", "wildlife", "national park", "pollution",
+        "waste", "energy", "solar", "renewable", "biodiversity", "specie*",
+        "forest*",
+    ),
+    "culture": (
+        "culture", "cultural", "festival*", "heritage", "tradition*", "temple*",
+        "ceremony", "exhibition", "concert*", "museum*", "unesco", "buddhist",
+        "monk*", "historical", "anniversary", "centenn*", "art", "arts",
+        "film*", "music", "dance", "theatre", "theater", "literature",
+        "religion",
+    ),
+    "soft": (
+        "food", "cuisine", "recipe*", "restaurant*", "street food", "travel*",
+        "tourist*", "hotel*", "lifestyle", "fashion", "beauty", "wellness",
+        "communit*", "village*", "shopping", "spa", "leisure", "family",
+        "pet", "pets",
+    ),
+    "celebration": (
+        "celebrat*", "new year", "songkran", "loy krathong", "victory",
+        "champion*", "award*", "prize*", "record-breaking", "milestone",
+        "grand opening", "inaugurat*", "gold medal*", "jubilee",
+    ),
+    "sport": (
+        "sport*", "football*", "soccer", "tournament*", "championship*",
+        "athlete*", "olympic*", "seagames", "league", "coach*", "striker",
+        "fifa", "badminton", "volleyball", "marathon", "medal*",
+    ),
+}
+_MOOD_RES = {
+    tag: re.compile(r"\b(?:" + "|".join(
+        re.escape(kw).replace(r"\*", r"\w*") for kw in kws) + r")\b", re.IGNORECASE)
+    for tag, kws in _MOOD_LEXICON.items()
+}
+
+
+def _classify_moods(text: str) -> list[str]:
+    """Mood tags present in the script — deterministic, lexicon order."""
+    if not text:
+        return []
+    return [tag for tag, rex in _MOOD_RES.items() if rex.search(text)]
+
+
+def pick_inf_look(text: str, forced: str | None = None) -> tuple[dict, dict]:
+    """ONE style + ONE palette per article, drawn INDEPENDENTLY but always
+    compatible (palette tone matches the style's bg_tone; both are
+    mood-matched). Forced dropdown style id wins; the palette still rotates.
+    Returns (style_copy, palette_copy), style annotated matched_moods +
+    pick_source, palette annotated pick_source."""
+    moods = _classify_moods(text)
+    if forced and forced != "auto":
+        s = _INF_STYLES_BY_ID.get(forced)
+        if s is not None:
+            pal = _pick_palette(moods, s["bg_tone"])
+            return dict(s, matched_moods=moods, pick_source="forced"), pal
+    pool = [s for s in _INF_STYLES if any(m in s["moods"] for m in moods)]
+    source = "mood"
+    if not pool:
+        pool = [s for s in _INF_STYLES if "general" in s["moods"]]
+        source = "general"
+    style = dict(random.choice(pool), matched_moods=moods, pick_source=source)
+    return style, _pick_palette(moods, style["bg_tone"])
+
+
+# --- Motion catalog: ONE motion per BLOCK, kind-classified + mood-gated. ----
+# kinds: stat | process | map | photo | hero (diorama ambient) | type (typography)
+# moods: the 8 script-mood tags + "general" (pool-compatible fallback marker).
+# tails describe ONLY internal-element motion — never the camera (loop safety).
+_INF_MOTIONS: list[dict] = [
+    # -- Statistic / data-driven
+    {"id": "ticker", "label": "Count-up ticker", "kinds": ["stat"],
+     "moods": ["business", "hard-news", "tech", "general"],
+     "tail": "the hero figure rolls odometer-style: digits climb to the printed value, hold, then roll back and settle exactly on the printed figure"},
+    {"id": "bars-grow", "label": "Sequential bar growth", "kinds": ["stat"],
+     "moods": ["business", "hard-news", "general"],
+     "tail": "the bars rise from the baseline one after another, hold at their printed heights, then ease back down and reset in the same order"},
+    {"id": "chart-seq", "label": "Guided chart sequence", "kinds": ["stat"],
+     "moods": ["business", "science", "tech", "general"],
+     "tail": "chart elements appear one at a time in a fixed order, hold together, then fade out in reverse order and reset"},
+    {"id": "pulse-points", "label": "Pulsing data points", "kinds": ["stat", "map"],
+     "moods": ["tech", "science", "hard-news", "general"],
+     "tail": "the data markers pulse in place, glowing brighter then dimmer in a slow rhythmic cycle, never changing position"},
+    {"id": "ring-fill", "label": "Percentage ring fill", "kinds": ["stat"],
+     "moods": ["business", "science", "general"],
+     "tail": "the ring gauge fills around its circumference to the printed value, holds, then empties at the same pace and refills"},
+    # -- Process / flow
+    {"id": "cycle-rotate", "label": "Rotating cycle arc", "kinds": ["process"],
+     "moods": ["science", "soft", "culture", "general"],
+     "tail": "an arc rotates a full 360 degrees around the stages, each stage gently pulsing as the arc passes, returning seamlessly to its start angle"},
+    {"id": "connectors-draw", "label": "Self-drawing connectors", "kinds": ["process"],
+     "moods": ["tech", "business", "hard-news", "general"],
+     "tail": "ink draws itself along the connector paths node to node, holds when complete, then un-draws back to the start and repeats"},
+    {"id": "step-cards", "label": "Sequential step-card reveal", "kinds": ["process"],
+     "moods": ["soft", "culture", "general"],
+     "tail": "the step cards fade in one by one in order, hold together briefly, then fade out and the sequence restarts"},
+    {"id": "timeline-spine", "label": "Timeline spine draw", "kinds": ["process"],
+     "moods": ["culture", "business", "hard-news", "general"],
+     "tail": "the timeline spine extends left to right while milestone dots pop in as it passes, holds, then rewinds back to the start"},
+    {"id": "cascade-build", "label": "Cascade hierarchy build", "kinds": ["process"],
+     "moods": ["tech", "business", "general"],
+     "tail": "nodes land top-down layer by layer, connectors drawing as they go, holds, then reverses upward and rebuilds"},
+    {"id": "arrow-flow", "label": "Flowing chevrons", "kinds": ["process"],
+     "moods": ["hard-news", "business", "general"],
+     "tail": "chevrons flow steadily along the path in one direction, continuous conveyor motion with no jumps"},
+    # -- Map / geography
+    {"id": "region-glow", "label": "Region glow", "kinds": ["map"],
+     "moods": ["hard-news", "science", "general"],
+     "tail": "region markers glow and fade one after another in a slow rhythmic sequence, borders staying perfectly still"},
+    {"id": "route-draw", "label": "Route draw", "kinds": ["map"],
+     "moods": ["soft", "culture", "business", "general"],
+     "tail": "the route line draws itself across the map from origin to destination, holds, then erases back and redraws"},
+    {"id": "locator-pulse", "label": "Locator pin pulse", "kinds": ["map"],
+     "moods": ["hard-news", "soft", "general"],
+     "tail": "the locator pin drops once, then pulses soft concentric rings that expand and fade, the map itself perfectly still"},
+    # -- Photo-based
+    {"id": "parallax-drift", "label": "2.5D parallax drift", "kinds": ["photo", "hero"],
+     "moods": ["culture", "soft", "general"],
+     "tail": "foreground and background layers drift a few pixels in opposite directions in depth, then ease back to the exact original alignment"},
+    {"id": "cinemagraph", "label": "Cinemagraph", "kinds": ["photo", "hero"],
+     "moods": ["culture", "soft", "general"],
+     "tail": "one small element moves in a gentle repeating motion while everything else stays perfectly frozen"},
+    {"id": "grid-morph", "label": "Grid morph", "kinds": ["photo"],
+     "moods": ["culture", "sport", "celebration", "general"],
+     "tail": "grid tiles crossfade and flip in a repeating sequence, each tile returning to its printed image before the cycle restarts"},
+    # -- Hero / diorama ambient (our PNG heroes are isometric dioramas)
+    {"id": "light-sweep", "label": "Light sweep", "kinds": ["hero"],
+     "moods": ["tech", "celebration", "business", "general"],
+     "tail": "a soft band of light sweeps slowly across the isometric diorama, dims, and sweeps again in the same direction"},
+    {"id": "float-bob", "label": "Floating hero", "kinds": ["hero"],
+     "moods": ["tech", "soft", "science", "general"],
+     "tail": "the hero element bobs gently up and down in place, its soft shadow contracting and expanding in sync"},
+    {"id": "breathing-glow", "label": "Breathing glow", "kinds": ["hero"],
+     "moods": ["science", "culture", "tech", "general"],
+     "tail": "the hero's ambient glow breathes brighter and dimmer in a slow steady rhythm, the artwork itself perfectly still"},
+    {"id": "particles-drift", "label": "Particle drift", "kinds": ["hero"],
+     "moods": ["celebration", "soft", "tech", "general"],
+     "tail": "tiny ambient particles drift slowly upward through the scene, fading out as they respawn below, density constant"},
+    {"id": "cloud-drift", "label": "Cloud shadow drift", "kinds": ["hero"],
+     "moods": ["soft", "science", "culture", "general"],
+     "tail": "soft cloud shadows drift slowly across the diorama from one edge to the other, wrapping around seamlessly"},
+    {"id": "water-ripple", "label": "Water ripple", "kinds": ["hero"],
+     "moods": ["soft", "science", "general"],
+     "tail": "water surfaces ripple gently in place, concentric waves expanding and fading, the shoreline fixed"},
+    {"id": "flag-wave", "label": "Flag wave", "kinds": ["hero"],
+     "moods": ["hard-news", "sport", "celebration", "general"],
+     "tail": "flags and cloth elements wave in a steady breeze, fabric ripples traveling smoothly corner to corner"},
+    {"id": "steam-rise", "label": "Steam and smoke", "kinds": ["hero"],
+     "moods": ["soft", "culture", "general"],
+     "tail": "steam or smoke rises steadily and dissipates as it climbs, the source point fixed, density constant"},
+    {"id": "crowd-sway", "label": "Crowd sway", "kinds": ["hero"],
+     "moods": ["sport", "celebration", "culture", "general"],
+     "tail": "tiny figures in the scene sway and shift weight subtly in place, never leaving their positions"},
+    {"id": "traffic-flow", "label": "Traffic flow", "kinds": ["hero"],
+     "moods": ["business", "hard-news", "general"],
+     "tail": "vehicles flow steadily along the roads and wrap from exit back to entry, density and pace constant"},
+    {"id": "energy-pulse", "label": "Energy pulse", "kinds": ["hero", "process"],
+     "moods": ["tech", "science", "general"],
+     "tail": "pulses of light travel along the circuit-like lines and wrap from end back to start, evenly spaced"},
+    {"id": "weather-fall", "label": "Rain and snow", "kinds": ["hero"],
+     "moods": ["hard-news", "science", "general"],
+     "tail": "rain or snow falls steadily through the scene at a constant angle and pace, wrapping top to bottom seamlessly"},
+    {"id": "day-night-shift", "label": "Day-night light cycle", "kinds": ["hero"],
+     "moods": ["culture", "science", "soft", "general"],
+     "tail": "the scene's lighting shifts slowly from warm daylight to cool dusk and back, color temperature only, no geometry moves"},
+    {"id": "hologram-scan", "label": "Hologram scanline", "kinds": ["hero"],
+     "moods": ["tech", "general"],
+     "tail": "a faint scanline sweeps down over the hero once per cycle, leaving a brief subtle glow in its wake"},
+    {"id": "shimmer-detail", "label": "Detail shimmer", "kinds": ["hero", "stat"],
+     "moods": ["celebration", "tech", "general"],
+     "tail": "metallic and glass details catch a subtle glint one after another, each settling before the next begins"},
+    # -- Documentary atmosphere (slow, serious)
+    {"id": "archival-flicker", "label": "Archival flicker", "kinds": ["hero", "photo"],
+     "moods": ["hard-news", "culture", "general"],
+     "tail": "exposure flickers very gently like archived film, brightness varying a few percent in an irregular but looping rhythm"},
+    {"id": "dust-motes", "label": "Dust motes", "kinds": ["hero"],
+     "moods": ["culture", "science", "soft", "general"],
+     "tail": "dust motes float through the light beams in slow drifting motion, wrapping at the edges seamlessly"},
+    {"id": "ember-drift", "label": "Ember drift", "kinds": ["hero"],
+     "moods": ["hard-news", "general"],
+     "tail": "embers or sparks drift slowly upward and fade, respawning below, density constant"},
+    {"id": "haze-drift", "label": "Haze layers", "kinds": ["hero"],
+     "moods": ["hard-news", "science", "general"],
+     "tail": "translucent haze layers drift slowly at different speeds, wrapping horizontally, silhouettes fixed"},
+    {"id": "light-rays", "label": "Light rays", "kinds": ["hero"],
+     "moods": ["culture", "science", "general"],
+     "tail": "volumetric light rays intensify and soften in a slow breathing cycle, their direction fixed"},
+    # -- Typography / editorial
+    {"id": "quote-reveal", "label": "Quote word reveal", "kinds": ["type"],
+     "moods": ["culture", "hard-news", "general"],
+     "tail": "the key phrase reveals word by word with a soft fade, holds complete, then fades whole and re-reveals"},
+    {"id": "underline-sweep", "label": "Underline sweep", "kinds": ["type", "stat"],
+     "moods": ["hard-news", "business", "general"],
+     "tail": "an accent underline sweeps in beneath the key phrase from left to right, holds, then retracts and sweeps again"},
+    {"id": "headline-sheen", "label": "Headline sheen", "kinds": ["type"],
+     "moods": ["celebration", "sport", "business", "general"],
+     "tail": "a subtle sheen sweeps across the headline text once per cycle, the letters never moving"},
+]
+_INF_MOTIONS_BY_ID = {m["id"]: m for m in _INF_MOTIONS}
+
+_KIND_RES = {
+    "stat": re.compile(
+        r"\d|\bpercent\b|%|\bbaht\b|\bdollar|\bbillion|\bmillion|\btrillion\b"
+        r"|\brose\b|\bfell\b|\bgrew\b|\bdrop|\bincrease|\bdecrease|\bdecline\b"
+        r"|\bsurge|\brate\b|\baverage\b|\btotal\b", re.IGNORECASE),
+    "process": re.compile(
+        r"\bstep\b|\bphase\b|\bstage\b|\bprocess\b|\broadmap\b|\btimeline\b"
+        r"|\bfirst\b|\bsecond\b|\bthird\b|\bfinally\b|\bbegan\b|\bthen\b"
+        r"|\bplan\b|\bprocedure\b", re.IGNORECASE),
+    "map": re.compile(
+        r"\bprovince|\bregion\b|\bdistrict\b|\bnorth\b|\bsouth\b|\beast\b"
+        r"|\bwest\b|\bborder|\bmap\b|\blocated\b|\bcoast\b|\briver\b"
+        r"|\bisland\b|\barea of\b|\bkm2\b|\bsquare kilometer", re.IGNORECASE),
+    "photo": re.compile(
+        r"\bfootage\b|\bphoto\b|\bphotograph|\bcamera\b|\bvideo shows\b"
+        r"|\bclip shows\b", re.IGNORECASE),
+    "type": re.compile(r"[\u201c\u201d\"]|\bslogan\b|\bquote\b|\bmotto\b", re.IGNORECASE),
+}
+
+
+def _classify_block_kinds(block: str) -> list[str]:
+    """Content kinds present in one infographic block — deterministic,
+    lexicon order. Empty list → caller falls back to the hero pool."""
+    if not block:
+        return []
+    return [kind for kind, rex in _KIND_RES.items() if rex.search(block)]
+
+
+def pick_inf_motion(block: str, article_moods: list[str],
+                    forced: str | None = None) -> dict:
+    """ONE motion per BLOCK: content-kind classified, mood-gated by the block
+    AND its article (documentary-slow vs news-urgent). Forced dropdown id
+    wins. Returns motion copy annotated matched_kinds + pick_source."""
+    if forced and forced != "auto":
+        m = _INF_MOTIONS_BY_ID.get(forced)
+        if m is not None:
+            return dict(m, matched_kinds=_classify_block_kinds(block),
+                        pick_source="forced")
+    kinds = _classify_block_kinds(block)
+    mood_pool = set(article_moods) | set(_classify_moods(block))
+    pool = [m for m in _INF_MOTIONS
+            if any(k in m["kinds"] for k in kinds)
+            and any(mo in m["moods"] for mo in mood_pool)]
+    source = "mood"
+    if not pool:
+        pool = [m for m in _INF_MOTIONS if any(k in m["kinds"] for k in kinds)]
+        source = "kind"
+    if not pool:
+        pool = [m for m in _INF_MOTIONS if "general" in m["moods"]]
+        source = "general"
+    return dict(random.choice(pool), matched_kinds=kinds, pick_source=source)
+
+
+# De-jerk loop cure (lab-verified 2026-09-02 on real Veo 8 s clips, 720+1080):
+# raw loop seam = ~55x normal frame-to-frame motion; this recipe cuts it to
+# ~2x. The bridge dissolves the clip's tail into the first 0.5 s played
+# BACKWARD, so it lands exactly on frame 0; duration=0.5-1/24 lets the fade
+# COMPLETE on the last bridge frame (no residual tail contamination).
+# Verified live: output stays exactly 8.0 s at both resolutions.
+_LOOP_CROSSFADE_CMD = (
+    'ffmpeg -i loop.mp4 -filter_complex "[0:v]split=3[a][b][c];'
+    "[a]trim=end=7.5,setpts=PTS-STARTPTS[a1];"
+    "[b]trim=start=7.5,setpts=PTS-STARTPTS[b1];"
+    "[c]trim=end=0.5,setpts=PTS-STARTPTS,reverse[cr];"
+    "[b1][cr]xfade=transition=fade:duration=0.458333:offset=0[xf];"
+    '[a1][xf]concat=n=2:v=1:a=0[out]" -map "[out]" -an loop-smooth.mp4'
+)
+
+
+def _loop_prompt(story_line: str, figures: str, motion: dict) -> str:
+    """Full Flow-ready loop txt for ONE infographic PNG: engine line, camera
+    lock, the block's motion tail, loop-closure contract, post crossfade."""
+    return (
+        f"SEAMLESS LOOP PROMPT — {story_line}\n"
+        f"MOTION STYLE: {motion['label']} ({motion['id']}, {motion['pick_source']}) — "
+        "recommended for this block's content and mood.\n"
+        f"FIGURES (verbatim, never re-render): {figures}\n\n"
+        "ENGINE: Flow → Frames-to-Video. Use this exact PNG as BOTH the first and "
+        "the last frame. Veo 3.1 (Lite or Fast), 8 s, 720p, 16:9. Omni Flash has NO "
+        "last-frame input — loops are not guaranteed on it.\n\n"
+        "----- PASTE FROM HERE INTO FLOW -----\n"
+        "PERFECTLY STATIC TRIPOD. LOCKED FRAME. ZERO camera movement, zero zoom, "
+        "zero pan, zero drift. Layout, scale, background gradient/pattern, and "
+        "typography are frozen 100% from start to end.\n"
+        f"ONLY pre-existing internal elements move: {motion['tail']}.\n"
+        "The motion is cyclical: it eases out and settles back to the exact starting "
+        "state before the clip ends — first frame = last frame, pixel-identical, "
+        "minimal motion near the loop point.\n"
+        "No new elements, no text changes, no invented figures — printed numbers "
+        "stay exactly as shown. The bottom strip of the frame stays frozen.\n"
+        "----- END PROMPT -----\n\n"
+        "POST FIX (only if the loop point still jitters — dissolve the end into "
+        "a REVERSED copy of the start so the bridge lands exactly on frame 0; "
+        "for 8 s clips):\n"
+        f"  {_LOOP_CROSSFADE_CMD}\n"
+        "  (trim points assume 8 s — for other lengths use duration−0.5 as the "
+        "head and blend the final 0.5 s reversed, fade duration 0.458333)"
+    )
+
+
+_TV_SAFE_SPEC = (
+    "- All text inside the central 80% of the frame; no text near edges.\n"
+    "- Stat/number type >= 8% of frame height; sans-serif; contrast >= 4.5:1; light-on-dark preferred.\n"
+    "- <= 3 highlighted stats and <= 5 short labels; readable in six seconds on a TV screen.\n"
+    "- Background: NEVER a plain solid fill. Use a SUBTLE gradient or a minimal geometric abstract "
+    "(thin-line grid, soft shapes, faint texture) — low contrast, low detail, never competing with the text; "
+    "demand generous whitespace (the generator's default instinct is to fill every pixel).\n"
+    "- One central HERO element: a 3D isometric object, scene, or miniature diorama depicting THIS block's "
+    "actual subject (the real landmark, building, vehicle, or scene from the block) — clean and uncluttered; "
+    "it is the focal point of the frame.\n"
+    "- Single centered focal composition (loop-friendly), suitable as the base image for a seamless loop animation.\n"
+    "- Even ambient lighting: no directional key light, no cast shadows beyond the diorama base, no lens flare, "
+    "no vignette, no film grain, no baked-in particles (these break loop animation).\n"
+    "- English-only labels. Figures VERBATIM from the marked block only — never invented, rounded, or added from the wider script.\n"
+    "- Keep the bottom 2% strip of the frame free of content — background only. (Reserved for the watermark crop; no text, icons, or key art may live there.)\n"
+    "- ABSOLUTE: no logos, no government seals or emblems, no TV channel branding, no watermarks. We are the source; stay with the given context."
+)
+
+
+def _template_brief(block: str, style: dict, palette: dict) -> str:
+    sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', block.strip()) if s.strip()]
+    digit_sentences = [s for s in sentences if re.search(r'\d', s)]
+    if digit_sentences:
+        figures_text = ", ".join(digit_sentences)
+    else:
+        figures_text = block.strip()[:400]
+
+    art = style.get("art", "")
+    return (
+        f"{art}\n"
+        f"PALETTE (LOCKED): {_palette_desc(palette)}\n\n"
+        f"Show ONLY these figures (verbatim): {figures_text}\n\n"
+        f"{_TV_SAFE_SPEC}"
+    )
+
+
+async def _compose_briefs(script: str, blocks: list[str],
+                          locked_style: dict, locked_palette: dict) -> list[dict]:
+    """One style + one palette LOCKED per ARTICLE; the LLM only art-directs
+    each block's composition inside them. Any drift (wrong style id, bad JSON,
+    wrong count) → template briefs in the SAME locked look, so every image in
+    the set stays one visual family."""
+    style_id = locked_style["id"]
+    palette_line = _palette_desc(locked_palette)
+
+    def _fallback_all() -> list[dict]:
+        return [
+            {"style": style_id, "brief": _template_brief(b, locked_style, locked_palette)}
+            for b in blocks
+        ]
+
+    art = locked_style.get("art", "")
+    system_prompt = (
+        "You are an NBT World TV-news infographic art director. You are given a broadcast script and numbered infographic blocks.\n"
+        f"The article's visual style is LOCKED to '{style_id}' — every block MUST use this exact style. Never substitute, blend, or drift to another style.\n"
+        f"OPEN every brief with this exact art line: {art}\n"
+        f"THEN on the next line: PALETTE (LOCKED): {palette_line}\n"
+        "Then art-direct each block within it: which figures to show (verbatim from that block) and how to compose it. "
+        "Each block's HERO must be a 3D isometric object, scene, or miniature diorama of THAT block's actual subject "
+        "(the real place, building, vehicle, or scene it describes). Vary only the hero and composition between blocks — "
+        "the style, palette and tone stay identical.\n\n"
+        f"TV-SAFE SPEC:\n{_TV_SAFE_SPEC}\n\n"
+        "Return ONLY a JSON array, one object per block in order:\n"
+        '[{"style": "<style_id>", "brief": "<full art-direction brief>"}]\n'
+        "Output ONLY raw JSON array. No markdown fences, no preamble, no commentary."
+    )
+
+    blocks_formatted = "\n\n".join(f"BLOCK {i + 1}:\n{b}" for i, b in enumerate(blocks))
+    user_prompt = f"FULL SCRIPT:\n{script}\n\n{blocks_formatted}"
+
+    try:
+        raw_out = await zai.zai_message(
+            user_prompt, system=system_prompt, max_tokens=4000, timeout=60
+        )
+        if not raw_out or not raw_out.strip():
+            return _fallback_all()
+
+        text_to_parse = raw_out.strip()
+        if "```" in text_to_parse:
+            m = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', text_to_parse)
+            if m:
+                text_to_parse = m.group(1).strip()
+
+        data = json.loads(text_to_parse)
+        if not isinstance(data, list) or len(data) != len(blocks):
+            return _fallback_all()
+
+        result: list[dict] = []
+        for item in data:
+            if not isinstance(item, dict):
+                return _fallback_all()
+            if item.get("style") != style_id:  # style drift → fall back as one set
+                return _fallback_all()
+            brief = item.get("brief")
+            if not brief or not isinstance(brief, str) or not brief.strip():
+                return _fallback_all()
+            result.append({
+                "style": style_id,
+                "brief": brief.strip(),
+            })
+        return result
+    except Exception:
+        return _fallback_all()
+
+
+def _crop_watermark(path: Path) -> None:
+    """Shave bottom watermark strip losslessly, keeping full width."""
+    from PIL import Image
+    if not path.exists():
+        raise FileNotFoundError(f"image not found: {path}")
+    with Image.open(path) as img:
+        w, h = img.size
+        strip = max(28, round(h * 0.018))
+        if h > strip:
+            cropped = img.crop((0, 0, w, h - strip))
+            cropped.save(path)
+
+
+async def generate_infographics(text: str, style: str = "auto",
+                                motion: str = "auto") -> dict:
+    blocks, warnings = parse_inf_blocks(text)
+    if not blocks:
+        raise HTTPException(400, "no [inf] blocks — wrap a paragraph with [inf] … [inf/] first")
+
+    # ONE style + ONE palette per article, drawn independently but tone- and
+    # mood-compatible; reused for every block = one visual family on air.
+    locked, palette = pick_inf_look(text, style)
+    briefs = await _compose_briefs(text, blocks, locked, palette)
+    article_moods = locked.get("matched_moods", [])
+
+    non_empty = [line.strip() for line in text.splitlines() if line.strip()][:5]
+    slug = ""
+    for line in non_empty:
+        m = re.search(r'EVE\w+', line)
+        if m:
+            slug = m.group(0)
+            break
+    if not slug:
+        slug = f"untitled-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+
+    date_str = datetime.now().strftime("%Y-%m-%d")
+    out_dir = Path.home() / "Downloads" / "Newsroom Infographics" / slug
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    errors: list[str] = []
+    files: list[dict] = []
+    nid: str = ""
+    notebook_deleted = False
+
+    temp_md = Path(f"/tmp/newsroom-infographic-{slug}.md")
+    try:
+        temp_md.write_text(text, encoding="utf-8")
+        title = f"NEWSROOM · {slug} · {date_str}"
+        create_res = await _script(["notebooklm", "create", title, "--json"], timeout=60)
+        nid = str((create_res.get("notebook") or create_res).get("id")
+                  or create_res.get("notebook_id") or "")
+        if not nid:
+            errors.append("failed to create notebook (no notebook ID returned)")
+        else:
+            rc_src, _, err_src = await _run([
+                "notebooklm", "source", "add", str(temp_md),
+                "-n", nid, "--title", f"{slug} script", "--json",
+            ], timeout=60)
+            if rc_src != 0:
+                errors.append(f"failed to add script source: {err_src.decode(errors='replace')}")
+
+            first_line = non_empty[0] if non_empty else slug
+            preset = locked.get("preset", "professional")
+            for i, (block, brief_item) in enumerate(zip(blocks, briefs)):
+                brief_text = brief_item.get("brief", "")
+
+                png_name = f"{slug}-inf{i + 1}.png"
+                png_path = out_dir / png_name
+                loop_name = f"{slug}-inf{i + 1}-flowlab-loop-prompt.txt"
+                loop_path = out_dir / loop_name
+
+                sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', block.strip()) if s.strip()]
+                digit_sentences = [s for s in sentences if re.search(r'\d', s)]
+
+                def plain(s: str) -> str:
+                    # loop txt is plain prose — no **/~~ markers
+                    return re.sub(r'\*+|~+', '', s)
+
+                block_figures = (", ".join(plain(s) for s in digit_sentences)
+                                 if digit_sentences else plain(block)[:200])
+
+                # ONE motion per BLOCK: kind + mood picked, forced dropdown wins.
+                motion_rec = pick_inf_motion(block, article_moods, motion)
+                loop_content = _loop_prompt(first_line, block_figures, motion_rec)
+
+                gen_argv = [
+                    "notebooklm", "generate", "infographic",
+                    "-n", nid,
+                    "--orientation", "landscape",
+                    "--detail", "standard",
+                    "--style", preset,
+                    "--wait", "--json",
+                    "--prompt-file", "-",
+                ]
+                try:
+                    await _script(gen_argv, timeout=180, stdin=brief_text.encode("utf-8"))
+                except Exception as e:
+                    errors.append(f"block {i + 1} generate failed: {e}")
+                    continue
+
+                dl_argv = [
+                    "notebooklm", "download", "infographic",
+                    "-n", nid,
+                    "--latest",
+                    "--force",
+                    str(png_path),
+                ]
+                try:
+                    rc_dl, out_dl, err_dl = await _run(dl_argv, timeout=60)
+                    if rc_dl != 0:
+                        errors.append(f"block {i + 1} download failed: {_fail(out_dl, err_dl)}")
+                        continue
+                except Exception as e:
+                    errors.append(f"block {i + 1} download failed: {e}")
+                    continue
+
+                try:
+                    _crop_watermark(png_path)
+                except Exception as e:
+                    errors.append(f"block {i + 1} watermark crop failed: {e}")
+
+                try:
+                    loop_path.write_text(loop_content, encoding="utf-8")
+                except Exception as e:
+                    errors.append(f"block {i + 1} loop prompt write failed: {e}")
+
+                files.append({
+                    "png": str(png_path),
+                    "loop_prompt": str(loop_path),
+                    "filename": png_name,
+                    "loop_filename": loop_name,
+                    "rel_png": f"{slug}/{png_name}",
+                    "rel_loop_prompt": f"{slug}/{loop_name}",
+                    "motion": {
+                        "id": motion_rec["id"],
+                        "label": motion_rec["label"],
+                        "kinds": motion_rec["matched_kinds"],
+                        "pick_source": motion_rec["pick_source"],
+                    },
+                })
+    except HTTPException as e:
+        # advisory pipeline: CLI failures (create 502, source-add 504, …) are
+        # error entries, never escapes — never raise past step 1 (validator 2026-08-31)
+        errors.append(f"infographic pipeline error: {e.detail}")
+    except Exception as e:
+        errors.append(f"infographic pipeline error: {e}")
+    finally:
+        if temp_md.exists():
+            try:
+                temp_md.unlink()
+            except Exception:
+                pass
+        if nid:
+            try:
+                rc_del, _, err_del = await _run(["notebooklm", "delete", "-y", "-n", nid], timeout=60)
+                notebook_deleted = (rc_del == 0)
+                if not notebook_deleted:
+                    errors.append(f"failed to delete notebook {nid}: {err_del.decode(errors='replace')}")
+            except Exception as e:
+                errors.append(f"failed to delete notebook {nid}: {e}")
+
+    return {
+        "slug": slug,
+        "dir": str(out_dir),
+        "blocks": len(blocks),
+        "style": {
+            "id": locked["id"],
+            "label": locked.get("label", locked["id"]),
+            "preset": locked.get("preset", ""),
+            "matched_moods": locked.get("matched_moods", []),
+            "pick_source": locked.get("pick_source", "mood"),
+        },
+        "palette": {
+            "id": palette["id"],
+            "name": palette["name"],
+            "tone": palette["tone"],
+            "accent": palette["accent"],
+            "bg": palette["bg"],
+            "pick_source": locked.get("pick_source", "mood"),
+        },
+        "files": files,
+        "notebook_deleted": notebook_deleted,
+        "errors": errors,
+        "warnings": warnings,
+    }
+
+
+@router.post("/api/newsroom/infographic/generate")
+async def api_newsroom_infographic_generate(body: dict = Body(...)) -> dict:
+    return await generate_infographics(
+        text=body.get("text", ""),
+        style=body.get("style", "auto"),
+        motion=body.get("motion", "auto"),
+    )
+
+
+@router.get("/api/newsroom/infographic/file")
+def api_newsroom_infographic_file(f: str) -> FileResponse:
+    base = (Path.home() / "Downloads" / "Newsroom Infographics").resolve()
+    if not (f.endswith(".png") or f.endswith(".txt")):
+        raise HTTPException(403, "only .png and .txt files are allowed")
+    rp = (base / f).resolve()
+    if not rp.is_relative_to(base):
+        raise HTTPException(403, "path escapes base directory")
+    if not rp.is_file():
+        raise HTTPException(404, "file not found")
+    media_type = "image/png" if f.endswith(".png") else "text/plain"
+    return FileResponse(rp, media_type=media_type)

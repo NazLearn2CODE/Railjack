@@ -11,6 +11,7 @@ dependencies = [
     "python-multipart>=0.0.18",  # FastAPI UploadFile/Form (fireside /align)
     "numpy>=2",
     "pyjwt[crypto]>=2.9",  # GA service-account JWT signing (RSA) — TRAFFIC tab
+    "pillow>=10.0",  # infographic watermark crop (newsroom [inf] pipeline)
 ]
 
 [project.optional-dependencies]
