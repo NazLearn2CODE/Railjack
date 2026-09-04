@@ -691,15 +691,27 @@ function DocPicker({
   return (
     <label className="flex flex-col gap-0.5">
       <span className="label" style={{ fontSize: 9 }}>{label}</span>
-      <button
-        type="button"
-        className="btn btn--compact"
-        onClick={() => setOpen((o) => !o)}
-        title="Pick a target doc (default: today's auto-resolve)"
-        style={{ maxWidth: 160, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
-      >
-        {picked ? picked.name : "auto (today)"}
-      </button>
+      <div className="flex items-center gap-0.5">
+        <button
+          type="button"
+          className="btn btn--compact"
+          onClick={() => setOpen((o) => !o)}
+          title="Pick a target doc (default: today's auto-resolve)"
+          style={{ maxWidth: 160, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+        >
+          {picked ? picked.name : "auto (today)"}
+        </button>
+        {picked && (
+          <button
+            type="button"
+            className="btn btn--compact"
+            onClick={() => window.open(picked.link || `https://docs.google.com/document/d/${picked.id}/edit`, "_blank", "noopener,noreferrer")}
+            title={`Open ${picked.name} in Google Docs ↗`}
+          >
+            ↗
+          </button>
+        )}
+      </div>
       {open && (
         <div
           className="flex flex-col gap-1 border border-edge p-2"
