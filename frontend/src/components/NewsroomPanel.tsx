@@ -706,9 +706,9 @@ function DocPicker({
             type="button"
             className="btn btn--compact"
             onClick={() => window.open(picked.link || `https://docs.google.com/document/d/${picked.id}/edit`, "_blank", "noopener,noreferrer")}
-            title={`Open ${picked.name} in Google Docs ↗`}
+            title={`Open ${picked.name} in Google Docs ลิ้งค์`}
           >
-            ↗
+            ลิ้งค์
           </button>
         )}
       </div>
@@ -2211,7 +2211,7 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
                       className="mono text-xs"
                       style={{ color: "var(--color-signal)" }}
                     >
-                      source ↗
+                      source ลิ้งค์
                     </a>
                   )}
 
@@ -2866,7 +2866,7 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
                         rel="noreferrer"
                         style={{ color: "var(--color-signal)" }}
                       >
-                        open ↗
+                        open ลิ้งค์
                       </a>
                     ) : null}
                   </div>
@@ -3044,7 +3044,7 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
                         rel="noreferrer"
                         style={{ color: "var(--color-signal)" }}
                       >
-                        open ↗
+                        open ลิ้งค์
                       </a>
                     ) : null}
                   </div>
@@ -3676,7 +3676,7 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
                                   rel="noreferrer"
                                   style={{ color: "var(--color-signal)" }}
                                 >
-                                  open ↗
+                                  open ลิ้งค์
                                 </a>
                               )}
                               <span
@@ -3845,7 +3845,7 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
                                   rel="noreferrer"
                                   style={{ color: "var(--color-signal)" }}
                                 >
-                                  open ↗
+                                  open ลิ้งค์
                                 </a>
                               )}
                             </div>
@@ -4082,7 +4082,7 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
                                     rel="noreferrer"
                                     style={{ color: "var(--color-signal)" }}
                                   >
-                                    open ↗
+                                    open ลิ้งค์
                                   </a>
                                 )}
                               </div>
@@ -4101,7 +4101,7 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
                                     rel="noreferrer"
                                     style={{ color: "var(--color-signal)" }}
                                   >
-                                    open ↗
+                                    open ลิ้งค์
                                   </a>
                                 )}
                               </div>
@@ -4259,7 +4259,7 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
                             className="underline ml-1"
                             style={{ color: "var(--color-signal)" }}
                           >
-                            Open Doc ↗
+                            Open Doc ลิ้งค์
                           </a>
                         )}
                       </div>
@@ -4303,7 +4303,7 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
                           className="underline"
                           style={{ color: "var(--color-signal)" }}
                         >
-                          Open Updated Doc ↗
+                          Open Updated Doc ลิ้งค์
                         </a>
                       )}
                     </div>
@@ -4342,7 +4342,7 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
                             rel="noreferrer"
                             style={{ color: "var(--color-signal)" }}
                           >
-                            open ↗
+                            open ลิ้งค์
                           </a>
                         )}
                       </div>
@@ -4599,7 +4599,7 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
                                   rel="noreferrer"
                                   style={{ color: "var(--color-signal)" }}
                                 >
-                                  open ↗
+                                  open ลิ้งค์
                                 </a>
                               )}
                             </div>
@@ -4630,7 +4630,7 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
                                   rel="noreferrer"
                                   style={{ color: "var(--color-signal)" }}
                                 >
-                                  open ↗
+                                  open ลิ้งค์
                                 </a>
                               )}
                             </div>
@@ -4681,7 +4681,7 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
                                     rel="noreferrer"
                                     style={{ color: "var(--color-signal)" }}
                                   >
-                                    open ↗
+                                    open ลิ้งค์
                                   </a>
                                 )}
                               </div>
@@ -4798,7 +4798,7 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
                             style={{ color: "var(--color-signal)" }}
                           >
                             <span>📄</span>
-                            <span>{recPreview.rundown_name || "RUNDOWN DOC"} ↗</span>
+                            <span>{recPreview.rundown_name || "RUNDOWN DOC"} ลิ้งค์</span>
                           </a>
                         )}
                         {recPreview.prompter_url && (
@@ -4810,7 +4810,7 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
                             style={{ color: "var(--color-signal)" }}
                           >
                             <span>📄</span>
-                            <span>{recPreview.prompter_name || "PROMPTER DOC"} ↗</span>
+                            <span>{recPreview.prompter_name || "PROMPTER DOC"} ลิ้งค์</span>
                           </a>
                         )}
                       </div>

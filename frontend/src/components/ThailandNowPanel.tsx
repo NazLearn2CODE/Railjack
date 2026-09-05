@@ -931,7 +931,7 @@ function HealthSubTab() {
                       </span>
                     )}
                     <a href={o.link} target="_blank" rel="noreferrer" title="open article"
-                      className="mono text-xs ml-1" style={{ color: "var(--color-muted)" }}>↗</a>
+                      className="mono text-xs ml-1" style={{ color: "var(--color-muted)" }}>ลิ้งค์</a>
                     <WpEdit id={o.id} link={o.link} />
                     {o.suggested.length > 0 && (
                       <span className="mono text-xs" style={{ color: "var(--color-muted)" }}>
@@ -4575,7 +4575,7 @@ function WpOpTab() {
                     rel="noreferrer"
                     className="btn btn--compact btn--go text-xs font-bold"
                   >
-                    OPEN DRAFT #{publishResult.wp_id} ↗
+                    OPEN DRAFT #{publishResult.wp_id} ลิ้งค์
                   </a>
                   {publishResult.images_uploaded > 0 && (
                     <span className="mono text-xs" style={{ color: "var(--color-muted)" }}>
