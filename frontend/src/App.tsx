@@ -4,22 +4,16 @@ import { fetchJSON, usePolling } from "./api";
 import { useStore, dockOpenFor, type AppConfig, type ModuleConfig } from "./store";
 import ModuleRail from "./components/ModuleRail";
 import FramePanel from "./components/FramePanel";
-import FfmpegPanel from "./components/FfmpegPanel";
 import ComfyPanel from "./components/ComfyPanel";
-import NotebookPanel from "./components/NotebookPanel";
 import NewsroomPanel from "./components/NewsroomPanel";
 import ThailandNowPanel from "./components/ThailandNowPanel";
-import KanbanPanel from "./components/KanbanPanel";
 import CalendarPanel from "./components/CalendarPanel";
 
 // kind:"panel" modules render their panel component from this map.
 const PANELS: Record<string, FC<{ module: ModuleConfig }>> = {
-  ffmpeg: FfmpegPanel,
   comfyui: ComfyPanel,
-  notebooklm: NotebookPanel,
   newsroom: NewsroomPanel,
   thailandnow: ThailandNowPanel,
-  kanban: KanbanPanel,
   calendar: CalendarPanel,
 };
 

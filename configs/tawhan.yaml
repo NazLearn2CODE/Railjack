@@ -38,24 +38,6 @@ modules:
       output_dir: "/var/home/NAZ/Coding Projects/ComfyUI/output"
       vram_gb: 24
       api: "http://127.0.0.1:8188"
-  - id: ffmpeg
-    title: VIDEO LAB
-    kind: panel
-    panel: ffmpeg
-    options:
-      # media_dirs seed the workspace on first load; ADD FOOTAGE can pull from
-      # anywhere under browse_root (~). output_dir is the default render folder.
-      media_dirs: ["~/Downloads/B-Rolls", "~/Videos", "~/ttyd-drops"]
-      lut_dir: "~/Videos/LUTs"
-      browse_root: "~"
-      output_dir: "~/Downloads/VDO Outputs"
-  - id: notebooklm
-    title: RESEARCH
-    kind: panel
-    panel: notebooklm
-    options:
-      output_dir: "~/Downloads/NotebookLM Outputs"
-      browse_root: "~"
   - id: newsroom
     title: NEWSROOM
     kind: panel          # TV writing pipeline Half-1 — thin HUD over the newsroom skill CLI
@@ -106,17 +88,6 @@ modules:
     url: /n8n/
     health: { type: http, url: "http://127.0.0.1:5678/healthz" }
     manage: { type: systemd-user, unit: n8n.service }
-  - id: kanban
-    title: KANBAN
-    kind: panel
-    panel: kanban
-    # Native board (app/kanban.py) over SQLite at options.db_path. MVP for
-    # tracking projects; modeled on Kanboard (projects × columns × swimlanes ×
-    # tasks, integer-position renumber per cell).
-    options:
-      db_path: ~/.config/railjack/kanban.db
-      default_columns: [Backlog, "To Do", "In Progress", Done]
-      watchdog_max_minutes: 20   # kill a stalled worker past this; catches glm-5.2 stalls
   - id: calendar
     title: CALENDAR
     kind: panel          # working calendar + prompt launcher (app/calendar_tasks.py)
