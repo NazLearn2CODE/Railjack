@@ -4017,9 +4017,9 @@ function VdoGuideFigure({ src, caption, wide }: { src: string; caption: string; 
       <img
         src={src}
         alt={caption}
-        style={{ width: "100%", display: "block", border: "1px solid #c9c4b8", borderRadius: 4 }}
+        style={{ width: "100%", display: "block", border: "1px solid #3a4048", borderRadius: 4 }}
       />
-      <figcaption style={{ fontSize: 13, color: "#555", marginTop: 4 }}>{caption}</figcaption>
+      <figcaption style={{ fontSize: 13, color: "#a8a296", marginTop: 4 }}>{caption}</figcaption>
     </figure>
   );
 }
@@ -4044,20 +4044,20 @@ function VdoGuideTab() {
   return (
     <div
       className="flex flex-col flex-grow overflow-y-auto p-4"
-      style={{ background: "#f7f5f0", borderRadius: 8 }}
+      style={{ background: "#141920", borderRadius: 8 }}
     >
-      <div style={{ maxWidth: 880, margin: "0 auto", width: "100%", fontFamily: "Georgia, 'Times New Roman', serif", lineHeight: 1.5 }}>
-        <p style={{ margin: 0, fontSize: 12, letterSpacing: 1, color: "#8a857a" }}>
+      <div style={{ maxWidth: 880, margin: "0 auto", width: "100%", fontFamily: "Georgia, 'Times New Roman', serif", lineHeight: 1.5, color: "#e6e2d8" }}>
+        <p style={{ margin: 0, fontSize: 12, letterSpacing: 1, color: "#a8a296" }}>
           THAILAND NOW » STORY SCOUT » FIRESIDE MODE
         </p>
-        <h1 style={{ margin: "2px 0 2px", fontFamily: VDO_GUIDE_FONT, fontWeight: 700, fontSize: 34 }}>
+        <h1 style={{ margin: "2px 0 2px", fontFamily: VDO_GUIDE_FONT, fontWeight: 700, fontSize: 34, color: "#f2efe8" }}>
           VDO GUIDE
         </h1>
-        <p style={{ margin: "0 0 18px", color: "#444" }}>
+        <p style={{ margin: "0 0 18px", color: "#c9c4b8" }}>
           How to write a VDO edit guide for the Fireside VDO editor — style reference with samples.
         </p>
 
-        <h2 style={{ fontFamily: VDO_GUIDE_FONT, fontSize: 20, borderBottom: "2px solid #111", paddingBottom: 4 }}>
+        <h2 style={{ fontFamily: VDO_GUIDE_FONT, fontSize: 20, borderBottom: "2px solid #e6e2d8", paddingBottom: 4, color: "#f2efe8" }}>
           1 · Title card
         </h2>
         <ul style={{ margin: "8px 0", paddingLeft: 22 }}>
@@ -4079,7 +4079,7 @@ function VdoGuideTab() {
           "title-demo"
         )}
 
-        <h2 style={{ fontFamily: VDO_GUIDE_FONT, fontSize: 20, borderBottom: "2px solid #111", paddingBottom: 4, marginTop: 26 }}>
+        <h2 style={{ fontFamily: VDO_GUIDE_FONT, fontSize: 20, borderBottom: "2px solid #e6e2d8", paddingBottom: 4, color: "#f2efe8", marginTop: 26 }}>
           2 · Sub-headers
         </h2>
         <ul style={{ margin: "8px 0", paddingLeft: 22 }}>
@@ -4112,7 +4112,7 @@ function VdoGuideTab() {
           caption="Sub-header on a solid black bar with transparency (Futura 75, bold; italics for highlights)."
         />
 
-        <h2 style={{ fontFamily: VDO_GUIDE_FONT, fontSize: 20, borderBottom: "2px solid #111", paddingBottom: 4, marginTop: 26 }}>
+        <h2 style={{ fontFamily: VDO_GUIDE_FONT, fontSize: 20, borderBottom: "2px solid #e6e2d8", paddingBottom: 4, color: "#f2efe8", marginTop: 26 }}>
           3 · Infographics
         </h2>
         <ul style={{ margin: "8px 0", paddingLeft: 22 }}>
@@ -4150,7 +4150,7 @@ function VdoGuideTab() {
           />
         </div>
 
-        <p style={{ fontSize: 12, color: "#8a857a", borderTop: "1px solid #d8d3c8", marginTop: 22, paddingTop: 8 }}>
+        <p style={{ fontSize: 12, color: "#a8a296", borderTop: "1px solid #3a4048", marginTop: 22, paddingTop: 8 }}>
           Reference only — this page documents the style; the guide itself is written per episode.
         </p>
       </div>
