@@ -4025,22 +4025,6 @@ function VdoGuideFigure({ src, caption, wide }: { src: string; caption: string; 
 }
 
 function VdoGuideTab() {
-  const demoStrip = (children: React.ReactNode, key?: string) => (
-    <div
-      key={key}
-      style={{
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        minHeight: 110,
-        borderRadius: 6,
-        margin: "10px 0",
-        background: "linear-gradient(135deg, #3d4a52 0%, #22303a 60%, #17222b 100%)",
-      }}
-    >
-      {children}
-    </div>
-  );
   return (
     <div
       className="flex flex-col flex-grow overflow-y-auto p-4"
@@ -4048,7 +4032,7 @@ function VdoGuideTab() {
     >
       <div style={{ maxWidth: 880, margin: "0 auto", width: "100%", fontFamily: "Georgia, 'Times New Roman', serif", lineHeight: 1.5, color: "#e6e2d8" }}>
         <p style={{ margin: 0, fontSize: 12, letterSpacing: 1, color: "#a8a296" }}>
-          THAILAND NOW » STORY SCOUT » FIRESIDE MODE
+          THE FIRESIDE
         </p>
         <h1 style={{ margin: "2px 0 2px", fontFamily: VDO_GUIDE_FONT, fontWeight: 700, fontSize: 34, color: "#f2efe8" }}>
           VDO GUIDE
@@ -4064,20 +4048,10 @@ function VdoGuideTab() {
           <li>Typeface: <b>Futura 100</b>, 150&nbsp;pt, <b>bold</b>.</li>
           <li>Color: black, with a <b>maximum-intensity white glow</b>.</li>
         </ul>
-        {demoStrip(
-          <span
-            style={{
-              fontFamily: VDO_GUIDE_FONT,
-              fontWeight: 700,
-              fontSize: 56,
-              color: "#000",
-              textShadow: "0 0 10px #fff, 0 0 22px #fff, 0 0 40px #fff",
-            }}
-          >
-            SAMPLE TITLE
-          </span>,
-          "title-demo"
-        )}
+        <VdoGuideFigure
+          src="/vdo-guide/titleCARD.png"
+          caption="Title card — Futura 100, 150 pt, bold; black with a maximum-intensity white glow."
+        />
 
         <h2 style={{ fontFamily: VDO_GUIDE_FONT, fontSize: 20, borderBottom: "2px solid #e6e2d8", paddingBottom: 4, color: "#f2efe8", marginTop: 26 }}>
           2 · Sub-headers
@@ -4092,24 +4066,13 @@ function VdoGuideTab() {
             short b-roll guide saying what footage should run under it.
           </li>
         </ul>
-        {demoStrip(
-          <span
-            style={{
-              fontFamily: VDO_GUIDE_FONT,
-              fontWeight: 700,
-              fontSize: 26,
-              background: "rgba(0,0,0,0.55)",
-              color: "#fff",
-              padding: "6px 18px",
-            }}
-          >
-            SUB-HEADER WITH AN <i>EMPHASIZED</i> WORD
-          </span>,
-          "subheader-demo"
-        )}
         <VdoGuideFigure
           src="/vdo-guide/sample3.png"
           caption="Sub-header on a solid black bar with transparency (Futura 75, bold; italics for highlights)."
+        />
+        <VdoGuideFigure
+          src="/vdo-guide/Sub-titleCARD.png"
+          caption="Sub-title card style reference."
         />
 
         <h2 style={{ fontFamily: VDO_GUIDE_FONT, fontSize: 20, borderBottom: "2px solid #e6e2d8", paddingBottom: 4, color: "#f2efe8", marginTop: 26 }}>
