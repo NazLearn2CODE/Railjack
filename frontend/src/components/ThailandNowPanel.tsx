@@ -3326,7 +3326,7 @@ function FiresidePanel() {
 /* ------------------------------- STORY SCOUT ------------------------------ */
 
 function StoryScoutTab() {
-  const [scoutMode, setScoutMode] = usePersistentState<"pitch" | "image" | "fireside">("tn.scout.mode", "pitch");
+  const [scoutMode, setScoutMode] = usePersistentState<"pitch" | "image" | "fireside" | "vdoguide">("tn.scout.mode", "pitch");
   const [query, setQuery]         = usePersistentState("tn.scout.query", "");
   const [category, setCategory]   = usePersistentState("tn.scout.category", "");
   const [days, setDays]           = usePersistentState("tn.scout.days", 7);
@@ -3562,6 +3562,12 @@ function StoryScoutTab() {
             onClick={() => setScoutMode("fireside")}
           >
             FIRESIDE MODE
+          </button>
+          <button
+            className={`btn btn--compact ${scoutMode === "vdoguide" ? "btn--signal" : ""}`}
+            onClick={() => setScoutMode("vdoguide")}
+          >
+            VDO GUIDE
           </button>
         </div>
       </div>
@@ -3989,11 +3995,166 @@ function StoryScoutTab() {
             )}
           </div>
         </div>
+      ) : scoutMode === "vdoguide" ? (
+        <VdoGuideTab />
       ) : (
         /* FIRESIDE MODE Panel */
         <FiresidePanel />
       )}
     </section>
+  );
+}
+
+/* VDO GUIDE tab — document-style reference for writing VDO edit guides for the
+   Fireside VDO editor. Rules per Naz (2026-09-06), grammar + grouping tidied;
+   sample frames live in frontend/public/vdo-guide/ (served at /vdo-guide/). */
+const VDO_GUIDE_FONT =
+  "'Futura', 'Futura PT', 'Futura Md BT', 'Century Gothic', 'Trebuchet MS', sans-serif";
+
+function VdoGuideFigure({ src, caption, wide }: { src: string; caption: string; wide?: boolean }) {
+  return (
+    <figure style={{ margin: "10px 0", maxWidth: wide ? "100%" : 560 }}>
+      <img
+        src={src}
+        alt={caption}
+        style={{ width: "100%", display: "block", border: "1px solid #c9c4b8", borderRadius: 4 }}
+      />
+      <figcaption style={{ fontSize: 13, color: "#555", marginTop: 4 }}>{caption}</figcaption>
+    </figure>
+  );
+}
+
+function VdoGuideTab() {
+  const demoStrip = (children: React.ReactNode, key?: string) => (
+    <div
+      key={key}
+      style={{
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        minHeight: 110,
+        borderRadius: 6,
+        margin: "10px 0",
+        background: "linear-gradient(135deg, #3d4a52 0%, #22303a 60%, #17222b 100%)",
+      }}
+    >
+      {children}
+    </div>
+  );
+  return (
+    <div
+      className="flex flex-col flex-grow overflow-y-auto p-4"
+      style={{ background: "#f7f5f0", borderRadius: 8 }}
+    >
+      <div style={{ maxWidth: 880, margin: "0 auto", width: "100%", fontFamily: "Georgia, 'Times New Roman', serif", lineHeight: 1.5 }}>
+        <p style={{ margin: 0, fontSize: 12, letterSpacing: 1, color: "#8a857a" }}>
+          THAILAND NOW » STORY SCOUT » FIRESIDE MODE
+        </p>
+        <h1 style={{ margin: "2px 0 2px", fontFamily: VDO_GUIDE_FONT, fontWeight: 700, fontSize: 34 }}>
+          VDO GUIDE
+        </h1>
+        <p style={{ margin: "0 0 18px", color: "#444" }}>
+          How to write a VDO edit guide for the Fireside VDO editor — style reference with samples.
+        </p>
+
+        <h2 style={{ fontFamily: VDO_GUIDE_FONT, fontSize: 20, borderBottom: "2px solid #111", paddingBottom: 4 }}>
+          1 · Title card
+        </h2>
+        <ul style={{ margin: "8px 0", paddingLeft: 22 }}>
+          <li>Typeface: <b>Futura 100</b>, 150&nbsp;pt, <b>bold</b>.</li>
+          <li>Color: black, with a <b>maximum-intensity white glow</b>.</li>
+        </ul>
+        {demoStrip(
+          <span
+            style={{
+              fontFamily: VDO_GUIDE_FONT,
+              fontWeight: 700,
+              fontSize: 56,
+              color: "#000",
+              textShadow: "0 0 10px #fff, 0 0 22px #fff, 0 0 40px #fff",
+            }}
+          >
+            SAMPLE TITLE
+          </span>,
+          "title-demo"
+        )}
+
+        <h2 style={{ fontFamily: VDO_GUIDE_FONT, fontSize: 20, borderBottom: "2px solid #111", paddingBottom: 4, marginTop: 26 }}>
+          2 · Sub-headers
+        </h2>
+        <ul style={{ margin: "8px 0", paddingLeft: 22 }}>
+          <li>
+            Standard sub-header: <b>Futura 75</b>, <b>bold</b>. Use <i>italics</i> for the word(s)
+            you want to highlight. The text sits on a <b>solid black bar with transparency</b>.
+          </li>
+          <li>
+            Sub-header with b-roll: mark it with a <b>white solid</b> + the sub-header text + a
+            short b-roll guide saying what footage should run under it.
+          </li>
+        </ul>
+        {demoStrip(
+          <span
+            style={{
+              fontFamily: VDO_GUIDE_FONT,
+              fontWeight: 700,
+              fontSize: 26,
+              background: "rgba(0,0,0,0.55)",
+              color: "#fff",
+              padding: "6px 18px",
+            }}
+          >
+            SUB-HEADER WITH AN <i>EMPHASIZED</i> WORD
+          </span>,
+          "subheader-demo"
+        )}
+        <VdoGuideFigure
+          src="/vdo-guide/sample3.png"
+          caption="Sub-header on a solid black bar with transparency (Futura 75, bold; italics for highlights)."
+        />
+
+        <h2 style={{ fontFamily: VDO_GUIDE_FONT, fontSize: 20, borderBottom: "2px solid #111", paddingBottom: 4, marginTop: 26 }}>
+          3 · Infographics
+        </h2>
+        <ul style={{ margin: "8px 0", paddingLeft: 22 }}>
+          <li>An infographic that does <b>not</b> fit in the same frame as its anchor:</li>
+          <li>A list infographic that <b>does</b> fit in the same frame as its anchor:</li>
+          <li>
+            Fullscreen list infographic: <b>you must indicate what kind of b-roll you want</b>, but
+            you don't need to find one for the editor.
+          </li>
+          <li>
+            Long context: it can be accompanied by an infographic, and then that same infographic
+            is <b>reused with its anchor</b>.
+          </li>
+        </ul>
+        <VdoGuideFigure
+          src="/vdo-guide/sample1.png"
+          caption="Infographic that doesn't fit in the same frame as its anchor."
+        />
+        <VdoGuideFigure
+          src="/vdo-guide/sample2.png"
+          caption="List infographic that fits in the same frame as its anchor."
+        />
+        <VdoGuideFigure
+          src="/vdo-guide/sample4.png"
+          caption="Fullscreen list infographic — indicate the b-roll you want; the editor sources it."
+        />
+        <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+          <VdoGuideFigure
+            src="/vdo-guide/sample6.png"
+            caption="Long context with its infographic (first use)."
+          />
+          <VdoGuideFigure
+            src="/vdo-guide/sample6a.png"
+            caption="The same infographic reused with its anchor."
+          />
+        </div>
+
+        <p style={{ fontSize: 12, color: "#8a857a", borderTop: "1px solid #d8d3c8", marginTop: 22, paddingTop: 8 }}>
+          Reference only — this page documents the style; the guide itself is written per episode.
+        </p>
+      </div>
+    </div>
   );
 }
 
