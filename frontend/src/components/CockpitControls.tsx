@@ -62,6 +62,11 @@ export default function CockpitControls() {
   const [restarting, setRestarting] = useState(false);
   const [handoffTo, setHandoffTo] = useState("Tasai");
   const [copiedLabel, setCopiedLabel] = useState<string | null>(null);
+  // Mandatory-question state: label of the config button currently asking its
+  // inline YES/NO question (buttons with `ask:` in the machine YAML). A plain
+  // click on such a button NEVER copies — it only opens the question; YES/NO
+  // copy and close, clicking the button again cancels without copying.
+  const [askOpen, setAskOpen] = useState<string | null>(null);
 
   // Theme toggle — flips data-theme on <html> and persists to localStorage.
   // index.html sets it pre-paint from localStorage so a reload is flash-free;
@@ -220,11 +225,53 @@ Rules: evidence-backed (cite what happened this session), one idea per entry, re
         ))}
       </select>
 
-      {buttons.map((b) => (
-        <button key={b.label} className="btn btn--signal btn--compact" onClick={() => void copyToClipboard(b.insert, b.label)}>
-          {copiedLabel === b.label ? "✓ COPIED!" : b.label}
-        </button>
-      ))}
+      {buttons.map((b) =>
+        b.ask && askOpen === b.label ? (
+          // Inline mandatory question (no native confirm() — it silently
+          // no-ops in embedded contexts). YES = insert + append_yes,
+          // NO = plain insert; both collapse back to the button.
+          <span key={b.label} className="flex items-center gap-1.5">
+            <span className="mono label" style={SELECT_STYLE}>
+              {b.ask}
+            </span>
+            <button
+              className="btn btn--compact btn--signal"
+              title="Copy the prompt WITH the extra step"
+              onClick={() => {
+                void copyToClipboard(b.append_yes ? `${b.insert} ${b.append_yes}` : b.insert, b.label);
+                setAskOpen(null);
+              }}
+            >
+              YES
+            </button>
+            <button
+              className="btn btn--compact"
+              title="Copy the prompt as-is"
+              onClick={() => {
+                void copyToClipboard(b.insert, b.label);
+                setAskOpen(null);
+              }}
+            >
+              NO
+            </button>
+          </span>
+        ) : (
+          <button
+            key={b.label}
+            className="btn btn--signal btn--compact"
+            title={b.ask ? `${b.label} — asks one question before copying` : undefined}
+            onClick={() => {
+              if (b.ask) {
+                setAskOpen(askOpen === b.label ? null : b.label);
+                return;
+              }
+              void copyToClipboard(b.insert, b.label);
+            }}
+          >
+            {copiedLabel === b.label ? "✓ COPIED!" : b.label}
+          </button>
+        ),
+      )}
 
       <button
         className="btn btn--compact"

@@ -128,6 +128,10 @@ providers:
 buttons:
   - label: BOOTSTRAP
     insert: "Bootstrap: git pull --ff-only to sync CephalonVoid, Railjack (origin), and ~/skill-library (then just sync to deploy skills); read hot.md, index.md, Cephalon.md, CLAUDE.md (+ .claude/agents), run python3 vault-check.py, then give me a one-line status."
+    # Mandatory question (Naz, 2026-09-06): every BOOTSTRAP click asks whether
+    # to also read the newest session checkpoint before acting.
+    ask: "Read the latest checkpoint as well?"
+    append_yes: "Then also read the newest logs/SESSION-CHECKPOINT-*.md (resume anchor) before acting."
   - label: COMMIT & PUSH
     insert: "Session-end per Cephalon.md: update hot.md + logs/memory-log.md, run python3 vault-check.py, then commit and push the vault to CephalonVoid, push any Railjack work to origin (Railjack.git, main branch), and if ~/skill-library has skill changes commit + push it to NazLearn2CODE/skill-library (main) then just sync."
 

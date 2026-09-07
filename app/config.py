@@ -68,6 +68,12 @@ class Provider(BaseModel):
 class Button(BaseModel):
     label: str
     insert: str  # text typed into the terminal (Naz-edited in YAML)
+    # Optional mandatory questionnaire (Naz, 2026-09-06): when `ask` is set,
+    # clicking the button opens an inline YES/NO question instead of copying
+    # straight away. YES copies `insert + " " + append_yes`, NO copies plain
+    # `insert`. No native confirm() — it silently no-ops in embedded contexts.
+    ask: str = ""
+    append_yes: str = ""
 
 
 class CatalogGroup(BaseModel):

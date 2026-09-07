@@ -70,7 +70,14 @@ def _serialize_config() -> dict:
         "machine": CONFIG.machine,
         "modules": [_sanitize(m) for m in CONFIG.modules],
         # Cockpit buttons: label/insert text only (Naz-editable YAML prompts).
-        "buttons": [{"label": b.label, "insert": b.insert} for b in CONFIG.buttons],
+        # ask/append_yes ride along only when set — plain buttons keep the
+        # same two-field payload as before.
+        "buttons": [
+            b.model_dump(include={"label", "insert", "ask", "append_yes"}, exclude_none=False)
+            if b.ask
+            else {"label": b.label, "insert": b.insert}
+            for b in CONFIG.buttons
+        ],
     }
     if CONFIG.dock is not None:
         # Title/url/height only — no internals to leak. Omitted entirely when absent

@@ -18,6 +18,11 @@ export interface ModuleConfig {
 export interface CockpitButton {
   label: string;
   insert: string;
+  /** Mandatory questionnaire: when set, the button opens an inline YES/NO
+   *  question instead of copying straight away (Naz, 2026-09-06). */
+  ask?: string;
+  /** Extra text appended to `insert` on YES; NO copies plain `insert`. */
+  append_yes?: string;
 }
 
 export interface DockConfig {

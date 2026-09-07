@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 
 from app import catalog, terminal_input
 from app.config import (
+    Button,
     CatalogGroup,
     CatalogSpec,
     MachineConfig,
@@ -211,3 +212,48 @@ def test_catalog_reload_busts_cache(monkeypatch, tmp_path):
     reloaded = c.post("/api/catalog/reload").json()
     assert "brand-new" in [s["name"] for s in reloaded["skills"]]
     assert "brand-new" in [s["name"] for s in c.get("/api/catalog").json()["skills"]]
+
+
+# ---------------------------------------------------------------- button ask
+# Mandatory questionnaire on cockpit buttons (Naz, 2026-09-06): a button with
+# `ask:` opens an inline YES/NO question instead of copying straight away.
+
+
+def test_button_ask_defaults_and_roundtrip():
+    plain = Button(label="X", insert="do x")
+    assert plain.ask == "" and plain.append_yes == ""  # old YAML stays valid
+
+    asked = Button(label="B", insert="do x", ask="question?", append_yes="extra step")
+    assert asked.ask == "question?" and asked.append_yes == "extra step"
+
+
+def test_serialize_config_projects_ask_only_when_set(monkeypatch):
+    from app import main as main_mod
+
+    monkeypatch.setattr(
+        main_mod, "CONFIG",
+        MachineConfig(
+            machine="x", hostnames=["x"], modules=[],
+            buttons=[
+                Button(label="PLAIN", insert="p"),
+                Button(label="BOOTSTRAP", insert="p", ask="q?", append_yes="e"),
+            ],
+        ),
+    )
+    btns = main_mod._serialize_config()["buttons"]
+    assert btns[0] == {"label": "PLAIN", "insert": "p"}  # plain: same payload as before
+    assert btns[1] == {"label": "BOOTSTRAP", "insert": "p", "ask": "q?", "append_yes": "e"}
+
+
+def test_tracked_tawhan_bootstrap_asks_checkpoint_question():
+    """Feature contract: the repo-tracked home config's BOOTSTRAP button carries
+    the mandatory checkpoint question (reads configs/tawhan.yaml from the repo,
+    so this holds on any machine's checkout)."""
+    import yaml
+
+    from app import config as config_mod
+
+    cfg = yaml.safe_load((config_mod.CONFIG_DIR / "tawhan.yaml").read_text())
+    btn = next(b for b in cfg["buttons"] if b["label"] == "BOOTSTRAP")
+    assert btn["ask"].strip(), "BOOTSTRAP must ask a question before copying"
+    assert "SESSION-CHECKPOINT" in btn["append_yes"], "YES must append the checkpoint read"
