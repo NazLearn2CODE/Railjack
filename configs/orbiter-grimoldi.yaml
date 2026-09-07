@@ -14,5 +14,14 @@ modules:
   #   title: N8N
   #   kind: iframe
   #   url: http://localhost:5678
-  #   health: { type: http, url: "http://localhost:5678/healthz" }
+  #   health: { type: http, url: "http://127.0.0.1:5678/healthz" }
   #   manage: { type: systemd-user, unit: n8n.service }
+
+# Office canned-prompt buttons. Insert = the office repo set (CephalonVoid +
+# Somatic + skill-library — Somatic is the office hub, no Railjack checkout in
+# the daily set); same mandatory checkpoint question as tawhan.yaml (ef981c2).
+buttons:
+  - label: BOOTSTRAP
+    insert: "Bootstrap: first sync the repos — in ~/Cephalon run 'git pull --ff-only' to sync CephalonVoid, in ~/Somatic run 'git pull --ff-only' to sync Somatic, and in ~/skill-library run 'git pull && just sync' to sync skills. Repos current, THEN read hot.md, index.md, Cephalon.md, CLAUDE.md (+ AGENTS.md), and run python3 vault-check.py. Finish with a one-line status."
+    ask: "Read the latest checkpoint as well?"
+    append_yes: "Then also read the newest logs/SESSION-CHECKPOINT-*.md (resume anchor) before acting."
