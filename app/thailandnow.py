@@ -125,6 +125,8 @@ async def _tn_run_step(job: TnJob, argv: list[str], timeout: float) -> str:
     Raises _TnCancelled if cancelled/SIGTERM'd, else RuntimeError on failure —
     _tn_run_job maps both to job status. (Raises RuntimeError, NOT HTTPException,
     so background failures land in job.error instead of leaking to a request.)"""
+    if argv and argv[0] == "notebooklm":
+        argv = [_social_bin(argv[0]), *argv[1:]]
     try:
         proc = await asyncio.create_subprocess_exec(
             *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
@@ -2935,7 +2937,7 @@ async def _nlm_run(args: list[str], timeout: float = 200.0) -> str:
     """Run the notebooklm CLI (authed once via `notebooklm login`), return stdout. Every call
     passes --notebook so we never touch the shared context.json (the race the skill warns of)."""
     proc = await asyncio.create_subprocess_exec(
-        "notebooklm", *args,
+        _social_bin("notebooklm"), *args,
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
     )
     try:

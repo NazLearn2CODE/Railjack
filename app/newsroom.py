@@ -16,8 +16,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import random
 import re
+import shutil
 from datetime import datetime
 from pathlib import Path
 
@@ -47,8 +49,24 @@ SEO_GEM = Path.home() / "Cephalon" / "10-knowledge" / "ai-workflow" / "gemini-ge
 PY = "python3"
 
 
+def _nblm() -> str:
+    """Resolve the notebooklm CLI per call: PATH first, then ~/.local/bin.
+    Cold-boot systemd units drop the user bin from PATH, which made every bare
+    spawn die with 'infographic pipeline error: [Errno 2]' (2026-09-09) — same
+    contract as notebooklm.py's CLI resolution."""
+    found = shutil.which("notebooklm")
+    if found:
+        return found
+    fallback = Path.home() / ".local" / "bin" / "notebooklm"
+    if fallback.is_file() and os.access(fallback, os.X_OK):
+        return str(fallback)
+    return "notebooklm"
+
+
 async def _run(argv: list[str], timeout: float = 90,
                stdin: bytes | None = None) -> tuple[int, bytes, bytes]:
+    if argv and argv[0] == "notebooklm":
+        argv = [_nblm(), *argv[1:]]
     proc = await asyncio.create_subprocess_exec(
         *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         stdin=asyncio.subprocess.PIPE if stdin is not None else None,

@@ -3355,3 +3355,17 @@ def test_convert_renders_overlays_but_checks_canonical(tmp_path, monkeypatch):
     assert "กรวีร์ ปริศนานันทกุล" in out["namecheck"]["names"]["unverified"]
     # stylecheck rides along, advisory
     assert out["stylecheck"]["ok"] is True
+
+
+# ── 2026-09-09: cold-boot systemd PATH lacked ~/.local/bin → bare "notebooklm"
+# spawns died with '[Errno 2]'. The _run seam rewrites argv[0] via _nblm();
+# these lock the resolver's PATH-first/local-fallback contract (Somatic parity).
+
+def test_nblm_falls_back_to_local_bin(monkeypatch):
+    monkeypatch.setattr(newsroom.shutil, "which", lambda _: None)
+    assert newsroom._nblm().endswith(".local/bin/notebooklm")
+
+
+def test_nblm_prefers_path_hit(monkeypatch):
+    monkeypatch.setattr(newsroom.shutil, "which", lambda _: "/usr/bin/notebooklm")
+    assert newsroom._nblm() == "/usr/bin/notebooklm"
