@@ -91,12 +91,17 @@ def _json(out: bytes):
 def _fail(out: bytes, err: bytes) -> str:
     """Best error text for a nonzero exit. Scripts print their own reason as
     ``{"_fatal": ...}`` on STDOUT (e.g. 'run nl_auth.py once' when the Google
-    creds are missing), so check stdout first — else SEND TO NL fails with a
-    blank stderr and the button just reads 'script failed (no output)'."""
+    creds are missing), so check stdout first — else check stderr — else the
+    button fails with a blank 'script failed (no output)'. The notebooklm CLI
+    prints yet another shape, ``{"error": true, "message": ...}`` (e.g.
+    'Authentication expired or invalid … Run notebooklm login') — surface that
+    too instead of the blank fallback."""
     try:
         d = json.loads(out)
         if isinstance(d, dict) and d.get("_fatal"):
             return d["_fatal"]
+        if isinstance(d, dict) and d.get("error") and d.get("message"):
+            return str(d["message"])
     except Exception:
         pass
     return err.decode(errors="replace")[-300:].strip() or "script failed (no output)"

@@ -1024,3 +1024,23 @@ async def test_generate_infographics_agy_failure_falls_back(tmp_path, monkeypatc
     assert "MOTION STYLE:" in loop_text        # classic classifier header
     assert "Frames-to-Video" in loop_text
     assert "ffmpeg -i loop.mp4" in loop_text
+
+
+def test_fail_surfaces_notebooklm_cli_error():
+    """The notebooklm CLI prints {"error": true, "message": ...} on auth expiry —
+    _fail must surface that message, not the blank 'script failed (no output)'.
+    Live case 2026-09-10: auth-expired create swallowed as 'script failed (no output)'."""
+    from app.newsroom import _fail
+    out = json.dumps({
+        "error": True,
+        "code": "UNEXPECTED_ERROR",
+        "message": "Unexpected error: Authentication expired or invalid. "
+                   "Run 'notebooklm login' to re-authenticate.",
+    }).encode()
+    msg = _fail(out, b"")
+    assert "Authentication expired" in msg
+    assert "notebooklm login" in msg
+    # _fatal still wins when present
+    assert _fail(b'{"_fatal": "run nl_auth.py once"}', b"") == "run nl_auth.py once"
+    # blank everything → old fallback intact
+    assert _fail(b"", b"") == "script failed (no output)"
