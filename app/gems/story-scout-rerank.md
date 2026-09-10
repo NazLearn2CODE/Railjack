@@ -10,7 +10,7 @@ tags: [day-job, thailand-now, railjack, gem, story-scout, rerank]
 
 System prompt for the editorial rerank step in STORY SCOUT discovery
 (`app/thailandnow.py::_scout_rerank`). Fed as the `system` role to `zai_message`
-(model `glm-5` via the OmniRoute gateway). Takes the candidate articles found by
+(the current DSH model (auto-followed via zai_message) via the OmniRoute gateway). Takes the candidate articles found by
 the free-first sweep and re-scores them for the foreigner-in-Thailand audience —
 this is the LLM-in-the-loop step that closes the quality gap with the
 `/story-scout` skill's editorial judgment.

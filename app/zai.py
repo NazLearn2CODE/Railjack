@@ -21,7 +21,32 @@ GATEWAY_URL = "http://127.0.0.1:20128/v1/messages"
 _MODEL = "naz-backup"
 # raw z.ai model ids aren't valid gateway model strings — collapse them onto the combo
 # so callers still passing the old ids ride the same failover chain.
-_ZAI_MODEL_ALIASES = {"glm-5", "glm-5.2", "glm-5.2"}
+_ZAI_MODEL_ALIASES = {"glm-5", "glm-5.2"}
+# "dsh" = follow whatever model DSH itself is running (agent-default-model in
+# ~/.dsh/settings.yaml). DSH provider → gateway provider prefix (z.ai direct lane
+# is served by the glm provider-node on the omniroute gateway).
+_DSH_SETTINGS = Path.home() / ".dsh" / "settings.yaml"
+_DSH_PROVIDER_PREFIX = {"zai": "glm"}
+
+
+def dsh_default_model() -> str | None:
+    """The gateway model id mirroring DSH's current agent-default-model
+    (e.g. ``glm/glm-5.3-flash``), or None if unreadable / non-zai provider —
+    callers fall back to the naz-backup combo."""
+    try:
+        import yaml
+
+        cfg = yaml.safe_load(_DSH_SETTINGS.read_text()) or {}
+        d = cfg.get("agent-default-model") or {}
+        provider, model = d.get("provider"), d.get("model")
+        if provider and model:
+            prefix = _DSH_PROVIDER_PREFIX.get(provider)
+            if prefix:
+                return f"{prefix}/{model}"
+            return model  # provider already speaks gateway-native ids (e.g. omniroute)
+    except Exception:
+        pass
+    return None
 
 
 def _resolve_key() -> str | None:
@@ -51,14 +76,22 @@ async def zai_message(
     """Send ``prompt`` (optionally with a ``system`` role, ``model``, ``timeout``)
     as a single user turn; return the concatenated text.
 
-    ``model`` defaults to the `naz-backup` combo; a raw z.ai id (glm-5/glm-5.2)
-    is collapsed onto the combo (the gateway needs combo/provider-prefixed ids,
-    not bare z.ai names). Raises 503 if no key, 502 on upstream error.
+    ``model`` semantics:
+    - ``None`` or ``"dsh"`` → follow the model DSH is currently running
+      (agent-default-model in ~/.dsh/settings.yaml), prefixed for the gateway.
+    - a raw z.ai id (glm-5/glm-5.2) → collapsed onto the `naz-backup` combo.
+    - anything else → passed through verbatim (must be gateway-valid).
+    Raises 503 if no key, 502 on upstream error.
     """
     key = _resolve_key()
     if not key:
         raise HTTPException(503, "OMNIROUTE_API_KEY unset (and not in ~/.config/omniroute/.env)")
-    m = "naz-backup" if (model is None or model in _ZAI_MODEL_ALIASES) else model
+    if model is None or model == "dsh":
+        m = dsh_default_model() or _MODEL
+    elif model in _ZAI_MODEL_ALIASES:
+        m = _MODEL
+    else:
+        m = model
     payload: dict = {
         "model": m,
         "max_tokens": max_tokens,

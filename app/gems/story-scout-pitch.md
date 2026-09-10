@@ -10,7 +10,7 @@ tags: [day-job, thailand-now, railjack, gem, story-scout, pitch]
 
 System prompt for the STORY SCOUT "Make a pitch" call in
 `app/thailandnow.py::scout_pitch`. Fed as the `system` role to `zai_message`
-(model `glm-5` via the OmniRoute gateway). Takes a fetched news article (Thai or
+(the current DSH model (auto-followed via zai_message) via the OmniRoute gateway). Takes a fetched news article (Thai or
 English) and returns a tight pitch for the foreigner-in-Thailand audience: an
 English headline, a Thai headline, and a 15–20-word English excerpt.
 

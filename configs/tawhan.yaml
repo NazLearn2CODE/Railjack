@@ -52,14 +52,14 @@ modules:
       google_owner_token_path: ~/.config/railjack/google_token_owner.json   # minted once AS thailandnow.info (TN_TOKEN_PATH=... python -m app.tn_auth) — auto-accepts the transfer; missing → transfers stay pending on the acceptance email
       trello_board_short: VTMuHmEj                              # board short link (thailand-now-25-26)
       publicity_llm:
-        model: glm-5      # /events/publicize; the call routes through app/zai.py (ZAI_API_KEY + z.ai Anthropic endpoint)
+        model: dsh          # /events/publicize; the call routes through app/zai.py (ZAI_API_KEY + z.ai Anthropic endpoint)
       gem_path: app/gems/event-publicity.md                     # read fresh each /events/publicize call
       notebooklm_notebook_id: ""                                # R6: DEEP RESEARCH notebook (created + cached on first use)
       archive_gem_path: app/gems/event-archive-qa.md            # Stage 2: source-only Q&A gem
       archive_folder_id: 1RTW44D-Ygjf-GQC8Wj_s6tX0elhNx2vI   # 'Thailand NOW 2025-26' folder, owner thailandnow.info; n.rojanasuvan granted writer 2026-08-30 (was: 'TN Content' 1MVYNNOaev_0P972YbwM01XGGLWPBP1vJ)
       # --- STORY SCOUT (news pitch discovery + make-a-pitch) ---
       scout_llm:
-        model: glm-5      # /scout/pitch; routes through app/zai.py (same gateway/combo as publicity_llm)
+        model: dsh          # /scout/pitch; routes through app/zai.py (same gateway/combo as publicity_llm)
       scout_gem_path: app/gems/story-scout-pitch.md
       scout_rerank_gem_path: app/gems/story-scout-rerank.md
       scout_image_digest_gem_path: app/gems/story-scout-image-digest.md

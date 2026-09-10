@@ -1692,7 +1692,7 @@ async def _scout_rerank(candidates: list[dict]) -> list[dict]:
         prompt = json.dumps(prompt_items, ensure_ascii=False)
         system = _load_gem(_resolve_gem("scout_rerank_gem_path", "app/gems/story-scout-rerank.md"))
         opts = _opts()
-        model = (opts.get("scout_llm") or {}).get("model") or "glm-5"
+        model = (opts.get("scout_llm") or {}).get("model") or "dsh"
         llm_out = await _llm_json(prompt, system=system, model=model)
         if isinstance(llm_out, list):
             return _scout_apply_rerank(candidates, llm_out)
@@ -1795,7 +1795,7 @@ async def _scout_images_content(url: str) -> dict:
     digest_prompt = f"Title: {title}\nURL: {url}\n\nContent:\n{md[:6000]}"
     system = _load_gem(_resolve_gem("scout_image_digest_gem_path", "app/gems/story-scout-image-digest.md"))
     opts = _opts()
-    model = (opts.get("scout_llm") or {}).get("model") or "glm-5"
+    model = (opts.get("scout_llm") or {}).get("model") or "dsh"
 
     try:
         digest_data = await _llm_json(digest_prompt, system=system, model=model)
@@ -1880,7 +1880,7 @@ async def scout_pitch(payload: dict = Body(default={})):
 
     system = _load_gem(_scout_gem_path())
     opts = _opts()
-    model = (opts.get("scout_llm") or {}).get("model") or "glm-5"
+    model = (opts.get("scout_llm") or {}).get("model") or "dsh"
     user = f"Title: {title}\nSource URL: {url}\n\nArticle:\n{md[:20000]}"
 
     try:
@@ -2606,7 +2606,7 @@ async def _flow_fireside_source(job: TnJob, seed: str | None, category: str | No
     # 5c. Shape pass
     system = _load_gem(_fireside_source_gem_path())
     opts = _opts()
-    model = (opts.get("fireside_llm") or opts.get("scout_llm") or {}).get("model") or "glm-5"
+    model = (opts.get("fireside_llm") or opts.get("scout_llm") or {}).get("model") or "dsh"
     # glm-5 returns prose (not JSON) when fed the full corpus answer + 20 URLs — cap the
     # context and force a JSON directive in the USER prompt (last thing the model sees).
     answer_trimmed = (answer or "")[:2500]
@@ -2720,7 +2720,7 @@ async def _fireside_edit(
     gem_path = _fireside_edit_gem_path()
     system = _load_gem(gem_path)
     opts = _opts()
-    model = (opts.get("fireside_llm") or opts.get("scout_llm") or {}).get("model") or "glm-5"
+    model = (opts.get("fireside_llm") or opts.get("scout_llm") or {}).get("model") or "dsh"
 
     try:
         raw = await zai_message(text, max_tokens=8192, system=system, model=model, timeout=180)
@@ -3546,7 +3546,7 @@ async def publicize_event(payload: dict = Body(default={})):
             chunks.append(f"[fetch failed for {u}: {e}]")
     raw = "\n\n---\n\n".join(chunks)
     system = _load_gem(_gem_path())
-    model = (_opts().get("publicity_llm") or {}).get("model") or "glm-5"
+    model = (_opts().get("publicity_llm") or {}).get("model") or "dsh"
     user = (
         f"Event title: {event.get('title', '(unknown)')}\n"
         f"Source URL(s): {', '.join(urls)}\n\n"
@@ -3958,7 +3958,7 @@ async def archive_ask(payload: dict = Body(default={})):
         bodies.append(body)
     top = matched_docs[:5]
     system = _load_gem(_archive_gem_path())
-    model = (_opts().get("archive_llm") or {}).get("model") or "glm-5"
+    model = (_opts().get("archive_llm") or {}).get("model") or "dsh"
     prompt = (
         "Question: " + question + "\n\nEvent docs:\n"
         + "\n\n".join("=== DOC: " + d["name"] + " ===\n" + b for d, b in zip(top, bodies))

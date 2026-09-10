@@ -10,7 +10,7 @@ tags: [day-job, radio, railjack, gem, news-fill, rewrite, ben]
 
 System prompt for the `process()` rewrite seam in the RADIO News Fill script
 (`newsroom/scripts/radio_news.py`). Fed as the `system` role to the OmniRoute
-gateway (model `glm-5` → `naz-backup` combo) — one source article per call,
+gateway (the current DSH model (auto-followed via zai_message) → `naz-backup` combo) — one source article per call,
 returned as a broadcast-ready cut in the voice of **Ben, editor of Thailand NOW**.
 
 `_load_gem` (and the fill script's own loader) extracts the body between the role

@@ -10,7 +10,7 @@ tags: [fireside, story-scout, youtube, topics, nbt-world]
 
 System prompt for The Fireside topic sourcing flow in
 `app/thailandnow.py::_flow_fireside_source`. Fed as the `system` role to
-`zai_message` (model `glm-5` via the OmniRoute gateway). Takes corpus search
+`zai_message` (the current DSH model (auto-followed via zai_message) via the OmniRoute gateway). Takes corpus search
 answers / web findings, seeds, and mapped source URLs, then returns fresh episode
 topic suggestions for The Fireside YouTube show.
 

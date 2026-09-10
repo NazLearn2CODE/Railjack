@@ -9,7 +9,7 @@ tags: [day-job, thailand-now, railjack, gem, story-scout, image]
 # Thailand NOW — STORY SCOUT image-digest gem
 
 System prompt for IMAGE MODE (`app/thailandnow.py::_scout_images_content`). Fed as
-the `system` role to `zai_message` (model `glm-5` via the OmniRoute gateway). Given
+the `system` role to `zai_message` (the current DSH model (auto-followed via zai_message) via the OmniRoute gateway). Given
 a fetched news article, it (a) produces stock-image search queries for what visuals
 fit the story, and (b) writes precise AI-image-generation prompts as a fallback for
 Google's image generator (the operator has a paid sub and runs gen manually).

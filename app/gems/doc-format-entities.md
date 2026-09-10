@@ -10,7 +10,7 @@ tags: [day-job, radio, railjack, gem, formatting, entities]
 
 System prompt for the name-detection step of the reusable publication-formatting
 pass (`newsroom/scripts/doc_format.py`). Fed as the `system` role to the OmniRoute
-gateway (model `glm-5` → `naz-backup` combo) with a block of document text; returns
+gateway (the current DSH model (auto-followed via zai_message) → `naz-backup` combo) with a block of document text; returns
 the **person names** to bold. Dates are handled deterministically by regex in the
 script, NOT here — this gem tags people only.
 

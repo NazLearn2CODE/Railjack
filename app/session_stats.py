@@ -60,8 +60,18 @@ _usage_cache: dict[str, tuple[float, dict]] = {}
 # this window (seconds) — drives a telemetry lane's green/red light.
 ACTIVE_WINDOW = 90.0
 # Model shown per provider before any session is ever seen, so a lane is
-# populated on first boot.
-_DEFAULT_MODELS: dict[str, str] = {"zai": "glm-5.2", "gemini": "gemini-3.6-flash", "claude": "claude-3.7-sonnet"}
+# populated on first boot. zai follows DSH's live agent-default-model instead
+# of a hardcoded id (2026-09-10).
+_DEFAULT_MODELS: dict[str, str] = {"gemini": "gemini-3.6-flash", "claude": "claude-3.7-sonnet"}
+
+
+def _zai_display_model() -> str:
+    from .zai import dsh_default_model
+
+    d = dsh_default_model()
+    return d.split("/")[-1] if d else "glm-5.2"
+
+
 _last_state: dict[str, dict] = {}
 
 
@@ -531,7 +541,7 @@ async def session_payload() -> dict:
     for provider in ("gemini", "claude", "zai"):
         st = state.get(provider)
         active = bool(st and (now - st.get("last_mtime", 0)) <= ACTIVE_WINDOW)
-        model = st["model"] if st else _DEFAULT_MODELS.get(provider)
+        model = st["model"] if st else (_zai_display_model() if provider == "zai" else _DEFAULT_MODELS.get(provider))
         ctx_limit = st["ctx_limit"] if st else (_limit_for(model, 0) if model else None)
         lane: dict = {"active": active}
         if model:
