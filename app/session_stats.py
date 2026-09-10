@@ -62,7 +62,7 @@ ACTIVE_WINDOW = 90.0
 # Model shown per provider before any session is ever seen, so a lane is
 # populated on first boot. zai follows DSH's live agent-default-model instead
 # of a hardcoded id (2026-09-10).
-_DEFAULT_MODELS: dict[str, str] = {"gemini": "gemini-3.6-flash", "claude": "claude-3.7-sonnet"}
+_DEFAULT_MODELS: dict[str, str] = {"gemini": "gemini-3.8-flash", "claude": "claude-3.7-sonnet"}
 
 
 def _zai_display_model() -> str:
@@ -113,7 +113,9 @@ def _agy_selected_model() -> str:
             return m
     except Exception:
         pass
-    return model or "gemini-3.6-flash"
+    # Naz runs gemini-3.8-flash (stated 2026-09-10; agy settings.json does not
+    # persist a model key, so this constant is the truth when no setting exists).
+    return model or "gemini-3.8-flash"
 
 
 def _scan_jsonl_usage(path: Path) -> tuple[str, int] | None:
