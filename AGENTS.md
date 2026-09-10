@@ -94,11 +94,12 @@ Every time a vault note answers a question or prevents rework, log it:
 ## Cross-machine
 
 This is the **home instance** (`~/Coding Projects/Railjack/`, machine "Tawhan",
-hostname `bazzite`). A separate **office instance** exists at
-`/home/ThePRODUCER/Orbiter/` on Orokin (its own rename is pending, name TBD by
-Naz) — each machine works its own. Per-machine modules come from
-`config/<machine>.yaml`. See `~/Cephalon/20-projects/railjack.md` (vault,
-read-only).
+hostname `omarchy`, user `naz6395` — was `bazzite`/user `NAZ` before the
+2026-09 Omarchy reinstall). A separate **office instance** exists at
+`/var/home/ThePRODUCER/Somatic/` on Orokin (renamed from `Orbiter` — Somatic,
+decided by Naz 2026-07-18) — each machine works its own. Per-machine modules
+come from `config/<machine>.yaml`. See `~/Cephalon/20-projects/railjack.md`
+(vault, read-only).
 
 ## End of Session
 

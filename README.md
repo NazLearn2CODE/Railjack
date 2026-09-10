@@ -21,7 +21,8 @@ Formerly **Orbiter**, a locally-hosted Agentic OS; that purpose was retired
 
 Modules are declared in `configs/<machine>.yaml`, selected at boot by hostname
 (`hostnames:` list) or the `RAILJACK_CONFIG` env override. This machine
-("Tawhan", hostname `bazzite`): TERMINAL (ttyd) · ComfyUI · VIDEO LAB · RESEARCH
+("Tawhan", hostname `omarchy` — was `bazzite` before the 2026-09 Omarchy
+reinstall): TERMINAL (ttyd) · ComfyUI · VIDEO LAB · RESEARCH
 (NotebookLM) · NEWSROOM · THAILAND NOW · N8N. An iframe module is one YAML
 block, zero core code; a panel module adds a React component + optional API
 router (see `docs/module-authoring-guide.md`).

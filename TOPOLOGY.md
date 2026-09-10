@@ -4,7 +4,8 @@
 `NazLearn2CODE/SomaticRailjack`, now archived read-only). Each hub lives in its
 own single-lineage repo:
 
-- **`NazLearn2CODE/Railjack`** *(this repo)* — the home hub (bazzite, RTX 3090).
+- **`NazLearn2CODE/Railjack`** *(this repo)* — the home hub (hostname `omarchy`
+  since the 2026-09 Omarchy reinstall, was `bazzite`; RTX 3090).
   Branch `main`. Local clone `~/Coding Projects/Railjack` (the path has a space).
 - **`NazLearn2CODE/Somatic`** — the office hub (Orokin). Branch `main`.
   Local clone `~/Somatic` on the office box.

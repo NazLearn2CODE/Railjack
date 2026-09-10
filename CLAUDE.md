@@ -23,7 +23,7 @@ Module web-research code uses **free backends only** — Jina / DuckDuckGo / Bra
 
 ## Dashboard & UI Work
 
-**For any dashboard or frontend UI work, invoke the `frontend-design` skill** (plugin installed globally). The React 19 + Vite + Tailwind v4 dashboard is built with it — don't hand-roll UI patterns the skill already provides. The design system is `web/src/index.css` — reuse it **verbatim** (recipe: vault `10-knowledge/mission-control-ui-system.md`); layout references live in `/var/home/NAZ/open-design/design-templates/`.
+**For any dashboard or frontend UI work, invoke the `frontend-design` skill** (plugin installed globally). The React 19 + Vite + Tailwind v4 dashboard is built with it — don't hand-roll UI patterns the skill already provides. The design system is `web/src/index.css` — reuse it **verbatim** (recipe: vault `10-knowledge/mission-control-ui-system.md`); layout references live in `~/open-design/design-templates/` (**not present on omarchy since the 2026-09 reinstall** — reclone `nexu-io/open-design` there if needed, see vault machine registry).
 
 ## Bootstrap Order
 

@@ -34,7 +34,8 @@ tag `legacy-agentic-os-final`.
 - Legacy architecture/API docs: on branch `legacy/agentic-os` only
 
 **Machines:**
-- **Tawhan** (home, hostname `bazzite`): modules tmux terminal (ttyd :7681),
+- **Tawhan** (home, hostname `omarchy` — was `bazzite` before the 2026-09
+  Omarchy reinstall): modules tmux terminal (ttyd :7681),
   ComfyUI (:8188 via f5-comfyui-media `comfy.sh`), ffmpeg Video Lab panel.
 - **Office (Orokin) → "Somatic"**: separate instance. Name decided by Naz
   2026-07-18 (`Somatic`, supersedes the "Orbiter Grimoldi" placeholder);

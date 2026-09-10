@@ -3989,7 +3989,7 @@ async def archive_ask(payload: dict = Body(default={})):
 
 # --- SEO sub-module (HEALTH: read-only link/image/orphan report) ----------------
 # Authed WP REST (Basic auth, app password). The Sucuri WAF 403s *unauthenticated*
-# fetches but authed REST passes (verified). Creds in /home/NAZ/n8n/.secrets.env.
+# fetches but authed REST passes (verified). Creds in ~/n8n/.secrets.env.
 # Phase 1 = detect-only report (this block); the fix (bulk-unlink / suggest-insert)
 # is Phase 2, later. Internal links/images are validated against the fetched
 # post/page/media sets (no fetching of thailandnow.in.th pages → Sucuri-proof);
