@@ -1629,12 +1629,102 @@ def _loop_prompt(story_line: str, figures: str, motion: dict) -> str:
         "No new elements, no text changes, no invented figures — printed numbers "
         "stay exactly as shown. The bottom strip of the frame stays frozen.\n"
         "----- END PROMPT -----\n\n"
-        "POST FIX (only if the loop point still jitters — dissolve the end into "
-        "a REVERSED copy of the start so the bridge lands exactly on frame 0; "
-        "for 8 s clips):\n"
-        f"  {_LOOP_CROSSFADE_CMD}\n"
-        "  (trim points assume 8 s — for other lengths use duration−0.5 as the "
-        "head and blend the final 0.5 s reversed, fade duration 0.458333)"
+        + _LOOP_POSTFIX
+    )
+
+
+_LOOP_POSTFIX = (
+    "POST FIX (only if the loop point still jitters — dissolve the end into "
+    "a REVERSED copy of the start so the bridge lands exactly on frame 0; "
+    "for 8 s clips):\n"
+    f"  {_LOOP_CROSSFADE_CMD}\n"
+    "  (trim points assume 8 s — for other lengths use duration−0.5 as the "
+    "head and blend the final 0.5 s reversed, fade duration 0.458333)"
+)
+
+_AGY_LOOP_TIMEOUT = 480  # agy vision pass per PNG; typical ~30-90 s (AI-Pro quota)
+
+
+async def _agy_loop_block(png_path: Path) -> str | None:
+    """agy vision on the generated PNG → motion-script body tailored to what is
+    actually IN the image. Returns None on ANY failure — the caller falls back
+    to the mood-classifier prompt. Measured 2026-09-10 on a live infographic:
+    vision-tailored prompt + the standard cure took the loop seam to 0.33x
+    normal inter-frame motion (old pipeline ~2x)."""
+    if not shutil.which("agy"):
+        return None
+    brief = (
+        f'Look at the infographic image file "{png_path}". '
+        "It will be animated into an 8-second seamless loop (first frame = last "
+        "frame, pixel-identical). Write the MOTION SCRIPT for that loop.\n"
+        "Return ONLY the motion script text — no markdown fences, no commentary, "
+        "no preamble — in exactly this shape:\n"
+        "\n"
+        "THE SCENE (move ONLY these, and only as described):\n"
+        "1. <element + location>: <motion> — one cycle, eases back to the exact "
+        "frame-0 state by 6.5 s, then fully static until the end.\n"
+        "2. ...\n"
+        "3. ...\n"
+        "\n"
+        "EVERYTHING ELSE IS FROZEN:\n"
+        "- ALL text, headlines, numbers, labels: frozen and unread-by-design.\n"
+        "- <name the real scene elements that must not move>.\n"
+        "\n"
+        "Rules:\n"
+        "- Name elements you ACTUALLY see in this image (panels, figures, icons, "
+        "objects, background architecture) — never invent generic content.\n"
+        "- Max 3 moving elements. Prefer luminance/gleam/breathing effects and "
+        "small mechanical oscillations (tilt, sway, shimmer). NEVER move text, "
+        "numbers, people, or the layout.\n"
+        "- Motion must be cyclical and settle: motion energy is ZERO from 6.5 s "
+        "to 8.0 s; the final frame is pixel-identical to the first frame.\n"
+        "- No new elements, no camera movement, no zoom, no layout parallax.\n"
+    )
+    argv = [
+        "agy", "-p", brief,
+        "--add-dir", str(png_path.parent),
+        "--effort", "medium",
+        "--dangerously-skip-permissions",
+        "--print-timeout", "7m",
+    ]
+    rc, out, err = await _run(argv, timeout=_AGY_LOOP_TIMEOUT)
+    if rc != 0:
+        return None
+    text = out.decode("utf-8", errors="replace").strip()
+    if text.startswith("```"):  # strip fences if the model wrapped them
+        text = re.sub(r"^```[a-z]*\n?", "", text)
+        text = re.sub(r"\n?```\s*$", "", text).strip()
+    if "THE SCENE" not in text or "FROZEN" not in text.upper():
+        return None
+    if "PASTE FROM HERE" in text or not (200 <= len(text) <= 6000):
+        return None
+    return text
+
+
+def _loop_prompt_vision(first_line: str, figures: str, agy_block: str) -> str:
+    """agy-vision loop txt: the paste body is tailored to the actual PNG;
+    the contract lines (tripod, closure, post-fix) stay pipeline-owned so the
+    loop-closure guarantees can never drift with the model's mood."""
+    return (
+        f"SEAMLESS LOOP PROMPT — {first_line} (agy-vision: tailored to the "
+        "generated image)\n"
+        f"FIGURES (verbatim, never re-render): {figures}\n\n"
+        "ENGINE: Flow → Frames-to-Video. Use this exact PNG as BOTH the first and "
+        "the last frame. Veo 3.1 (Lite or Fast), 8 s, 720p, 16:9. Omni Flash has NO "
+        "last-frame input — loops are not guaranteed on it.\n\n"
+        "----- PASTE FROM HERE INTO FLOW -----\n"
+        "PERFECTLY STATIC TRIPOD. LOCKED FRAME. ZERO camera movement, zero zoom, "
+        "zero pan, zero drift. Layout, scale, background gradient/pattern, and "
+        "typography are frozen 100% from start to end.\n"
+        f"{agy_block.strip()}\n\n"
+        "LOOP CLOSURE CONTRACT (the point of the whole prompt):\n"
+        "- Motion energy is ZERO from 6.5 s to 8.0 s — the last 1.5 seconds are a "
+        "held still image.\n"
+        "- The final frame is PIXEL-IDENTICAL to the first frame: same brightness, "
+        "same element states, same poses. No new elements, no text changes, no "
+        "invented figures at any point.\n"
+        "----- END PROMPT -----\n\n"
+        + _LOOP_POSTFIX
     )
 
 
@@ -1863,6 +1953,17 @@ async def generate_infographics(text: str, style: str = "auto",
                     _crop_watermark(png_path)
                 except Exception as e:
                     errors.append(f"block {i + 1} watermark crop failed: {e}")
+
+                # agy vision pass: tailor the loop prompt to the actual image
+                # (falls back to the mood-classifier prompt on any failure).
+                if shutil.which("agy"):
+                    try:
+                        agy_block = await _agy_loop_block(png_path)
+                    except Exception:
+                        agy_block = None
+                    if agy_block:
+                        loop_content = _loop_prompt_vision(
+                            first_line, block_figures, agy_block)
 
                 try:
                     loop_path.write_text(loop_content, encoding="utf-8")

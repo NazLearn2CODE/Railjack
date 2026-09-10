@@ -901,3 +901,126 @@ async def test_generate_infographics_motion_forced_writes_txt(tmp_path, monkeypa
     assert "Flag wave" in loop_txt
     assert "flags and cloth elements wave" in loop_txt
     assert "ffmpeg" in loop_txt
+
+
+_AGY_BLOCK = (
+    "THE SCENE (move ONLY these, and only as described):\n"
+    "1. Radiating sunburst background (behind everything): a single slow "
+    "luminance breath, eases back to the exact frame-0 state by 6.5 s, then "
+    "fully static until the end.\n"
+    "\n"
+    "EVERYTHING ELSE IS FROZEN:\n"
+    "- ALL text, headlines, numbers, labels: frozen and unread-by-design.\n"
+    "- The signing figures, desk, parchment: static."
+)
+
+
+@pytest.mark.anyio
+async def test_generate_infographics_agy_vision_loop_prompt(tmp_path, monkeypatch):
+    """agy on PATH + valid vision block → loop txt is the agy-tailored variant."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    import app.newsroom as newsroom_mod
+    monkeypatch.setattr(newsroom_mod.random, "choice", lambda seq: seq[0])
+    monkeypatch.setattr(newsroom_mod.shutil, "which", lambda name: "/usr/bin/agy")
+
+    script_text = (
+        "EVE2026083101\n"
+        "Anchor lede.\n\n"
+        "[inf]\n"
+        "Thailand welcomed 15 million tourists in 2026.\n"
+        "[inf/]\n\n"
+        "Closing remarks."
+    )
+
+    async def fake_run(argv, timeout=90, env=None, stdin=None):
+        if argv and argv[0] == "agy":
+            return 0, _AGY_BLOCK.encode(), b""
+        if "delete" in argv:
+            return 0, b"{}", b""
+        if "source" in argv and "add" in argv:
+            return 0, b'{"status":"ok"}', b""
+        if "download" in argv:
+            dest_path = Path(argv[-1])
+            dest_path.parent.mkdir(parents=True, exist_ok=True)
+            img = Image.new("RGB", (2752, 1536), color=(255, 255, 255))
+            img.save(dest_path)
+            return 0, b"Infographic saved to: " + str(dest_path).encode(), b""
+        return 0, b"{}", b""
+
+    async def fake_script(argv, timeout=90, env=None, stdin=None):
+        if "create" in argv:
+            return {"notebook": {"id": "nid-test-123"}}
+        if "generate" in argv:
+            return {"task_id": "t1", "status": "completed"}
+        return {}
+
+    with patch("app.newsroom._run", side_effect=fake_run), \
+         patch("app.newsroom._script", side_effect=fake_script), \
+         patch("app.newsroom.zai.zai_message", new_callable=AsyncMock) as mock_zai:
+        mock_zai.return_value = json.dumps(
+            [{"style": "flat-navy", "brief": "Custom brief"}])
+
+        res = await generate_infographics(script_text, "auto")
+
+    assert res["errors"] == []
+    loop_text = Path(res["files"][0]["loop_prompt"]).read_text(encoding="utf-8")
+    assert "(agy-vision" in loop_text          # provenance header
+    assert _AGY_BLOCK in loop_text             # agy body rides verbatim
+    assert "LOOP CLOSURE CONTRACT" in loop_text  # pipeline-owned contract kept
+    assert "_LOOP_CROSSFADE_CMD" not in loop_text
+    assert "ffmpeg -i loop.mp4" in loop_text   # post-fix cmd still attached
+    # agy was invoked with the PNG path for vision
+    # (the download fake wrote it; the agy argv carries its parent dir)
+
+
+@pytest.mark.anyio
+async def test_generate_infographics_agy_failure_falls_back(tmp_path, monkeypatch):
+    """agy missing/garbage → classic mood-classifier loop txt, no crash."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    import app.newsroom as newsroom_mod
+    monkeypatch.setattr(newsroom_mod.random, "choice", lambda seq: seq[0])
+    monkeypatch.setattr(newsroom_mod.shutil, "which", lambda name: None)
+
+    script_text = (
+        "EVE2026083101\n"
+        "Anchor lede.\n\n"
+        "[inf]\n"
+        "Thailand welcomed 15 million tourists in 2026.\n"
+        "[inf/]\n\n"
+        "Closing remarks."
+    )
+
+    async def fake_run(argv, timeout=90, env=None, stdin=None):
+        if "delete" in argv:
+            return 0, b"{}", b""
+        if "source" in argv and "add" in argv:
+            return 0, b'{"status":"ok"}', b""
+        if "download" in argv:
+            dest_path = Path(argv[-1])
+            dest_path.parent.mkdir(parents=True, exist_ok=True)
+            img = Image.new("RGB", (2752, 1536), color=(255, 255, 255))
+            img.save(dest_path)
+            return 0, b"Infographic saved to: " + str(dest_path).encode(), b""
+        return 0, b"{}", b""
+
+    async def fake_script(argv, timeout=90, env=None, stdin=None):
+        if "create" in argv:
+            return {"notebook": {"id": "nid-test-123"}}
+        if "generate" in argv:
+            return {"task_id": "t1", "status": "completed"}
+        return {}
+
+    with patch("app.newsroom._run", side_effect=fake_run), \
+         patch("app.newsroom._script", side_effect=fake_script), \
+         patch("app.newsroom.zai.zai_message", new_callable=AsyncMock) as mock_zai:
+        mock_zai.return_value = json.dumps(
+            [{"style": "flat-navy", "brief": "Custom brief"}])
+
+        res = await generate_infographics(script_text, "auto")
+
+    assert res["errors"] == []
+    loop_text = Path(res["files"][0]["loop_prompt"]).read_text(encoding="utf-8")
+    assert "(agy-vision" not in loop_text
+    assert "MOTION STYLE:" in loop_text        # classic classifier header
+    assert "Frames-to-Video" in loop_text
+    assert "ffmpeg -i loop.mp4" in loop_text
