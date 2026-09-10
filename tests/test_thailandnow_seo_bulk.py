@@ -49,6 +49,12 @@ def fake_wp(monkeypatch):
     async def resolve(post_id: int) -> str:
         return "posts"
 
+    monkeypatch.setattr(
+        thailandnow,
+        "_wp_creds",
+        lambda: ("https://www.thailandnow.in.th", "mock_user", "mock_pwd"),
+    )
+
     def _install(contents: dict[int, str], fail_ids: tuple[int, ...] = ()) -> _FakeWP:
         wp = _FakeWP(contents, fail_ids)
         monkeypatch.setattr(thailandnow, "_wp", wp)
