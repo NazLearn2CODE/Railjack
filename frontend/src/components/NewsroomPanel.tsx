@@ -939,6 +939,19 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
   const browseInit = useRef<boolean>(false);
   const [newsCategory, setNewsCategory] = useState<"global" | "business">("global");
   const [newsScouting, setNewsScouting] = useState<boolean>(false);
+  // Per-lane scout dispatch badges (Naz 2026-09-10): persisted server-side so
+  // the pill survives reloads. Loaded when the RADIO tab opens.
+  const [scoutState, setScoutState] = useState<Record<string, { scouted_at?: string; handoff_at?: string }>>({});
+  const loadScoutState = useCallback(async () => {
+    try {
+      const d = await fetchJSON<{ lanes: Record<string, { scouted_at?: string; handoff_at?: string }> }>(
+        "/api/newsroom/radio/scout-state",
+      );
+      setScoutState(d.lanes ?? {});
+    } catch {
+      /* badge is best-effort */
+    }
+  }, []);
   const [newsReportLoading, setNewsReportLoading] = useState<boolean>(false);
   const [newsReport, setNewsReport] = useState<NewsReportResponse | null>(null);
   const [selectedArticles, setSelectedArticles] = useState<NewsArticle[]>([]);
@@ -1546,11 +1559,18 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
     }
   }, [tab, loadBrowse, RRT_PARENT]);
 
+  useEffect(() => {
+    if (tab === "radio") void loadScoutState();
+  }, [tab, loadScoutState]);
+
   const handleNewsScout = async () => {
     setNewsScouting(true);
     setError(null);
     try {
-      await post("/api/terminal/insert", { text: `/radio-news-scout ${newsCategory}` });
+      if (await post("/api/terminal/insert", { text: `/radio-news-scout ${newsCategory}` })) {
+        await post("/api/newsroom/radio/scout-mark", { lane: newsCategory });
+        void loadScoutState();
+      }
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -1743,6 +1763,10 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
     try {
       await navigator.clipboard.writeText(promptText);
       setError(null);
+      // Dispatch badge: this IDE SCOUT click fired for the active lane.
+      if (await post("/api/newsroom/radio/scout-mark", { lane: newsCategory })) {
+        void loadScoutState();
+      }
       // Brief flash feedback — you might want to render a toast; for now, silent success.
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "Failed to copy prompt");
@@ -3116,6 +3140,31 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
                   <option value="business">BUSINESS</option>
                 </select>
               </label>
+
+              {/* Per-lane dispatch badges (Naz 2026-09-10): show the lane was
+                  already scouted, persisted across reloads. */}
+              {(["global", "business"] as const).map((lane) => {
+                const st = scoutState[lane];
+                const active = lane === newsCategory;
+                return (
+                  <span
+                    key={lane}
+                    className="mono label"
+                    style={{
+                      background: st?.scouted_at ? "var(--color-panel-2)" : "transparent",
+                      color: st?.scouted_at ? "var(--color-phosphor)" : "var(--color-phosphor-dim)",
+                      border: `1px solid ${active ? "var(--color-edge)" : "transparent"}`,
+                      padding: "3px 6px",
+                      fontSize: "10px",
+                      opacity: active ? 1 : 0.6,
+                    }}
+                    title={`${lane.toUpperCase()} lane${st?.scouted_at ? ` — scouted at ${st.scouted_at}` : " — not scouted yet"}`}
+                  >
+                    {lane === "global" ? "G" : "B"}
+                    {st?.scouted_at ? ` ✓${st.scouted_at}` : " ·"}
+                  </span>
+                );
+              })}
 
               {/* SCOUT & CONVERT buttons */}
               <div className="flex items-center gap-2 ml-auto">

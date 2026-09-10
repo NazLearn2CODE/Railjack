@@ -353,6 +353,46 @@ async def api_radio_fill(body: dict = Body(...)):
     return await _script(argv, timeout=60)
 
 
+# ---------- RADIO scout dispatch state (persisted per-lane SCOUTED time) ----------
+# Naz 2026-09-10: the IDE SCOUT / SCOUT buttons must show whether the lane was
+# already dispatched (parity with Somatic 37531e3, Railjack-native implementation).
+_SCOUT_STATE_PATH = Path.home() / ".config" / "railjack" / "radio_scout_state.json"
+_SCOUT_LANES = ("global", "business")
+
+
+def _radio_scout_state() -> dict:
+    try:
+        return json.loads(_SCOUT_STATE_PATH.read_text())
+    except Exception:
+        return {}
+
+
+@router.get("/api/newsroom/radio/scout-state")
+async def radio_scout_state() -> dict:
+    return {"lanes": _radio_scout_state()}
+
+
+@router.post("/api/newsroom/radio/scout-mark")
+async def radio_scout_mark(body: dict = Body(...)) -> dict:
+    """Stamp the dispatch time when a RADIO scout button is clicked, per lane
+    (global/business). Persisted under ~/.config/railjack/ so the cockpit badge
+    survives reloads and reboots."""
+    lane = str(body.get("lane", "")).strip()
+    if lane not in _SCOUT_LANES:
+        raise HTTPException(400, f"lane must be one of {_SCOUT_LANES}")
+    state = _radio_scout_state()
+    entry = state.get(lane) or {}
+    stamp = datetime.now().strftime("%H:%M")
+    if body.get("kind") == "handoff":
+        entry["handoff_at"] = stamp
+    else:
+        entry["scouted_at"] = stamp
+    state[lane] = entry
+    _SCOUT_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _SCOUT_STATE_PATH.write_text(json.dumps(state, indent=1))
+    return {"lane": lane, **entry, "lanes": state}
+
+
 @router.post("/api/newsroom/radio/rundown")
 async def api_radio_rundown(body: dict = Body(...)):
     """Auto-fill the monthly ``{YYYYMM}_Rundown`` tab for one day, then flip that
