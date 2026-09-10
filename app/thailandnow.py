@@ -53,7 +53,7 @@ def _secret(key: str) -> str | None:
     v = os.environ.get(key)
     if v:
         return v
-    for env_path in (_RAILJACK_ENV, _WP_SECRETS, Path("/home/NAZ/n8n/.secrets.env")):
+    for env_path in (_RAILJACK_ENV, _WP_SECRETS, Path.home() / "n8n/.secrets.env"):
         if env_path.is_file():
             for line in env_path.read_text().splitlines():
                 line = line.strip()
@@ -4069,7 +4069,7 @@ def _wp_creds() -> tuple[str, str, str]:
         raise HTTPException(
             503,
             "WordPress creds not configured (WORDPRESS_URL/USERNAME/APPLICATION_PASSWORD "
-            "in env, ~/.config/railjack/wp.json, or /home/NAZ/n8n/.secrets.env)",
+            "in env, ~/.config/railjack/wp.json, or ~/n8n/.secrets.env)",
         )
     return url, user, pwd
 
