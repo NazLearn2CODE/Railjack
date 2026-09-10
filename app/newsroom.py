@@ -20,6 +20,7 @@ import os
 import random
 import re
 import shutil
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -63,10 +64,8 @@ def _nblm() -> str:
     return "notebooklm"
 
 
-async def _run(argv: list[str], timeout: float = 90,
-               stdin: bytes | None = None) -> tuple[int, bytes, bytes]:
-    if argv and argv[0] == "notebooklm":
-        argv = [_nblm(), *argv[1:]]
+async def _exec(argv: list[str], timeout: float,
+                stdin: bytes | None = None) -> tuple[int, bytes, bytes]:
     proc = await asyncio.create_subprocess_exec(
         *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         stdin=asyncio.subprocess.PIPE if stdin is not None else None,
@@ -77,6 +76,82 @@ async def _run(argv: list[str], timeout: float = 90,
         proc.kill()
         raise HTTPException(504, "newsroom script timed out")
     return proc.returncode or 0, out, err
+
+
+def _auth_expired(out: bytes, err: bytes) -> bool:
+    blob = (out + err).decode("utf-8", errors="replace")
+    return "Authentication expired" in blob
+
+
+_NLM_HEAL_DONE = False
+
+
+def _nlm_sync_cookies() -> bool:
+    """Self-heal for Google cookie rotation (2026-09-10: the CLI's session died
+    when the chrome-cdp re-login rotated the account's cookies). Copy the LIVE
+    Google cookies from the chrome-cdp profile (127.0.0.1:9222) into the
+    notebooklm CLI's storage_state — the reverse of the login capture, no
+    browser, no human. Best-effort: True only when the jar was rewritten."""
+    try:
+        import urllib.request
+        ver = json.load(urllib.request.urlopen(
+            "http://127.0.0.1:9222/json/version", timeout=5))
+        from websockets.sync.client import connect
+        ws = connect(ver["webSocketDebuggerUrl"], max_size=64 * 1024 * 1024,
+                     open_timeout=10)
+        mid = 0
+
+        def cmd(method):
+            nonlocal mid
+            mid += 1
+            ws.send(json.dumps({"id": mid, "method": method}))
+            end = time.time() + 30
+            while time.time() < end:
+                try:
+                    m = json.loads(ws.recv(timeout=max(0.1, end - time.time())))
+                except TimeoutError:
+                    return None
+                if m.get("id") == mid:
+                    return m.get("result", {})
+            return None
+
+        cookies = (cmd("Storage.getCookies") or {}).get("cookies", [])
+        keep = [c for c in cookies if "google" in c["domain"] or "youtube" in c["domain"]]
+        if len(keep) < 20:  # a signed-in jar carries ~50+; fewer = signed out
+            return False
+        state = {"cookies": [{
+            "name": c["name"], "value": c["value"], "domain": c["domain"],
+            "path": c["path"], "expires": c.get("expires", -1),
+            "httpOnly": c.get("httpOnly", False), "secure": c.get("secure", True),
+            "sameSite": c.get("sameSite") if c.get("sameSite") in ("Strict", "Lax", "None") else "Lax",
+        } for c in keep]}
+        dst = Path.home() / ".notebooklm" / "profiles" / "default" / "storage_state.json"
+        tmp = dst.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(state), encoding="utf-8")
+        tmp.replace(dst)
+        return True
+    except Exception:
+        return False
+
+
+async def _nlm_heal() -> bool:
+    """One auth self-heal per process. Kill-switch: NEWSROOM_NLM_HEAL=0."""
+    global _NLM_HEAL_DONE
+    if _NLM_HEAL_DONE or os.environ.get("NEWSROOM_NLM_HEAL", "1") == "0":
+        return False
+    _NLM_HEAL_DONE = True
+    return await asyncio.to_thread(_nlm_sync_cookies)
+
+
+async def _run(argv: list[str], timeout: float = 90,
+               stdin: bytes | None = None) -> tuple[int, bytes, bytes]:
+    is_nlm = bool(argv) and argv[0] == "notebooklm"
+    if is_nlm:
+        argv = [_nblm(), *argv[1:]]
+    rc, out, err = await _exec(argv, timeout, stdin=stdin)
+    if is_nlm and rc != 0 and _auth_expired(out, err) and await _nlm_heal():
+        rc, out, err = await _exec(argv, timeout, stdin=stdin)
+    return rc, out, err
 
 
 def _json(out: bytes):

@@ -1044,3 +1044,74 @@ def test_fail_surfaces_notebooklm_cli_error():
     assert _fail(b'{"_fatal": "run nl_auth.py once"}', b"") == "run nl_auth.py once"
     # blank everything → old fallback intact
     assert _fail(b"", b"") == "script failed (no output)"
+
+
+@pytest.mark.anyio
+async def test_run_heals_auth_expiry_and_retries(monkeypatch):
+    """Auth-expired notebooklm call → cookie sync fires once → retry succeeds."""
+    import app.newsroom as newsroom_mod
+    calls: list[list[str]] = []
+
+    async def fake_exec(argv, timeout=90, env=None, stdin=None):
+        calls.append(list(argv))
+        if len(calls) == 1:
+            return 2, b'{"error": true, "message": "Authentication expired or invalid."}', b""
+        return 0, b'{"notebook": {"id": "nid-healed"}}', b""
+
+    heals: list[bool] = []
+
+    async def fake_heal():
+        heals.append(True)
+        return True
+
+    monkeypatch.setattr(newsroom_mod, "_exec", fake_exec)
+    monkeypatch.setattr(newsroom_mod, "_nlm_heal", fake_heal)
+    monkeypatch.setattr(newsroom_mod, "_NLM_HEAL_DONE", False)
+
+    rc, out, err = await newsroom_mod._run(["notebooklm", "create", "t", "--json"])
+    assert rc == 0
+    assert b"nid-healed" in out
+    assert len(calls) == 2          # original + retried
+    assert len(heals) == 1          # heal fired exactly once
+    # resolved binary: argv[0] rewritten from 'notebooklm' via _nblm
+    assert calls[0][0] != "notebooklm" and calls[1][0] == calls[0][0]
+
+
+@pytest.mark.anyio
+async def test_run_no_heal_when_disabled_or_not_expired(monkeypatch):
+    """Kill-switch NEWSROOM_NLM_HEAL=0 → no heal, single attempt; and a plain
+    failure (not auth-expired) never triggers the heal either. Uses the REAL
+    _nlm_heal (the kill-switch lives there) with _nlm_sync_cookies faked."""
+    import app.newsroom as newsroom_mod
+    calls: list[list[str]] = []
+    syncs: list[bool] = []
+
+    async def fake_exec(argv, timeout=90, env=None, stdin=None):
+        calls.append(list(argv))
+        return 2, b'{"error": true, "message": "Authentication expired or invalid."}', b""
+
+    def fake_sync():
+        syncs.append(True)
+        return True
+
+    monkeypatch.setattr(newsroom_mod, "_exec", fake_exec)
+    monkeypatch.setattr(newsroom_mod, "_nlm_sync_cookies", fake_sync)
+    monkeypatch.setattr(newsroom_mod, "_NLM_HEAL_DONE", False)
+    monkeypatch.setenv("NEWSROOM_NLM_HEAL", "0")
+
+    rc, out, err = await newsroom_mod._run(["notebooklm", "create", "t", "--json"])
+    assert rc == 2                      # original failure surfaced
+    assert len(calls) == 1              # no retry
+    assert syncs == []                  # heal never reached the cookie sync
+
+    # non-auth failure → the guard passes but the trigger doesn't
+    calls.clear()
+    monkeypatch.setenv("NEWSROOM_NLM_HEAL", "1")
+
+    async def fake_exec_quota(argv, timeout=90, env=None, stdin=None):
+        calls.append(list(argv))
+        return 2, b'{"error": true, "message": "Notebook quota exceeded."}', b""
+
+    monkeypatch.setattr(newsroom_mod, "_exec", fake_exec_quota)
+    rc, out, err = await newsroom_mod._run(["notebooklm", "create", "t", "--json"])
+    assert rc == 2 and len(calls) == 1 and syncs == []
