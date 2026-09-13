@@ -4007,7 +4007,9 @@ function StoryScoutTab() {
 
 /* VDO GUIDE tab — document-style reference for writing VDO edit guides for the
    Fireside VDO editor. Rules per Naz (2026-09-06), grammar + grouping tidied;
-   sample frames live in frontend/public/vdo-guide/ (served at /vdo-guide/). */
+   sample frames live in frontend/public/vdo-guide/ (served at /vdo-guide/).
+   Section 4 (editor's markup) from Ben's Canva feedback videos, 2026-09-13
+   (R/C/T shortcuts, Futura; analyzed from feedback01/02.mp4). */
 const VDO_GUIDE_FONT =
   "'Futura', 'Futura PT', 'Futura Md BT', 'Century Gothic', 'Trebuchet MS', sans-serif";
 
@@ -4110,6 +4112,55 @@ function VdoGuideTab() {
           <VdoGuideFigure
             src="/vdo-guide/sample6a.png"
             caption="The same infographic reused with its anchor."
+          />
+        </div>
+
+        <h2 style={{ fontFamily: VDO_GUIDE_FONT, fontSize: 20, borderBottom: "2px solid #e6e2d8", paddingBottom: 4, color: "#f2efe8", marginTop: 26 }}>
+          4 · Editor's markup — annotating in Canva
+        </h2>
+        <ul style={{ margin: "8px 0", paddingLeft: 22 }}>
+          <li>
+            Guides are marked up in <b>Canva</b>. Shortcuts: <b>R</b> = rectangle,
+            <b> C</b> = circle, <b>T</b> = text box — new shapes default to <b>Futura</b>.
+          </li>
+          <li>
+            Guide cards are <b>full-frame white rectangles</b>: press <b>R</b>, drag the
+            rectangle over the whole frame, and put the note <b>inside the shape</b>. Never
+            leave notes as floating text boxes — the video shows through behind them and
+            the note gets lost.
+          </li>
+          <li>
+            Card text: <b>Futura 20, bold, vivid red, centered</b> on the white card.
+          </li>
+          <li>
+            Lead with the ask, then concrete visual references — e.g. <b>B-roll:</b>{" "}
+            concerts with Thai-style dressing, local festivals, Muay Thai stadium
+            atmosphere. Specific beats generic.
+          </li>
+          <li>
+            Reference links: paste the <b>exact article URL</b> into the frame — Canva
+            turns it into a link card the editor can open while editing. Place reference
+            cards on the <b>left half</b> of the frame; keep the presenter clear on the{" "}
+            <b>right</b>.
+          </li>
+          <li>
+            Pin notes to scenes, not vibes — name the moment ("during the Yaowarat
+            scene", "only in the Thai-dress shots", "emphasize the right end") and give
+            the timeline timecode when it matters.
+          </li>
+        </ul>
+        <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+          <VdoGuideFigure
+            src="/vdo-guide/ben-markup-before.png"
+            caption="Before — a floating red note; the video layer shows through behind it."
+          />
+          <VdoGuideFigure
+            src="/vdo-guide/ben-markup-after.png"
+            caption="After — the note lives inside a full-frame white rectangle: Futura 20, bold, vivid red, centered."
+          />
+          <VdoGuideFigure
+            src="/vdo-guide/ben-linkcard.png"
+            caption="Reference links are pasted as Canva link cards — frame left, presenter frame right."
           />
         </div>
 
