@@ -4138,10 +4138,11 @@ function VdoGuideTab() {
             atmosphere. Specific beats generic.
           </li>
           <li>
-            Reference links: paste the <b>exact article URL</b> into the frame — Canva
-            turns it into a link card the editor can open while editing. Place reference
-            cards on the <b>left half</b> of the frame; keep the presenter clear on the{" "}
-            <b>right</b>.
+            Reference images: with the story open in Chrome, run{" "}
+            <b>Ask Google About This Page</b>, <b>screen capture</b> the result, and place
+            the capture on the <b>left half</b> of the frame — the presenter stays clear on
+            the <b>right</b>. Access note: that Google feature is account-gated, so sign in
+            with the <b>Thailand NOW account</b> (it is not available on personal accounts).
           </li>
           <li>
             Pin notes to scenes, not vibes — name the moment ("during the Yaowarat
@@ -4160,7 +4161,7 @@ function VdoGuideTab() {
           />
           <VdoGuideFigure
             src="/vdo-guide/ben-linkcard.png"
-            caption="Reference links are pasted as Canva link cards — frame left, presenter frame right."
+            caption="Reference capture placed frame left — grabbed via Ask Google About This Page, then screenshotted; presenter stays frame right."
           />
         </div>
 
