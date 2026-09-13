@@ -4008,8 +4008,9 @@ function StoryScoutTab() {
 /* VDO GUIDE tab — document-style reference for writing VDO edit guides for the
    Fireside VDO editor. Rules per Naz (2026-09-06), grammar + grouping tidied;
    sample frames live in frontend/public/vdo-guide/ (served at /vdo-guide/).
-   Section 4 (editor's markup) from Ben's Canva feedback videos, 2026-09-13
-   (R/C/T shortcuts, Futura; analyzed from feedback01/02.mp4). */
+   Sections 4-5 (editor's markup; writing contract) from Ben's Canva feedback
+   videos + chat notes, 2026-09-13 (R/C/T shortcuts, Futura, Copy URL embeds,
+   cut/b-roll/timing; analyzed from feedback01/02.mp4). */
 const VDO_GUIDE_FONT =
   "'Futura', 'Futura PT', 'Futura Md BT', 'Century Gothic', 'Trebuchet MS', sans-serif";
 
@@ -4138,11 +4139,11 @@ function VdoGuideTab() {
             atmosphere. Specific beats generic.
           </li>
           <li>
-            Reference images: with the story open in Chrome, run{" "}
-            <b>Ask Google About This Page</b>, <b>screen capture</b> the result, and place
-            the capture on the <b>left half</b> of the frame — the presenter stays clear on
-            the <b>right</b>. Access note: that Google feature is account-gated, so sign in
-            with the <b>Thailand NOW account</b> (it is not available on personal accounts).
+            Reference embeds: use the <b>Copy URL</b> Chrome extension on the article,
+            then <b>paste</b> into the frame — Canva auto-generates a{" "}
+            <b>thumbnail + headline embed</b> for many outlets. Some sites don't render
+            (Bangkok Post, for one) — fall back to a <b>screencap</b>, or a fullscreen
+            card with highlight text. No account gymnastics needed.
           </li>
           <li>
             Pin notes to scenes, not vibes — name the moment ("during the Yaowarat
@@ -4161,9 +4162,34 @@ function VdoGuideTab() {
           />
           <VdoGuideFigure
             src="/vdo-guide/ben-linkcard.png"
-            caption="Reference capture placed frame left — grabbed via Ask Google About This Page, then screenshotted; presenter stays frame right."
+            caption="Copy URL, paste into Canva — a thumbnail + headline embed when the site supports it; frame left, presenter frame right."
           />
         </div>
+
+        <h2 style={{ fontFamily: VDO_GUIDE_FONT, fontSize: 20, borderBottom: "2px solid #e6e2d8", paddingBottom: 4, color: "#f2efe8", marginTop: 26 }}>
+          5 · Writing for the editor — cut, b-roll, timing
+        </h2>
+        <ul style={{ margin: "8px 0", paddingLeft: 22 }}>
+          <li>
+            A guide only needs three things: <b>(1) what to cut, (2) when to add b-roll,
+            (3) what text should appear on screen.</b>
+          </li>
+          <li>
+            The piece the editor is missing is <b>timing</b> — she cannot tell which part
+            of the video matches which part of the script, even translated. Anchor every
+            instruction to its moment: the <b>timeline timecode</b> or the exact{" "}
+            <b>script line</b> it covers.
+          </li>
+          <li>
+            Thai script is fine — b-roll suggestions can be <b>Google-translated</b> from
+            it.
+          </li>
+          <li>
+            Hold back on presentation: how a reference is shown is the editor's creative
+            call (she may scroll-capture the article, use a still, or restyle the embed).
+            Give her the cut, the timing and the on-screen text — let her present it.
+          </li>
+        </ul>
 
         <p style={{ fontSize: 12, color: "#a8a296", borderTop: "1px solid #3a4048", marginTop: 22, paddingTop: 8 }}>
           Reference only — this page documents the style; the guide itself is written per episode.
