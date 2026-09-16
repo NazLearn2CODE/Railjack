@@ -92,6 +92,15 @@ modules:
     title: CALENDAR
     kind: panel          # working calendar + prompt launcher (app/calendar_tasks.py)
     panel: calendar      # parses 20-projects/working-calendar-data.md from the Cephalon vault
+  - id: projects
+    title: PROJECTS
+    kind: panel          # project manager status & next action
+    panel: projects
+    options:
+      roots: ["~/GameDev"]
+      extra_projects: []
+      git_log_days: 14
+      cache_ttl_s: 300
 # Phase F: always-visible bottom terminal dock. Same ttyd URL as the TERMINAL
 # module → both attach to the one tmux session (tmux new -A -s main); typing in
 # the dock mirrors in TERMINAL and vice versa. Optional; omit `dock:` to hide.

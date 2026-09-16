@@ -8,6 +8,7 @@ import ComfyPanel from "./components/ComfyPanel";
 import NewsroomPanel from "./components/NewsroomPanel";
 import ThailandNowPanel from "./components/ThailandNowPanel";
 import CalendarPanel from "./components/CalendarPanel";
+import ProjectsPanel from "./components/ProjectsPanel";
 
 // kind:"panel" modules render their panel component from this map.
 const PANELS: Record<string, FC<{ module: ModuleConfig }>> = {
@@ -15,6 +16,7 @@ const PANELS: Record<string, FC<{ module: ModuleConfig }>> = {
   newsroom: NewsroomPanel,
   thailandnow: ThailandNowPanel,
   calendar: CalendarPanel,
+  projects: ProjectsPanel,
 };
 
 // Phase F: always-visible bottom terminal dock. Memoized so the frequent health
