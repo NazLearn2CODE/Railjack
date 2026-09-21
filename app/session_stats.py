@@ -562,6 +562,19 @@ async def session_payload() -> dict:
         if usage.get("reset_at"):
             lane["reset_at"] = usage["reset_at"]
         lanes[provider] = lane
+    # JEV dollar lane — jev() called directly (no self-HTTP), additions only.
+    try:
+        from .jev import jev as _jev
+        j = await _jev()
+        lanes["jev"] = {
+            "remaining_usd": j["remaining_usd"],
+            "refill_usd": j["refill_usd"],
+            "reset_at": j["reset_at"],
+            "calls": j["calls"],
+            "last_call_ts": j.get("last_call_ts"),
+        }
+    except Exception:
+        pass  # a dead JEV ledger never blocks the provider lanes
     return {"lanes": lanes}
 
 

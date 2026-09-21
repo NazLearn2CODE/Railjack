@@ -10,6 +10,11 @@ import { useStore, pipStatus } from "../store";
  */
 
 interface Lane {
+  remaining_usd?: number;
+  refill_usd?: number;
+  calls?: number;
+  last_call_ts?: string | null;
+  usd?: { remaining: number; refill: number };
   week_reset_at?: string;
   model?: string;
   ctx_limit?: number;
@@ -21,7 +26,7 @@ interface Lane {
 }
 
 interface SessionStats {
-  lanes?: { zai?: Lane; gemini?: Lane; claude?: Lane };
+  lanes?: { zai?: Lane; gemini?: Lane; claude?: Lane; jev?: Lane };
 }
 
 function resetCountdown(iso: string, now: number): string | null {
@@ -103,6 +108,26 @@ export default function ModuleRail() {
         className="flex flex-col gap-1.5 border-t border-edge"
         style={{ marginTop: "auto", paddingTop: "0.5rem" }}
       >
+        {/* JEV dollar lane — first, above GOOGLE (Naz placement, 2026-09-21) */}
+        <TelemetryLane
+          label="JEV"
+          lane={
+            stats?.lanes?.jev && stats.lanes.jev.remaining_usd != null && stats.lanes.jev.refill_usd != null
+              ? {
+                  active: true,
+                  used_pct: Math.max(
+                    0,
+                    Math.round(
+                      (1 - stats.lanes.jev.remaining_usd / stats.lanes.jev.refill_usd) * 100
+                    )
+                  ),
+                  reset_at: stats.lanes.jev.reset_at,
+                  usd: { remaining: stats.lanes.jev.remaining_usd, refill: stats.lanes.jev.refill_usd },
+                }
+              : undefined
+          }
+          now={now}
+/>
         <TelemetryLane label="GOOGLE" lane={stats?.lanes?.gemini} now={now} />
         <TelemetryLane label="CLAUDE / GPT" lane={stats?.lanes?.claude} now={now} />
         <TelemetryLane label="Z.AI" lane={stats?.lanes?.zai} now={now} />
@@ -161,6 +186,12 @@ function TelemetryLane({
           </span>
         ) : null}
       </div>
+      {lane?.usd && (
+        <MetricRaw
+          label="USD"
+          value={`$${lane.usd.remaining.toFixed(2)} / $${lane.usd.refill.toFixed(2)}`}
+        />
+      )}
       {lane?.used_pct !== undefined && <Metric label="SES" value={lane.used_pct} />}
       {active && lane?.ctx_pct !== undefined && <Metric label="CTX" value={lane.ctx_pct} />}
       {lane?.week_pct !== undefined && <Metric label="WK" value={lane.week_pct} />}

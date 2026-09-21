@@ -24,6 +24,7 @@ from .projects import router as projects_router
 from .radio_news import router as radio_news_router
 from .n8n_proxy import router as n8n_proxy_router
 from .session_stats import router as session_router
+from .jev import router as jev_router
 from .terminal_input import router as terminal_router
 from .thailandnow import router as thailandnow_router
 
@@ -35,6 +36,7 @@ app.include_router(newsroom_router)
 app.include_router(radio_news_router)
 app.include_router(catalog_router)
 app.include_router(session_router)
+app.include_router(jev_router)
 app.include_router(terminal_router)
 app.include_router(thailandnow_router)
 app.include_router(calendar_router)
