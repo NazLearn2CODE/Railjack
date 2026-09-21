@@ -20,6 +20,14 @@ interface Catalog {
   mcps: CatalogEntry[];
 }
 
+/** One provider telemetry lane from /api/session — the JEV slice only. */
+interface JevLane {
+  remaining_usd?: number;
+  refill_usd?: number;
+  reset_at?: string;
+  calls?: number;
+}
+
 const SELECT_STYLE: CSSProperties = {
   background: "var(--color-panel-2)",
   color: "var(--color-phosphor-dim)",
@@ -51,6 +59,38 @@ function OptGroup({ name, items }: { name: string; items: CatalogEntry[] }) {
         </option>
       ))}
     </optgroup>
+  );
+}
+
+/** JEV button — click copies a ready-to-paste metered ask-Jev command (fill the
+ * quoted fields, paste, Enter). Label shows the live house balance: dollars
+ * left of the TypeSafe $5 monthly refill, summed from ~/.hermes/jev_usage.jsonl
+ * by the backend (/api/session → lanes.jev, 18th→18th UTC window). Slot:
+ * between ✍ HANDOFF and 🧠 LESSON (Naz, 2026-09-21; metered Jev Choice 1.0). */
+const JEV_CMD =
+  "python3 ~/.hermes/scripts/jev_meter.py run noul --state '<goal + context + constraints, no secrets>' --question '<yes/no question>'";
+
+function JevButton() {
+  const { data } = usePolling<{ lanes?: { jev?: JevLane } }>("/api/session", 15_000);
+  const [copied, setCopied] = useState(false);
+  const j = data?.lanes?.jev;
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(JEV_CMD);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch (e) {
+      console.error("clipboard copy failed", e);
+    }
+  };
+  return (
+    <button
+      className="btn btn--compact"
+      onClick={() => void copy()}
+      title="Copy a metered ask-Jev command — fill the quoted fields, paste, Enter. Label = live house JEV balance."
+    >
+      {copied ? "✓ COPIED!" : j?.remaining_usd != null ? `◈ JEV $${j.remaining_usd.toFixed(2)}` : "◈ JEV …"}
+    </button>
   );
 }
 
@@ -310,6 +350,8 @@ Rules: evidence-backed (cite what happened this session), one idea per entry, re
       >
         {copiedLabel === "HANDOFF" ? "✓ COPIED!" : "✍ HANDOFF"}
       </button>
+
+      <JevButton />
 
       <button
         className="btn btn--compact"

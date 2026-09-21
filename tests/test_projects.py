@@ -541,18 +541,23 @@ async def test_real_fixtures_on_disk() -> None:
     assert payont.id == "payont-siam"
     assert payont.name == "Payont Siam"
     assert payont.repo_type == "game"
-    assert payont.phase == "concept"
+    # Real fixture advances as Naz gates phases and checks milestones
+    # (concept → pre-production 2026-09-21) — pin vocabulary and internal
+    # consistency, not snapshot values.
+    assert payont.phase in {"concept", "pre-production", "production", "alpha", "beta", "gold", "live-ops"}
     assert payont.protocol.index is True
     assert payont.protocol.gates is True
     assert len(payont.milestones) == 7
-    assert payont.pct == 0
-    assert payont.pct_basis == "milestones (0/7)"
+    m_checked = sum(1 for m in payont.milestones if m.checked)
+    assert payont.pct == round((m_checked / 7) * 100)
+    assert payont.pct_basis == f"milestones ({m_checked}/7)"
     assert payont.last_commit is not None
     assert "b370795" in payont.last_commit.hash or len(payont.last_commit.hash) >= 7
-    # Blockers in hot.md
-    assert any("Engine undecided" in b for b in payont.blockers)
+    # Blockers churn with project reality (Engine-undecided resolved when
+    # Godot was picked) — assert shape, not specific blockers.
+    assert isinstance(payont.blockers, list) and all(isinstance(b, str) and b for b in payont.blockers)
     assert payont.health in ("amber", "green")
-    assert "Pre-production" in payont.next_action.text
+    assert bool(payont.next_action.text)
 
     # 2. protocol fixture (no A-project -> no-protocol state, never 500)
     prot = await inspect_project(protocol_dir)
@@ -581,7 +586,7 @@ def test_api_projects_summary(client: TestClient) -> None:
 
     # Check summary item schema
     payont = next(p for p in data if p["id"] == "payont-siam")
-    assert payont["phase"] == "concept"
+    assert payont["phase"] in {"concept", "pre-production", "production", "alpha", "beta", "gold", "live-ops"}
     assert "trend_sparkline" in payont
     assert len(payont["trend_sparkline"]) == 14
     assert "next_action" in payont
