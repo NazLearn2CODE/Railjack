@@ -62,45 +62,33 @@ function OptGroup({ name, items }: { name: string; items: CatalogEntry[] }) {
   );
 }
 
-/** JEV button v2 — click copies a ready-to-paste metered ask-Jev command for
- * the selected primitive: noul (yes/no), choice (pick 1 of N), score (0–10
- * rubric). `--id` is required for choice/score (askjev.py rejects without).
- * --min-confidence deliberately NOT in the copied text — the default 0.6 gate
- * is what the user should see; rc=3 is a valid "gate says no" answer.
- * Segmented mode chips remember their setting in localStorage. Label shows the
- * live house balance from /api/session → lanes.jev (18th→18th UTC window).
- * Slot: between ✍ HANDOFF and 🧠 LESSON (Naz, 2026-09-21; metered Jev Choice
- * 1.0). v2 spec: Damriw workorder 2026-09-21 night, Naz-approved. */
-type JevMode = "noul" | "choice" | "score";
-
-const JEV_CMDS: Record<JevMode, string> = {
-  noul:
-    "python3 ~/.hermes/scripts/jev_meter.py run noul --state '<goal + context + constraints, no secrets>' --question '<yes/no question>'",
-  choice:
-    "python3 ~/.hermes/scripts/jev_meter.py run choice --state '<goal + context + constraints, no secrets>' --question '<which-option question>' --option '<option A>' --option '<option B>' --option '<option C>' --id '<short-label>'",
-  score:
-    "python3 ~/.hermes/scripts/jev_meter.py run score --state '<goal + context + constraints, no secrets>' --question '<how-strong question>' --level '0 <lowest meaning>' --level '5 <middle meaning>' --level '10 <highest meaning>' --id '<short-label>'",
-};
-
-const JEV_MODE_KEY = "jev-mode";
+/** JEV button v2-fixed — ONE button, exactly like v1: one click → one thing
+ * copied. The clipboard payload carries ALL THREE primitives (noul + choice +
+ * score) in one metered payload-mode call; the user deletes the JSON lines for
+ * types they don't need. Schema is askjev.py's real payload shape (read from
+ * the script, not guessed): choice → "criteria" object of named options,
+ * score → "criteria" array of level strings, ids are the question keys.
+ * Label shows the live house balance from /api/session → lanes.jev
+ * (18th→18th UTC window). Slot: between ✍ HANDOFF and 🧠 LESSON.
+ * v2-fixed spec: Damriw correction 2026-09-21 night, Naz-approved. */
+const JEV_CMD = `python3 ~/.hermes/scripts/jev_meter.py run payload - <<'EOF'
+{
+  "state": "<goal + context + constraints, no secrets>",
+  "questions": {
+    "yes_no": { "type": "noul", "instructions": "<the yes/no question>" },
+    "pick": { "type": "choice", "instructions": "<which-option question>", "criteria": { "<option A>": "<what it means>", "<option B>": "<what it means>" } },
+    "graded": { "type": "score", "instructions": "<how-strong question>", "criteria": ["0 <lowest meaning>", "5 <middle meaning>", "10 <highest meaning>"] }
+  }
+}
+EOF`;
 
 function JevButton() {
   const { data } = usePolling<{ lanes?: { jev?: JevLane } }>("/api/session", 15_000);
   const [copied, setCopied] = useState(false);
-  // Remembered across sessions like the theme toggle; localStorage is
-  // browser-only so guard the initial read.
-  const [mode, setMode] = useState<JevMode>(() => {
-    const saved = typeof document !== "undefined" ? localStorage.getItem(JEV_MODE_KEY) : null;
-    return saved === "choice" || saved === "score" ? saved : "noul";
-  });
   const j = data?.lanes?.jev;
-  const pick = (m: JevMode) => {
-    setMode(m);
-    localStorage.setItem(JEV_MODE_KEY, m);
-  };
   const copy = async () => {
     try {
-      await navigator.clipboard.writeText(JEV_CMDS[mode]);
+      await navigator.clipboard.writeText(JEV_CMD);
       setCopied(true);
       setTimeout(() => setCopied(false), 1500);
     } catch (e) {
@@ -108,33 +96,13 @@ function JevButton() {
     }
   };
   return (
-    <span className="flex items-center gap-1">
-      <span className="flex">
-        {(["noul", "choice", "score"] as JevMode[]).map((m) => (
-          <button
-            key={m}
-            className="btn btn--compact label"
-            style={{
-              fontSize: "9px",
-              padding: "2px 4px",
-              background: mode === m ? "var(--color-panel-2)" : undefined,
-              color: mode === m ? "var(--color-phosphor)" : "var(--color-phosphor-dim)",
-            }}
-            onClick={() => pick(m)}
-            title={`${m} — copy this primitive's metered command template`}
-          >
-            {m.toUpperCase()}
-          </button>
-        ))}
-      </span>
-      <button
-        className="btn btn--compact"
-        onClick={() => void copy()}
-        title={`Copy the metered ${mode} command — fill the <…> fields, paste, Enter. Label = live house JEV balance.`}
-      >
-        {copied ? "✓ COPIED!" : j?.remaining_usd != null ? `◈ JEV $${j.remaining_usd.toFixed(2)}` : "◈ JEV …"}
-      </button>
-    </span>
+    <button
+      className="btn btn--compact"
+      onClick={() => void copy()}
+      title="Copy one metered payload call carrying noul + choice + score — delete the JSON lines you don't need, fill the <…> fields, paste, Enter. Label = live house JEV balance."
+    >
+      {copied ? "✓ COPIED!" : j?.remaining_usd != null ? `◈ JEV $${j.remaining_usd.toFixed(2)}` : "◈ JEV …"}
+    </button>
   );
 }
 
