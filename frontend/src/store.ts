@@ -11,7 +11,7 @@ export interface ModuleConfig {
   start_timeout_s?: number;
   /** Opt-in: show the LIVE terminal dock only while this module is active.
    *  Default (undefined/false) = hidden. Set `live_dock: true` in the machine
-   *  YAML for any module that wants the dock (only n8n today). */
+   *  YAML for any module that wants the dock. */
   live_dock?: boolean;
 }
 
@@ -85,8 +85,7 @@ export const useStore = create<State>((set) => ({
 }));
 
 /** Effective LIVE-dock visibility for a module: the user's live toggle if they
- *  have touched the button, otherwise the module's `live_dock` YAML default
- *  (n8n ships open; every other module ships closed). */
+ *  have touched the button, otherwise the module's `live_dock` YAML default. */
 export function dockOpenFor(
   dockOpen: Record<string, boolean>,
   module: ModuleConfig | undefined,

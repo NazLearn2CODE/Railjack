@@ -44,8 +44,8 @@ class Module(BaseModel):
     options: dict = {}
     # Opt-in flag: show the always-visible LIVE terminal dock ONLY while this
     # module is the active tab. Default False → hidden everywhere. Set
-    # `live_dock: true` in the YAML on any module that wants the dock (only n8n
-    # today). A top-level `dock:` block must also exist for the dock to render.
+    # `live_dock: true` in the YAML on any module that wants the dock. A
+    # top-level `dock:` block must also exist for the dock to render.
     live_dock: bool = False
 
 

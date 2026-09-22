@@ -114,7 +114,7 @@ export default function App() {
 
   // LIVE dock renders when a top-level `dock:` is configured AND the top-bar
   // LIVE button is toggled on for the active module. The initial per-module
-  // state comes from the `live_dock` YAML default (n8n open, others closed);
+  // state comes from the `live_dock` YAML default (opt-in per module);
   // the button (in FramePanel) lets Naz override it live on any module.
   const activeModule = config?.modules.find((m) => m.id === activeModuleId);
   const showDock = Boolean(config?.dock) && dockOpenFor(dockOpen, activeModule);

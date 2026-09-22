@@ -40,7 +40,6 @@ npm run build` · `.venv/bin/ruff check`.
 
 - uvicorn runs **without `--reload`** → restart after any route change (a stale server 404s new endpoints).
 - Config is resolved at **import time** (`config.CONFIG = select_config()`); a missing/ambiguous config fails the uvicorn boot loudly, not at first request.
-- n8n refuses framing until `frame-ancestors`/CSP is set on its side (see pivot ADR).
 
 ---
 

@@ -22,7 +22,6 @@ from .manage import router as manage_router
 from .newsroom import router as newsroom_router
 from .projects import router as projects_router
 from .radio_news import router as radio_news_router
-from .n8n_proxy import router as n8n_proxy_router
 from .session_stats import router as session_router
 from .jev import router as jev_router
 from .terminal_input import router as terminal_router
@@ -41,9 +40,6 @@ app.include_router(terminal_router)
 app.include_router(thailandnow_router)
 app.include_router(calendar_router)
 app.include_router(projects_router)
-# Phase E: same-origin reverse proxy for the n8n editor (mounted before the
-# catch-all static mount below so /n8n/* wins over frontend/dist).
-app.include_router(n8n_proxy_router)
 
 DASHBOARD_DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
 

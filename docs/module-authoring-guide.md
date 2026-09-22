@@ -15,7 +15,7 @@ before improvising on the field names.
 ## Decide first: iframe or panel
 
 - **`kind: iframe`** — the service already has a web UI you just want to embed
-  (tmux/ttyd, n8n, …). Config-only. Zero frontend, zero backend code.
+  (tmux/ttyd, …). Config-only. Zero frontend, zero backend code.
 - **`kind: panel`** — you are building a custom HUD inside Railjack
   (ffmpeg Video Lab, NEWSROOM, …). Needs a frontend component; needs backend
   routes if the panel talks to anything beyond static config.
@@ -64,8 +64,7 @@ override — see `app/config.py` `select_config()`.
 | `live_dock` | bool | optional | show the always-visible LIVE terminal dock on this tab. Default `false`. A top-level `dock:` block must also exist for the dock to render. |
 
 **Look at real blocks before writing your own:**
-- iframe — `tmux`, `n8n` in `configs/tawhan.yaml` (`n8n` also shows
-  `live_dock: true` and a same-origin `/n8n/` reverse-proxy URL).
+- iframe — `tmux` in `configs/tawhan.yaml`.
 - panel — `ffmpeg`, `newsroom`, `thailandnow` (and `comfyui`, `notebooklm`),
   showing `options:` dicts of increasing richness.
 

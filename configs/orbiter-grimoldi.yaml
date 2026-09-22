@@ -7,15 +7,6 @@ modules:
     url: http://localhost:7681
     health: { type: http, url: "http://localhost:7681/" }
     manage: { type: systemd-user, unit: ttyd.service, extra_units: [ttyd-upload.service] }
-  # n8n refuses framing by default — embed only after setting
-  # N8N_CONTENT_SECURITY_POLICY / frame-ancestors on the n8n side.
-  # See A-project/decisions/2026-07-18-pivot-local-services-hub.md.
-  # - id: n8n
-  #   title: N8N
-  #   kind: iframe
-  #   url: http://localhost:5678
-  #   health: { type: http, url: "http://127.0.0.1:5678/healthz" }
-  #   manage: { type: systemd-user, unit: n8n.service }
 
 # Office canned-prompt buttons. Insert = the office repo set (CephalonVoid +
 # Somatic + skill-library — Somatic is the office hub, no Railjack checkout in

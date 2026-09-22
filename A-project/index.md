@@ -39,9 +39,10 @@ tag `legacy-agentic-os-final`.
   ComfyUI (:8188 via f5-comfyui-media `comfy.sh`), ffmpeg Video Lab panel.
 - **Office (Orokin) → "Somatic"**: separate instance. Name decided by Naz
   2026-07-18 (`Somatic`, supersedes the "Orbiter Grimoldi" placeholder);
-  name-only record, rename deferred (plan later on Orokin). Future modules
-  tmux + n8n. n8n needs frame-ancestors config before it can be embedded —
-  see the pivot ADR.
+  name-only record, rename deferred (plan later on Orokin). Future module:
+  tmux. (N8N module decommissioned 2026-09-22 — Naz's call, never used;
+  implementation knowledge lives in the Cephalon vault note
+  `n8n-hermes-bridge` + git history.)
 
 ## Milestones
 
