@@ -850,6 +850,7 @@ async def api_rewrite(body: dict = Body(...)):
         "seo": out_seo,
         "namecheck": namecheck,
         "stylecheck": stylecheck,
+        "jevcheck": _safe_jevgates(canonical),
     }
 
 
@@ -979,6 +980,17 @@ def _safe_stylecheck(text: str) -> dict:
         }
 
 
+def _safe_jevgates(canonical: str) -> dict:
+    """Jev judgment gates (names-needing-Thai + emphasis picks) — advisory,
+    metered, content-hash cached (Naz 2026-09-22). Degrades to skipped."""
+    try:
+        from .jev_gates import load_registry_map, run_gates
+
+        return run_gates(canonical, registry=load_registry_map())
+    except Exception as exc:  # pragma: no cover — gates are tested pure
+        return {"ok": True, "skipped": f"gates unavailable: {exc}"[:160], "names": [], "emphasis": []}
+
+
 # Overlay render shapes, most specific first:
 #   legacy  **[English(Thai)]** / [English(Thai)]  →  **English (Thai)**
 #   current **English [Thai]**   / English [Thai]  →  English (Thai)
@@ -1030,6 +1042,7 @@ async def rewrite_convert() -> dict:
         "errors": [],
         "namecheck": namecheck,
         "stylecheck": stylecheck,
+        "jevcheck": _safe_jevgates(rewritten),
     }
 
 

@@ -825,6 +825,9 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
     { kind: string; name?: string; english?: string | null }[]
   >([]);
   const [styleNote, setStyleNote] = useState<string | null>(null);
+  // Jev judgment gates (names-needing-Thai + emphasis picks) — advisory,
+  // metered, cached by text hash (2026-09-22)
+  const [jevNote, setJevNote] = useState<string | null>(null);
   const [copiedQueuePrompt, setCopiedQueuePrompt] = useState(false);
   const [infStyle, setInfStyle] = useState("auto");
   const [infMotion, setInfMotion] = useState("auto");
@@ -1915,6 +1918,20 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
     return lines.length ? lines.join(" · ") : null;
   };
 
+  // Jev gates → one advisory line (2026-09-22). Null = nothing worth saying.
+  const jevNoteOf = (
+    jc: { ok?: boolean; skipped?: string; names?: { english: string; thai?: string | null }[]; emphasis?: { span: string; score: number }[] } | undefined | null,
+  ): string | null => {
+    if (!jc) return null;
+    if (jc.skipped) return jc.skipped === "no candidates" ? null : `skipped: ${jc.skipped}`;
+    const names = (jc.names ?? []).map((n) => `${n.english} (${n.thai ?? "＋wiki"})`);
+    const emph = (jc.emphasis ?? []).map((e) => e.span);
+    const parts: string[] = [];
+    if (names.length) parts.push(`${names.length} name${names.length > 1 ? "s" : ""} need Thai: ${names.join(", ")}`);
+    if (emph.length) parts.push(`${emph.length} emphasis: ${emph.join(", ")}`);
+    return parts.length ? parts.join(" · ") : null;
+  };
+
   // ＋wiki — register a verified name pair into the vault name-wiki
   // (2026-09-01 port). The prompt is the verification gate: confirm the
   // English form, paste the source URL; the note lands and the warning clears.
@@ -1989,6 +2006,7 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
         setNameNote(checkNote(d.namecheck));
         setNameWarnings(d.namecheck?.warnings ?? []);
         setStyleNote(checkNote(d.stylecheck));
+        setJevNote(jevNoteOf(d.jevcheck));
       }
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : String(e));
@@ -2059,6 +2077,7 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
       setNameNote(checkNote(d.namecheck));
       setNameWarnings(d.namecheck?.warnings ?? []);
       setStyleNote(checkNote(d.stylecheck));
+      setJevNote(jevNoteOf(d.jevcheck));
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "convert failed");
     } finally {
@@ -4906,6 +4925,11 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
       {styleNote && (
         <div className="mono px-2 text-xs" style={{ color: "var(--color-hazard)" }}>
           ⚠ style: {styleNote}
+        </div>
+      )}
+      {jevNote && (
+        <div className="mono px-2 text-xs" style={{ color: "var(--color-accent)" }}>
+          🧠 jev: {jevNote}
         </div>
       )}
       {error && (
