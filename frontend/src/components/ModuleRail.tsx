@@ -192,7 +192,6 @@ function TelemetryLane({
           value={`$${lane.usd.remaining.toFixed(2)} / $${lane.usd.refill.toFixed(2)}`}
         />
       )}
-      {lane?.used_pct !== undefined && <Metric label="SES" value={lane.used_pct} />}
       {active && lane?.ctx_pct !== undefined && <Metric label="CTX" value={lane.ctx_pct} />}
       {lane?.week_pct !== undefined && <Metric label="WK" value={lane.week_pct} />}
       {reset && <MetricRaw label="RESET" value={reset} />}
