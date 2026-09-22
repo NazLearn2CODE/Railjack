@@ -130,7 +130,7 @@ export default function ModuleRail() {
 />
         <TelemetryLane label="GOOGLE" lane={stats?.lanes?.gemini} now={now} />
         <TelemetryLane label="CLAUDE / GPT" lane={stats?.lanes?.claude} now={now} />
-        <TelemetryLane label="Z.AI" lane={stats?.lanes?.zai} now={now} />
+        <TelemetryLane label="Z.AI" lane={stats?.lanes?.zai} now={now} showSes />
       </div>
     </nav>
   );
@@ -167,10 +167,13 @@ function TelemetryLane({
   label,
   lane,
   now,
+  showSes,
 }: {
   label: string;
   lane?: Lane;
   now: number;
+  /** SES (session-window %) is opt-in per lane — Z.AI only (Naz, 2026-09-22). */
+  showSes?: boolean;
 }) {
   const active = lane?.active ?? false;
   const reset = lane?.reset_at ? resetCountdown(lane.reset_at, now) : null;
@@ -192,6 +195,7 @@ function TelemetryLane({
           value={`$${lane.usd.remaining.toFixed(2)} / $${lane.usd.refill.toFixed(2)}`}
         />
       )}
+      {showSes && lane?.used_pct !== undefined && <Metric label="SES" value={lane.used_pct} />}
       {active && lane?.ctx_pct !== undefined && <Metric label="CTX" value={lane.ctx_pct} />}
       {lane?.week_pct !== undefined && <Metric label="WK" value={lane.week_pct} />}
       {reset && <MetricRaw label="RESET" value={reset} />}
