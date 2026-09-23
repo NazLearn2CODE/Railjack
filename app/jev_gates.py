@@ -6,7 +6,7 @@ spans deserve broadcast emphasis markup (bold=names, underline=dates/times per
 Ben's gem rules), and which stylecheck flags are REAL violations in context
 (vs regex noise). Code owns everything else: candidates, registry lookup,
 report shape — and the DETERMINISTIC APPLICATION of Jev's verdicts
-(``apply_gates``, Naz 2026-09-29: Jev finds where the rules bind, code
+(``apply_gates``, Naz 2026-09-23: Jev finds where the rules bind, code
 applies them there). Mirrors Somatic's jev_gates pattern (built native, not
 ported).
 
@@ -31,7 +31,7 @@ CACHE_DIR = Path.home() / ".cache" / "railjack" / "jev_gates"
 TIMEOUT_S = 60
 # Bump when question wording/logic changes — stale cached verdicts must not
 # survive a judging-logic upgrade. v3: style-rule triage questions added;
-# v4: person threshold 0.80→0.60 + lead-in strip (live-tuned 2026-09-29).
+# v4: person threshold 0.80→0.60 + lead-in strip (live-tuned 2026-09-23).
 CACHE_VERSION = "v4"
 
 # Emphasis pick when the normalized score (0..1 across the criteria anchors)
@@ -39,7 +39,7 @@ CACHE_VERSION = "v4"
 # so raw values must be normalized before any threshold.
 PICK_NORMALIZED = 0.70
 # Noul probability at/above this counts as a person name. Live-tuned
-# (2026-09-29): candidates are regex-prefiltered capitalized runs, so Jev
+# (2026-09-23): candidates are regex-prefiltered capitalized runs, so Jev
 # separates persons from noise with a huge margin (0.9+ vs <0.2); 0.80
 # dropped real borderline two-word Thai romanizations (Chai Wat → 0.64).
 PERSON_THRESHOLD = 0.60
@@ -352,7 +352,7 @@ def _word_occurrence(body: str, span: str) -> re.Pattern:
 
 def apply_gates(body: str, report: dict) -> tuple[str, dict]:
     """Deterministically APPLY Jev's verdicts to the canonical body (Naz
-    2026-09-29: Jev decides where the rules bind, code applies them there).
+    2026-09-23: Jev decides where the rules bind, code applies them there).
 
     names    → first mention becomes the overlay convention: registry Thai
                rides in as ``**Name [ไทย]**`` (rendered to parens at serve

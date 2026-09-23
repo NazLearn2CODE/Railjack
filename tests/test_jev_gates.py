@@ -152,7 +152,7 @@ def test_registry_map_inverts_name_check_loader(monkeypatch, tmp_path):
     assert got == {"anutin charnvirakul": "อนุทิน"}
 
 
-# ------------------------------------------- style triage + apply (2026-09-29)
+# ------------------------------------------- style triage + apply (2026-09-23)
 
 STYLE_FLAGS = [
     {"kind": "slop", "name": "pivotal", "detail": "AI vocabulary — use the plain word"},
@@ -259,7 +259,7 @@ def test_apply_gates_never_touches_title_lines():
     assert "**Anutin Charnvirakul [อนุทิน ชาญวีรกูล]**" in out   # body first mention carries it
 
 
-# ------------------------------------- live-tuned judgment (2026-09-29, v4)
+# ------------------------------------- live-tuned judgment (2026-09-23, v4)
 
 def test_name_candidates_strip_sentence_leadins():
     """'Later Anutin Charnvirakul' glued the sentence adverb into the run and

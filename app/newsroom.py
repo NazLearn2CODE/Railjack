@@ -986,7 +986,7 @@ def _safe_stylecheck(text: str) -> dict:
 def _safe_jevgates(canonical: str, style_flags: list[dict] | None = None) -> dict:
     """Jev judgment gates (names-needing-Thai + emphasis picks + style-rule
     triage) — advisory, metered, content-hash cached (Naz 2026-09-22;
-    triage + application 2026-09-29). Degrades to skipped."""
+    triage + application 2026-09-23). Degrades to skipped."""
     try:
         from .jev_gates import load_registry_map, run_gates
 
@@ -1004,7 +1004,7 @@ def _safe_jevgates(canonical: str, style_flags: list[dict] | None = None) -> dic
 def _jev_pass(canonical: str) -> tuple[str, dict]:
     """Judge, then APPLY: Jev decides where the writing rules and the
     English Name (Thai Name) convention bind; code applies them
-    deterministically (Naz 2026-09-29). Stylecheck warnings with a flagged
+    deterministically (Naz 2026-09-23). Stylecheck warnings with a flagged
     span ride the same metered call for Jev's real-vs-noise triage.
 
     Returns (applied_text, report). NEVER raises and never invents Thai —
