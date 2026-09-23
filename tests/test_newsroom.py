@@ -83,11 +83,16 @@ def test_rewrite_convert_missing_and_valid(tmp_path, monkeypatch):
         "seo": "## AI SEO BLOCK\nSummary.",
     }), encoding="utf-8")
     monkeypatch.setattr(newsroom, "_REWRITE_HANDOFF", handoff)
+    # JEV pass must be machine-independent in tests: no meter, no cache.
+    from app import jev_gates
+    monkeypatch.setattr(jev_gates, "METER", tmp_path / "no-meter.py")
+    monkeypatch.setattr(jev_gates, "CACHE_DIR", tmp_path / "cache")
     out = asyncio.run(rewrite_convert())                       # valid → verbatim relay
     assert out["rewritten"] == "EN: Title\nTH: หัวข้อ\n\nBody with **name** and ~~date~~ markers."
     assert out["seo"] == "## AI SEO BLOCK\nSummary."
     assert out["errors"] == []
     assert out["namecheck"]["ok"] is True                      # namecheck rides along
+    assert out["jevcheck"]["skipped"]                          # no meter → degraded, text untouched
 
 
 # ---------------------------------------------------------------- queue

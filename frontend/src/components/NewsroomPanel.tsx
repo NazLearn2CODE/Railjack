@@ -1918,17 +1918,42 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
     return lines.length ? lines.join(" · ") : null;
   };
 
-  // Jev gates → one advisory line (2026-09-22). Null = nothing worth saying.
+  // Jev gates → one advisory line (2026-09-22; applied+style 2026-09-29).
+  // Null = nothing worth saying.
   const jevNoteOf = (
-    jc: { ok?: boolean; skipped?: string; names?: { english: string; thai?: string | null }[]; emphasis?: { span: string; score: number }[] } | undefined | null,
+    jc: {
+      ok?: boolean; skipped?: string;
+      names?: { english: string; thai?: string | null }[];
+      emphasis?: { span: string; score: number }[];
+      style?: { kind: string; name: string; verdict: string }[];
+      applied?: { bold?: number; overlay?: number; underline?: number };
+    } | undefined | null,
   ): string | null => {
     if (!jc) return null;
     if (jc.skipped) return jc.skipped === "no candidates" ? null : `skipped: ${jc.skipped}`;
     const names = (jc.names ?? []).map((n) => `${n.english} (${n.thai ?? "＋wiki"})`);
     const emph = (jc.emphasis ?? []).map((e) => e.span);
     const parts: string[] = [];
+    if (jc.applied) {
+      const a = jc.applied;
+      const bits = [
+        a.overlay ? `${a.overlay} Thai` : "",
+        a.bold ? `${a.bold} bold` : "",
+        a.underline ? `${a.underline} underline` : "",
+      ].filter(Boolean);
+      if (bits.length) parts.push(`applied: ${bits.join(", ")}`);
+    }
     if (names.length) parts.push(`${names.length} name${names.length > 1 ? "s" : ""} need Thai: ${names.join(", ")}`);
     if (emph.length) parts.push(`${emph.length} emphasis: ${emph.join(", ")}`);
+    if (jc.style?.length) {
+      const bad = jc.style.filter((s) => s.verdict === "violation");
+      const cleared = jc.style.length - bad.length;
+      if (bad.length) {
+        parts.push(`style: ${bad.map((s) => s.name).join(", ")}${cleared ? ` · ${cleared} cleared` : ""}`);
+      } else {
+        parts.push(`style: all ${cleared} flag${cleared > 1 ? "s" : ""} cleared by Jev`);
+      }
+    }
     return parts.length ? parts.join(" · ") : null;
   };
 

@@ -843,6 +843,9 @@ async def api_rewrite(body: dict = Body(...)):
     # Reassemble the CANONICAL blob (bracket overlays intact) — checks read
     # this form; the SERVED form renders overlays to aired parens (below).
     canonical = f"EN: {title}\nTH: {title_th}\n\n{body}" if (title or title_th) else body
+    # JEV pass: judgment → deterministic application. namecheck/stylecheck
+    # run on the APPLIED text — what Naz actually sees and sends.
+    canonical, jev = _jev_pass(canonical)
     namecheck = _safe_namecheck(canonical)
     stylecheck = _safe_stylecheck(canonical)
     return {
@@ -850,7 +853,7 @@ async def api_rewrite(body: dict = Body(...)):
         "seo": out_seo,
         "namecheck": namecheck,
         "stylecheck": stylecheck,
-        "jevcheck": _safe_jevgates(canonical),
+        "jevcheck": jev,
     }
 
 
@@ -980,15 +983,50 @@ def _safe_stylecheck(text: str) -> dict:
         }
 
 
-def _safe_jevgates(canonical: str) -> dict:
-    """Jev judgment gates (names-needing-Thai + emphasis picks) — advisory,
-    metered, content-hash cached (Naz 2026-09-22). Degrades to skipped."""
+def _safe_jevgates(canonical: str, style_flags: list[dict] | None = None) -> dict:
+    """Jev judgment gates (names-needing-Thai + emphasis picks + style-rule
+    triage) — advisory, metered, content-hash cached (Naz 2026-09-22;
+    triage + application 2026-09-29). Degrades to skipped."""
     try:
         from .jev_gates import load_registry_map, run_gates
 
-        return run_gates(canonical, registry=load_registry_map())
+        return run_gates(canonical, registry=load_registry_map(), style_flags=style_flags)
     except Exception as exc:  # pragma: no cover — gates are tested pure
-        return {"ok": True, "skipped": f"gates unavailable: {exc}"[:160], "names": [], "emphasis": []}
+        return {
+            "ok": True,
+            "skipped": f"gates unavailable: {exc}"[:160],
+            "names": [],
+            "emphasis": [],
+            "style": [],
+        }
+
+
+def _jev_pass(canonical: str) -> tuple[str, dict]:
+    """Judge, then APPLY: Jev decides where the writing rules and the
+    English Name (Thai Name) convention bind; code applies them
+    deterministically (Naz 2026-09-29). Stylecheck warnings with a flagged
+    span ride the same metered call for Jev's real-vs-noise triage.
+
+    Returns (applied_text, report). NEVER raises and never invents Thai —
+    registry Thai only; any failure degrades to the untouched text."""
+    try:
+        from .jev_gates import apply_gates
+
+        flags = [w for w in _safe_stylecheck(canonical).get("warnings", []) if w.get("name")]
+        report = _safe_jevgates(canonical, style_flags=flags)
+        if report.get("skipped"):
+            return canonical, report
+        applied, counts = apply_gates(canonical, report)
+        report["applied"] = counts
+        return applied, report
+    except Exception as exc:  # pragma: no cover — apply_gates is tested pure
+        return canonical, {
+            "ok": True,
+            "skipped": f"jev pass unavailable: {exc}"[:160],
+            "names": [],
+            "emphasis": [],
+            "style": [],
+        }
 
 
 # Overlay render shapes, most specific first:
@@ -1034,6 +1072,9 @@ async def rewrite_convert() -> dict:
     except Exception:
         return miss
     rewritten = (data.get("rewritten") or "").strip()
+    # JEV pass: judgment → deterministic application (same contract as
+    # api_rewrite); checks read the APPLIED text.
+    rewritten, jev = _jev_pass(rewritten)
     namecheck = _safe_namecheck(rewritten)
     stylecheck = _safe_stylecheck(rewritten)
     return {
@@ -1042,7 +1083,7 @@ async def rewrite_convert() -> dict:
         "errors": [],
         "namecheck": namecheck,
         "stylecheck": stylecheck,
-        "jevcheck": _safe_jevgates(rewritten),
+        "jevcheck": jev,
     }
 
 
