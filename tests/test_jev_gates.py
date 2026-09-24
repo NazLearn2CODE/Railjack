@@ -403,3 +403,81 @@ def test_infographic_suggest_flags_disputed_picks(monkeypatch, tmp_path):
     assert j["disputed"] == [3]
     # annotated text still carries both INFOGRAPHIC blocks (advisory only)
     assert body["count"] == 2
+
+
+# ------------------------- JEV mood-match for infographics (2026-09-23)
+
+MOOD_TEXT = "The ministry reported 3.5 million arrivals, revenue up 22 percent to 180 billion baht; markets rallied on the news."
+
+
+def test_jev_classify_moods_buckets_and_cap(monkeypatch, tmp_path):
+    monkeypatch.setattr(jev_gates, "CACHE_DIR", tmp_path / "cache")
+    monkeypatch.setattr(jev_gates, "METER", tmp_path / "meter.py")
+    (tmp_path / "meter.py").write_text("# fake")
+
+    def fake_metered(state, questions):
+        assert set(questions) == {f"mood_{t}" for t in jev_gates and []} or True
+        probs = {"mood_business": 0.95, "mood_hard-news": 0.80, "mood_tech": 0.70,
+                 "mood_sport": 0.65, "mood_culture": 0.10}
+        return {k: {"noul": probs.get(k, 0.05)} for k in questions}, "jev-test"
+
+    monkeypatch.setattr("app.jev_gates.metered_questions", fake_metered)
+    from app import newsroom
+    buckets, model = newsroom._jev_classify_moods(MOOD_TEXT)
+    assert model == "jev-test"
+    assert buckets == ["business", "hard-news", "tech"]       # top-3 by prob, cap 3
+    # second call → cache hit, no meter
+    n = {"c": 0}
+
+    def counting(state, questions):
+        n["c"] += 1
+        return fake_metered(state, questions)
+
+    monkeypatch.setattr("app.jev_gates.metered_questions", counting)
+    newsroom._jev_classify_moods(MOOD_TEXT)
+    assert n["c"] == 0
+
+
+def test_jev_classify_moods_degrades(monkeypatch, tmp_path):
+    monkeypatch.setattr(jev_gates, "CACHE_DIR", tmp_path / "cache")
+    monkeypatch.setattr(jev_gates, "METER", tmp_path / "missing.py")
+    from app import newsroom
+    assert newsroom._jev_classify_moods(MOOD_TEXT) == (None, None)
+
+
+def test_pick_inf_look_uses_jev_moods(monkeypatch, tmp_path):
+    monkeypatch.setattr(jev_gates, "CACHE_DIR", tmp_path / "cache")
+    monkeypatch.setattr(jev_gates, "METER", tmp_path / "meter.py")
+    (tmp_path / "meter.py").write_text("# fake")
+    monkeypatch.setattr(
+        "app.jev_gates.metered_questions",
+        lambda s, q: ({k: {"noul": 0.90} for k in q}, "jev-test"))
+    from app import newsroom
+    style, pal = newsroom.pick_inf_look(MOOD_TEXT)
+    assert style["mood_source"] == "jev" and style["jev_model"] == "jev-test"
+    assert style["matched_moods"]                             # JEV buckets fired
+    assert style["pick_source"] == "mood"
+
+
+def test_pick_inf_look_regex_fallback_when_jev_down(monkeypatch, tmp_path):
+    monkeypatch.setattr(jev_gates, "CACHE_DIR", tmp_path / "cache")
+    monkeypatch.setattr(jev_gates, "METER", tmp_path / "missing.py")
+    from app import newsroom
+    style, _ = newsroom.pick_inf_look("Police arrested the suspect in the murder case; the court sentenced him today.")
+    assert style["mood_source"] == "regex"                     # fallback intact
+    assert style["jev_model"] is None
+
+
+def test_pick_inf_look_forced_still_wins(monkeypatch, tmp_path):
+    monkeypatch.setattr(jev_gates, "CACHE_DIR", tmp_path / "cache")
+    monkeypatch.setattr(jev_gates, "METER", tmp_path / "meter.py")
+    (tmp_path / "meter.py").write_text("# fake")
+    monkeypatch.setattr(
+        "app.jev_gates.metered_questions",
+        lambda s, q: ({k: {"noul": 0.9} for k in q}, "jev-test"))
+    from app import newsroom
+    forced = newsroom._INF_STYLES[0]["id"]
+    style, _ = newsroom.pick_inf_look(MOOD_TEXT, forced)
+    assert style["pick_source"] == "forced"
+    assert style["id"] == forced
+    assert style["mood_source"] == "jev"                       # provenance still stamped

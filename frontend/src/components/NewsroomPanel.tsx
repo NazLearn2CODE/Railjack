@@ -170,6 +170,8 @@ interface InfographicResult {
     label: string;
     preset?: string;
     matched_moods?: string[];
+    mood_source?: string;
+    jev_model?: string | null;
     pick_source?: string;
   };
   palette?: {
@@ -2682,6 +2684,9 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
                             {infResult.style.matched_moods && infResult.style.matched_moods.length > 0
                               ? ` · ${infResult.style.matched_moods.join(" / ")}`
                               : ""}
+                            {infResult.style.mood_source === "jev"
+                              ? ` · 🧠 ${infResult.style.jev_model || "jev"}`
+                              : infResult.style.mood_source === "regex" ? " · regex" : ""}
                           </span>
                         )}
                         {infResult?.dir && (

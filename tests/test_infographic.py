@@ -27,6 +27,15 @@ from app.newsroom import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _regex_moods_only(monkeypatch):
+    """These tests pin the REGEX mood/pool mechanics — JEV mood judgment is
+    covered in test_jev_gates. Force the fallback path so tests stay
+    machine-independent (never touch the real meter)."""
+    from app import newsroom
+    monkeypatch.setattr(newsroom, "_jev_classify_moods", lambda text: (None, None))
+
+
 # ── parse_inf_blocks ───────────────────────────────────────────────────
 
 

@@ -1607,24 +1607,83 @@ def _classify_moods(text: str) -> list[str]:
     return [tag for tag, rex in _MOOD_RES.items() if rex.search(text)]
 
 
+def _jev_classify_moods(text: str) -> tuple[list[str], str | None]:
+    """JEV mood judgment (Naz 2026-09-23): Jev reads the script text and picks
+    mood buckets — a tone judgment the keyword regex only approximates.
+
+    One metered call, one noul question per bucket, buckets ≥ 0.60 kept
+    (top-3 by probability — a coherent mood set, not soup). Returns
+    (buckets, model), possibly empty list when Jev fires no bucket; NEVER
+    raises — callers fall back to the regex lexicon on (None-ish) failure.
+    Verdicts ride the shared model-stamped cache, so a JEV upgrade flushes
+    them (jev_gates v5 law)."""
+    if not text:
+        return None, None
+    try:
+        from .jev_gates import cache_read, cache_write, metered_questions
+
+        key = "mood:" + text
+        answers, old_model = cache_read(key)
+        model = old_model  # cache hit → this IS the judging model
+        if answers is None:
+            excerpt = text[:1200]
+            questions = {
+                f"mood_{tag}": {
+                    "type": "noul",
+                    "instructions": (
+                        f'Does this TV news script text carry a "{tag}" mood or tone? '
+                        f"Answer yes only if the dominant tone genuinely matches. "
+                        f"«{excerpt}»"),
+                }
+                for tag in _MOOD_LEXICON
+            }
+            answers, model = metered_questions(
+                "NEWSROOM infographic mood-match: script tone → art style, palette, "
+                "and animation motion buckets.", questions)
+            if model and old_model and model != old_model:
+                from .jev_gates import flush_cache
+                flush_cache()
+            cache_write(key, answers, model)
+        scored = []
+        for tag in _MOOD_LEXICON:
+            prob = (answers.get(f"mood_{tag}") or {}).get("noul")
+            if isinstance(prob, (int, float)) and prob >= 0.60:
+                scored.append((prob, tag))
+        if not scored:
+            return [], model  # JEV judged: genuinely no strong mood — legal answer
+        scored.sort(reverse=True)
+        return [t for _, t in scored[:3]], model
+    except Exception:  # noqa: BLE001 — regex lexicon stays the fallback
+        return None, None
+
+
 def pick_inf_look(text: str, forced: str | None = None) -> tuple[dict, dict]:
     """ONE style + ONE palette per article, drawn INDEPENDENTLY but always
     compatible (palette tone matches the style's bg_tone; both are
     mood-matched). Forced dropdown style id wins; the palette still rotates.
-    Returns (style_copy, palette_copy), style annotated matched_moods +
-    pick_source, palette annotated pick_source."""
+    Moods: JEV judges the script text (tone judgment, cache-stamped);
+    regex lexicon stays the fallback when JEV is down. Returns
+    (style_copy, palette_copy), style annotated matched_moods + pick_source
+    + mood_source + jev_model, palette annotated pick_source."""
     moods = _classify_moods(text)
+    mood_source = "regex"
+    jev_model = None
+    jev_moods, jmodel = _jev_classify_moods(text)
+    if jev_moods is not None:
+        moods, mood_source, jev_model = jev_moods, "jev", jmodel
     if forced and forced != "auto":
         s = _INF_STYLES_BY_ID.get(forced)
         if s is not None:
             pal = _pick_palette(moods, s["bg_tone"])
-            return dict(s, matched_moods=moods, pick_source="forced"), pal
+            return dict(s, matched_moods=moods, pick_source="forced",
+                        mood_source=mood_source, jev_model=jev_model), pal
     pool = [s for s in _INF_STYLES if any(m in s["moods"] for m in moods)]
     source = "mood"
     if not pool:
         pool = [s for s in _INF_STYLES if "general" in s["moods"]]
         source = "general"
-    style = dict(random.choice(pool), matched_moods=moods, pick_source=source)
+    style = dict(random.choice(pool), matched_moods=moods, pick_source=source,
+                 mood_source=mood_source, jev_model=jev_model)
     return style, _pick_palette(moods, style["bg_tone"])
 
 
