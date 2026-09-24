@@ -14,6 +14,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
 from .catalog import router as catalog_router
+from .codeatlas import router as codeatlas_router
 from .calendar_tasks import router as calendar_router
 from .comfyui import router as comfyui_router
 from .config import CONFIG, Module, reload_config
@@ -34,6 +35,7 @@ app.include_router(comfyui_router)
 app.include_router(newsroom_router)
 app.include_router(radio_news_router)
 app.include_router(catalog_router)
+app.include_router(codeatlas_router)
 app.include_router(session_router)
 app.include_router(jev_router)
 app.include_router(terminal_router)
