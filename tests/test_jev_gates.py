@@ -93,8 +93,9 @@ def test_metered_call_parses_stdout_despite_low_confidence_exit(monkeypatch):
         return P()
 
     monkeypatch.setattr(jev_gates.subprocess, "run", fake_run)
-    answers = jev_gates._metered_call({"questions": {}})
+    answers, model = jev_gates._metered_call({"questions": {}})
     assert answers == {"name0": {"noul": 0.4}}
+    assert model is None  # fixture stdout carries no model field
 
 
 def test_run_gates_applies_verdicts_and_caches(monkeypatch, tmp_path):
@@ -103,10 +104,10 @@ def test_run_gates_applies_verdicts_and_caches(monkeypatch, tmp_path):
     def fake_meter(payload):
         calls.append(payload)
         qs = payload["questions"]
-        return {"answers": _fake_answers(
+        return _fake_answers(
             [v["instructions"].split('"')[1] for k, v in qs.items() if k.startswith("name")],
             [v["instructions"].split('"')[1] for k, v in qs.items() if k.startswith("emph")],
-        )}
+        ), "test-model" 
 
     monkeypatch.setattr(jev_gates, "METER", tmp_path / "meter.py")
     monkeypatch.setattr(jev_gates, "CACHE_DIR", tmp_path / "cache")
@@ -180,7 +181,7 @@ def test_run_gates_style_triage(monkeypatch, tmp_path):
             if k.startswith("style"):
                 # "pivotal" is a real violation; anything else is regex noise
                 answers[k] = {"noul": 0.9 if '"pivotal"' in v["instructions"] else 0.2}
-        return {"answers": answers}
+        return answers, "test-model" 
 
     monkeypatch.setattr(jev_gates, "_metered_call", fake_meter)
     out = jev_gates.run_gates(
@@ -286,8 +287,119 @@ def test_borderline_two_word_names_count_as_persons(monkeypatch, tmp_path):
             if k.startswith("name"):
                 span = v["instructions"].split('"')[1]
                 answers[k] = {"noul": 0.64 if span == "Chai Wat" else 0.05}
-        return {"answers": answers}
+        return answers, "test-model"
 
     monkeypatch.setattr(jev_gates, "_metered_call", fake_meter)
     out = jev_gates.run_gates("The statement came from Chai Wat yesterday.")
     assert [n["english"] for n in out["names"]] == ["Chai Wat"]
+
+
+# ----------------------------- update-propagation wiring (2026-09-23, v5)
+
+def test_cache_ttl_expiry_and_legacy_shape(monkeypatch, tmp_path):
+    monkeypatch.setattr(jev_gates, "CACHE_DIR", tmp_path / "cache")
+    jev_gates.cache_write("k", {"a": 1}, "m-1")
+    ans, model = jev_gates.cache_read("k")
+    assert (ans, model) == ({"a": 1}, "m-1")
+    # expire it
+    import json as _json
+    import time as _time
+    p = jev_gates._cache_path("k")
+    e = _json.loads(p.read_text())
+    e["ts"] = _time.time() - jev_gates.CACHE_TTL_S - 1
+    p.write_text(_json.dumps(e))
+    assert jev_gates.cache_read("k") == (None, "m-1")         # TTL miss keeps the stamp
+    # legacy (pre-v5) shape: raw answers without stamp → stale by definition
+    p.write_text(_json.dumps({"a": 1}))
+    assert jev_gates.cache_read("k") == (None, None)
+
+
+def test_model_change_flushes_cache(monkeypatch, tmp_path):
+    monkeypatch.setattr(jev_gates, "CACHE_DIR", tmp_path / "cache")
+    jev_gates.cache_write("k1", {"a": 1}, "jev-2026-09")
+    jev_gates.cache_write("k2", {"b": 2}, "jev-2026-09")
+    assert jev_gates.cache_model("k1") == "jev-2026-09"
+    n = jev_gates.flush_cache()
+    assert n == 2
+    assert jev_gates.cache_model("k1") is None
+    assert jev_gates.flush_cache() == 0                        # nothing left
+
+
+def test_run_gates_flushes_on_model_upgrade(monkeypatch, tmp_path):
+    """A fresh response whose model id differs from the stored stamp must
+    flush the whole cache — operations then re-judge on the new JEV."""
+    monkeypatch.setattr(jev_gates, "METER", tmp_path / "meter.py")
+    monkeypatch.setattr(jev_gates, "CACHE_DIR", tmp_path / "cache")
+    (tmp_path / "meter.py").write_text("# fake")
+    jev_gates.cache_write(BODY, {"name0": {"noul": 0.01}}, "jev-OLD")
+    # age the entry past the TTL — propagation happens at expiry, bounded by 24 h
+    import json as _json
+    import time as _time
+    p = jev_gates._cache_path(BODY)
+    e = _json.loads(p.read_text())
+    e["ts"] = _time.time() - jev_gates.CACHE_TTL_S - 1
+    p.write_text(_json.dumps(e))
+    state = {"calls": 0}
+
+    def fake_meter(payload):
+        state["calls"] += 1
+        return {"name0": {"noul": 0.95}}, "jev-NEW"
+
+    monkeypatch.setattr(jev_gates, "_metered_call", fake_meter)
+    out = jev_gates.run_gates(BODY)
+    assert state["calls"] == 1                        # expired + model changed → re-metered
+    assert out["jev_model"] == "jev-NEW"
+    assert jev_gates.cache_model(BODY) == "jev-NEW"
+    # same model again → cache hit, no new call
+    out2 = jev_gates.run_gates(BODY)
+    assert state["calls"] == 1 and out2["jev_model"] == "jev-NEW"
+
+
+def test_metered_questions_passthrough(monkeypatch):
+    monkeypatch.setattr(
+        jev_gates.subprocess, "run",
+        lambda *a, **k: type("P", (), {"returncode": 0, "stdout": '{"answers": {"x": {"noul": 0.9}}, "model": "jev-2026-10"}', "stderr": ""})())
+    answers, model = jev_gates.metered_questions("s", {"x": {"type": "noul"}})
+    assert answers == {"x": {"noul": 0.9}} and model == "jev-2026-10"
+
+
+# --------------------------- NEWSROOM infographic corroboration (2026-09-23)
+
+def test_infographic_suggest_flags_disputed_picks(monkeypatch, tmp_path):
+    """The director's picks ride; JEV re-judges each as a closed call and the
+    response flags disputed paragraphs — advisory, annotate unchanged."""
+    from fastapi.testclient import TestClient
+
+    import app.newsroom as newsroom
+    from app.main import app
+
+    monkeypatch.setattr(jev_gates, "METER", tmp_path / "meter.py")
+    monkeypatch.setattr(jev_gates, "CACHE_DIR", tmp_path / "cache")
+    (tmp_path / "meter.py").write_text("# fake")
+
+    async def fake_zai(prompt, **kw):
+        return ('{"picks": [{"paragraph": 2, "headline": "Numbers jump", "why": "w",'
+                ' "intake": "i", "facts": "60,000"}, {"paragraph": 3, "headline": '
+                '"Quote only", "why": "w", "intake": "i", "facts": ""}]}')
+
+    monkeypatch.setattr(newsroom.zai, "zai_message", fake_zai)
+
+    def fake_metered(state, questions):
+        answers = {}
+        for k, v in questions.items():
+            # paragraph 3 (quote-only) = not genuinely visual → disputed
+            answers[k] = {"noul": 0.15 if "Quote only" not in k and "pick3" in k else
+                          (0.15 if "pick3" in k else 0.9)}
+        return answers, "jev-test"
+
+    monkeypatch.setattr("app.jev_gates.metered_questions", fake_metered)
+    c = TestClient(app)
+    r = c.post("/api/newsroom/infographic/suggest",
+               json={"text": "Para one.\n\nPara two has 60,000 visitors.\n\nPara three is a quote."})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    j = body["jev"]
+    assert j["ok"] is True and j["jev_model"] == "jev-test"
+    assert j["disputed"] == [3]
+    # annotated text still carries both INFOGRAPHIC blocks (advisory only)
+    assert body["count"] == 2

@@ -14,6 +14,15 @@ from fastapi.testclient import TestClient
 from app import thailandnow
 from app.main import app
 
+
+@pytest.fixture(autouse=True)
+def _no_jev_meter(monkeypatch, tmp_path):
+    """Machine-independent tests: the JEV gate must degrade to no-gate here,
+    never touch the real meter or the real verdict cache."""
+    from app import jev_gates
+    monkeypatch.setattr(jev_gates, "METER", tmp_path / "no-meter.py")
+    monkeypatch.setattr(jev_gates, "CACHE_DIR", tmp_path / "cache")
+
 ORPHAN = "Khon Kaen Street Food Guide"
 ORPHAN_LINK = "https://www.thailandnow.in.th/khon-kaen-street-food/"
 HOST_WITH = "<p>Visit Khon kaen for food.</p>"  # lowercase k → casing-preserved wrap

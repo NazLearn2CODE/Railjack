@@ -5156,6 +5156,16 @@ async def seo_preview_insert(req: SeoInsertReq):
 
     raw_content = (post.get("content") or {}).get("raw", "")
     new_html, matches, before, after = _seo_insert_link(raw_content, req.phrase, req.href)
+    # JEV advisory verdict (Naz 2026-09-23): manual inserts stay human-applied
+    # (grill Q3) — the verdict rides the payload as a chip, never blocks.
+    jev: dict = {"verdict": "skipped"}
+    try:
+        from .seo_jev import verdict_insert
+        host_title = (post.get("title") or {}).get("raw", "") if isinstance(post.get("title"), dict) else str(post.get("title") or "")
+        jev = verdict_insert(req.phrase, req.href, host_title,
+                             before or after or raw_content[:400])
+    except Exception:  # noqa: BLE001 — an op never dies to Jev
+        pass
     return {
         "host_id": req.host_id,
         "phrase": req.phrase,
@@ -5163,6 +5173,7 @@ async def seo_preview_insert(req: SeoInsertReq):
         "matches": matches,
         "before": before,
         "after": after,
+        "jev": jev,
     }
 
 
@@ -5438,8 +5449,26 @@ async def seo_bulk_link_all(req: SeoBulkLinkAllReq):
             if job.cancel:
                 raise _TnCancelled()
             job.progress = int(i * 100 / len(linkable))
+            # JEV gate (Naz 2026-09-23): dry-run picks → batched verdicts →
+            # apply ONLY JEV-passed hosts. JEV down → gate map empty → run
+            # ungated, exactly as before (an op never dies to Jev).
+            jev_meta: dict = {"gated": False}
+            apply_hosts = hosts
             try:
-                res = await _seo_bulk_link_orphan(o.get("title", ""), o["link"], hosts, False,
+                from .seo_jev import gate_bulk_picks
+                picks = await _seo_bulk_link_orphan(
+                    o.get("title", ""), o["link"], hosts, True,
+                    extra_text=o.get("description") or "",
+                    related=req.related, vibe=req.vibe)
+                gate_map, jev_meta = gate_bulk_picks(
+                    o.get("title", ""), o["link"], picks.get("results") or [])
+                if gate_map:
+                    jev_meta["gated"] = True
+                    apply_hosts = [h for h in hosts if gate_map.get(str(h["id"]), True)]
+            except Exception as e:  # noqa: BLE001 — gate never kills the run
+                jev_meta = {"gated": False, "skipped": str(e) or e.__class__.__name__}
+            try:
+                res = await _seo_bulk_link_orphan(o.get("title", ""), o["link"], apply_hosts, False,
                                                   extra_text=o.get("description") or "",
                                                   related=req.related, vibe=req.vibe)
             except Exception as e:  # noqa: BLE001 — one bad orphan never kills the run
@@ -5447,9 +5476,16 @@ async def seo_bulk_link_all(req: SeoBulkLinkAllReq):
                 continue
             if res["linked"] > 0:
                 linked_orphans.append(o["link"])
-            results.append({"orphan_link": o["link"], "title": o.get("title", ""),
-                            "linked": res["linked"], "noop": res["noop"],
-                            "failed": res["failed"]})
+            entry = {"orphan_link": o["link"], "title": o.get("title", ""),
+                     "linked": res["linked"], "noop": res["noop"],
+                     "failed": res["failed"]}
+            if jev_meta.get("gated"):
+                skipped_ids = [str(h["id"]) for h in hosts if str(h["id"]) not in
+                               {str(x["id"]) for x in apply_hosts}]
+                entry["jev"] = {"model": jev_meta.get("model"),
+                                "skipped_hosts": skipped_ids,
+                                "skipped_count": len(skipped_ids)}
+            results.append(entry)
         job.result = {"processed": len(results), "orphans_linked": len(linked_orphans),
                       "linked_orphans": linked_orphans, "skipped": skipped,
                       "results": results}

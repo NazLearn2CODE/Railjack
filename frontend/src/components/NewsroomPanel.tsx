@@ -817,6 +817,7 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
   const [rewriting, setRewriting] = useState(false);
   const [infoSuggesting, setInfoSuggesting] = useState(false);
   const [infoAnnotated, setInfoAnnotated] = useState("");
+  const [infoJev, setInfoJev] = useState<string | null>(null);
   const [converting, setConverting] = useState(false);
   // Thai-name fact-check surfaced from CONVERT / rewrite (advisory, 2026-08-27)
   const [nameNote, setNameNote] = useState<string | null>(null);
@@ -2047,6 +2048,7 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
     if (!sendText.trim()) return;
     setInfoSuggesting(true);
     setInfoAnnotated("");
+    setInfoJev(null);
     setError(null);
     try {
       const res = await fetch("/api/newsroom/infographic/suggest", {
@@ -2060,6 +2062,14 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
       } else {
         const d = await res.json().catch(() => ({}));
         setInfoAnnotated(d.annotated || "");
+        const j = d.jev as { disputed?: number[]; jev_model?: string | null } | undefined;
+        if (j && Array.isArray(j.disputed) && j.disputed.length > 0) {
+          setInfoJev(`🧠 jev disputes pick${j.disputed.length > 1 ? "s" : ""} (paragraph${j.disputed.length > 1 ? "s" : ""} ${j.disputed.join(", ")}) — eyeball before using${j.jev_model ? ` · ${j.jev_model}` : ""}`);
+        } else if (j && j.jev_model) {
+          setInfoJev(`🧠 jev: all picks corroborated · ${j.jev_model}`);
+        } else {
+          setInfoJev(null);
+        }
       }
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : String(e));
@@ -2627,6 +2637,11 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
                         <span className="label">
                           Infographic suggestions{infoSuggesting ? " — reading…" : ""}
                         </span>
+                        {infoJev && !infoSuggesting && (
+                          <span className="mono text-xs" style={{ color: infoJev.startsWith("🧠 jev disputes") ? "var(--color-hazard)" : "var(--color-muted)" }}>
+                            {infoJev}
+                          </span>
+                        )}
                         {infoAnnotated && (
                           <button
                             className="btn btn--compact ml-auto"

@@ -365,13 +365,21 @@ function HealthList({ title, count, accent, hint, action, children }: {
   );
 }
 
+/** JEV advisory verdict on an anchor pick (2026-09-23 weave). */
+interface JevVerdict {
+  verdict?: string; // ok | weak | skipped
+  prob?: number;
+  model?: string | null;
+  detail?: string;
+}
+
 interface ActivePreview {
   key: string;
   postId: number;
   kind: "link" | "image";
   target: string;
   loading: boolean;
-  data?: { matches: number; before: string; after: string };
+  data?: { matches: number; before: string; after: string; jev?: JevVerdict };
   error?: string;
   applied?: boolean;
 }
@@ -398,7 +406,7 @@ interface InsertPreview {
   phrase: string;
   href: string;
   loading: boolean;
-  data?: { matches: number; before: string; after: string };
+  data?: { matches: number; before: string; after: string; jev?: JevVerdict };
   error?: string;
   applied?: boolean;
 }
@@ -436,6 +444,11 @@ interface BulkLinkAllResult {
   orphans_linked: number;
   linked_orphans: string[];
   skipped?: number;
+  results?: {
+    orphan_link: string;
+    linked?: number;
+    jev?: { model?: string | null; skipped_hosts?: string[]; skipped_count?: number };
+  }[];
 }
 
 function PreviewBlock({
@@ -466,6 +479,13 @@ function PreviewBlock({
       {!activePreview.loading && !activePreview.applied && activePreview.data && (
         <>
           <div className="mono text-xs">Matches found in raw HTML: {activePreview.data.matches}</div>
+          {activePreview.data.jev && activePreview.data.jev.verdict && activePreview.data.jev.verdict !== "skipped" && (
+            <div className="mono text-xs" style={{ color: activePreview.data.jev.verdict === "ok" ? "var(--color-go)" : "var(--color-hazard)" }}>
+              🧠 jev: {activePreview.data.jev.verdict === "ok" ? "natural anchor" : "WEAK anchor"}
+              {typeof activePreview.data.jev.prob === "number" ? ` (${activePreview.data.jev.prob})` : ""}
+              {activePreview.data.jev.model ? ` · ${activePreview.data.jev.model}` : ""}
+            </div>
+          )}
           {activePreview.data.matches === 0 ? (
             <div className="mono text-xs" style={{ color: "var(--color-hazard)" }}>
               0 matches found in content.raw (may already be removed).
@@ -897,7 +917,14 @@ function HealthSubTab() {
             {bulkAllResult && (
               <div className="mono text-xs" style={{ color: "var(--color-go)" }}>
                 ✓ BULK LINK ALL: linked {bulkAllResult.orphans_linked}/{bulkAllResult.processed} orphans
-                {bulkAllResult.skipped ? ` · ${bulkAllResult.skipped} skipped (no usable hosts)` : ""} — re-scan to refresh the report.
+                {bulkAllResult.skipped ? ` · ${bulkAllResult.skipped} skipped (no usable hosts)` : ""}
+                {(() => {
+                  const skippedHosts = (bulkAllResult.results ?? [])
+                    .reduce((n, o) => n + (o.jev?.skipped_count ?? 0), 0);
+                  const model = (bulkAllResult.results ?? []).find((o) => o.jev?.model)?.jev?.model;
+                  return skippedHosts > 0 ? ` · 🧠 jev auto-skipped ${skippedHosts} weak link${skippedHosts > 1 ? "s" : ""}${model ? ` (${model})` : ""}` : "";
+                })()}
+                {" "}— re-scan to refresh the report.
               </div>
             )}
             {(() => {

@@ -24,6 +24,7 @@ import hashlib
 import json
 import re
 import subprocess
+import time
 from pathlib import Path
 
 METER = Path.home() / ".hermes" / "scripts" / "jev_meter.py"
@@ -31,8 +32,16 @@ CACHE_DIR = Path.home() / ".cache" / "railjack" / "jev_gates"
 TIMEOUT_S = 60
 # Bump when question wording/logic changes — stale cached verdicts must not
 # survive a judging-logic upgrade. v3: style-rule triage questions added;
-# v4: person threshold 0.80→0.60 + lead-in strip (live-tuned 2026-09-23).
-CACHE_VERSION = "v4"
+# v4: person threshold 0.80→0.60 + lead-in strip (live-tuned 2026-09-23);
+# v5: cache entries gain model stamp + TTL (update-propagation wiring).
+CACHE_VERSION = "v5"
+
+# Verdict freshness (Naz 2026-09-23: "when JEV gets updates, these operations
+# get a newer JEV"). askjev rides the rolling alias ``jev-latest``; every
+# response carries the ACTUAL model id. Cached verdicts expire after this
+# TTL, and a response whose model id differs from the stored stamp flushes
+# the whole cache so every consumer re-judges on the new JEV.
+CACHE_TTL_S = 86400
 
 # Emphasis pick when the normalized score (0..1 across the criteria anchors)
 # reaches this. Jev scores on the CRITERIA-INDEX scale (3 anchors → 0..2),
@@ -214,12 +223,15 @@ def _questions(
     return q
 
 
-def _metered_call(payload: dict) -> dict:
-    """Run ONE metered Jev call; return the parsed answers dict.
+def _metered_call(payload: dict) -> tuple[dict, str | None]:
+    """Run ONE metered Jev call; return ``(answers, model_id)``.
 
     askjev exits nonzero (3 = low-confidence signal) while STILL returning the
     full answers JSON on stdout — so the exit code never decides here; only an
-    unparseable stdout is an error."""
+    unparseable stdout is an error. The response's ``model`` field is the
+    ACTUAL model that judged (the request only pins the rolling alias
+    ``jev-latest``) — callers stamp it into caches so a JEV upgrade is
+    detectable."""
     proc = subprocess.run(
         ["python3", str(METER), "run", "payload", "-"],
         input=json.dumps(payload),
@@ -233,12 +245,73 @@ def _metered_call(payload: dict) -> dict:
         raise RuntimeError(
             f"jev_meter exit {proc.returncode}, unparseable stdout: {proc.stderr.strip()[:200]}"
         )
-    return out.get("answers", out)
+    answers = out.get("answers", out)
+    model = out.get("model")
+    return answers, (str(model) if model else None)
 
 
-def _cache_path(body: str) -> Path:
-    digest = hashlib.sha256(f"{CACHE_VERSION}:{body}".encode()).hexdigest()[:24]
+def metered_questions(state: str, questions: dict) -> tuple[dict, str | None]:
+    """Public seam for other gate families (seo_jev): one metered call with a
+    caller-built question map. Returns ``(answers, model_id)``."""
+    return _metered_call({"state": state, "questions": questions})
+
+
+def _cache_path(key: str) -> Path:
+    digest = hashlib.sha256(f"{CACHE_VERSION}:{key}".encode()).hexdigest()[:24]
     return CACHE_DIR / f"{digest}.json"
+
+
+def cache_read(key: str) -> tuple[dict | None, str | None]:
+    """TTL-aware cache lookup. Live entry → ``(answers, model)``. Expired →
+    ``(None, old_model)`` — answers None forces a re-meter while the old
+    stamp lets the caller detect a JEV upgrade (and flush). Legacy entries
+    without a timestamp/model stamp count as stale (v5 law: a verdict
+    without provenance is not trustable) → ``(None, None)``."""
+    path = _cache_path(key)
+    if not path.exists():
+        return None, None
+    try:
+        entry = json.loads(path.read_text())
+    except Exception:
+        return None, None
+    if not isinstance(entry, dict) or "answers" not in entry:
+        return None, None  # pre-v5 shape — stale by definition
+    age = time.time() - float(entry.get("ts") or 0)
+    if age > CACHE_TTL_S:
+        return None, entry.get("model")  # expired — re-meter, keep the stamp
+    return entry["answers"], entry.get("model")
+
+
+def cache_write(key: str, answers: dict, model: str | None) -> None:
+    """Best-effort cache store with model stamp + timestamp."""
+    try:
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        _cache_path(key).write_text(
+            json.dumps({"answers": answers, "model": model, "ts": time.time()}))
+    except Exception:
+        pass  # cache is best-effort; judgment already made
+
+
+def cache_model(key: str) -> str | None:
+    """The model id that judged ``key`` (None = no live cache entry)."""
+    _answers, model = cache_read(key)
+    return model
+
+
+def flush_cache() -> int:
+    """Drop ALL cached verdicts (called when a fresh response's model id
+    differs from the stored stamp — JEV updated, every consumer must
+    re-judge). Regenerable cache files only. Returns files removed."""
+    if not CACHE_DIR.exists():
+        return 0
+    n = 0
+    for f in CACHE_DIR.glob("*.json"):
+        try:
+            f.unlink()
+            n += 1
+        except OSError:
+            pass
+    return n
 
 
 # ---------------------------------------------------------------- gates
@@ -269,30 +342,22 @@ def run_gates(
     if not names and not emphasis and not flags:
         return {"ok": True, "skipped": "no candidates", "names": [], "emphasis": [], "style": []}
 
-    cache = _cache_path(body)
-    if cache.exists():
-        try:
-            answers = json.loads(cache.read_text())
-        except Exception:
-            answers = None
-    else:
-        answers = None
+    answers, cached_model = cache_read(body)
     if answers is None:
         if not METER.exists():
-            return {"ok": True, "skipped": "no jev meter on this machine", "names": [], "emphasis": [], "style": []}
+            return {"ok": True, "skipped": "no jev meter on this machine", "names": [], "emphasis": [], "style": [], "jev_model": None}
         try:
-            raw = _metered_call({
+            answers, model = _metered_call({
                 "state": "TV news rewrite advisory gates (names + emphasis + style rules)",
                 "questions": _questions(names, [(s, _context(body, s)) for s in emphasis], flags),
             })
-            answers = raw.get("answers", raw)
         except Exception as exc:
-            return {"ok": True, "skipped": f"jev call failed: {exc}"[:160], "names": [], "emphasis": [], "style": []}
-        try:
-            CACHE_DIR.mkdir(parents=True, exist_ok=True)
-            cache.write_text(json.dumps(answers))
-        except Exception:
-            pass  # cache is best-effort; judgment already made
+            return {"ok": True, "skipped": f"jev call failed: {exc}"[:160], "names": [], "emphasis": [], "style": [], "jev_model": None}
+        # JEV updated since this verdict family was cached? Flush everything so
+        # every consumer re-judges on the new model (update-propagation law).
+        if model and cached_model and model != cached_model:
+            flush_cache()
+        cache_write(body, answers, model)
 
     registry = registry or {}
     out_names = []
@@ -331,7 +396,8 @@ def run_gates(
             "verdict": "violation" if prob >= RULE_THRESHOLD else "ok",
             "prob": round(prob, 2),
         })
-    return {"ok": True, "names": out_names, "emphasis": out_emph, "style": out_style}
+    return {"ok": True, "names": out_names, "emphasis": out_emph, "style": out_style,
+            "jev_model": cache_model(body)}
 
 
 # ---------------------------------------------------------------- apply

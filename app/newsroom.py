@@ -18,6 +18,7 @@ import asyncio
 import json
 import os
 import random
+import hashlib
 import re
 import shutil
 import time
@@ -947,7 +948,57 @@ async def api_infographic_suggest(body: dict = Body(...)):
         picks = json.loads(raw).get("picks") or []
     except Exception:
         raise HTTPException(502, "infographic pass returned unparseable JSON")
-    return {"annotated": _annotate_infographics(text, picks), "count": len(picks)}
+    # JEV pick corroboration (Naz 2026-09-23, grill Q1): the director is a big
+    # LLM; Jev re-judges each pick as a CLOSED call — does the paragraph really
+    # carry visual content? Advisory only: disputed picks stay annotated and
+    # flagged so Naz eyeballs them first. One metered call; degrades silently.
+    jev: dict = {"ok": True, "disputed": [], "jev_model": None}
+    try:
+        from .jev_gates import cache_read, cache_write, metered_questions
+        numbered = "\n\n".join(
+            "[%d] %s" % (i, p) for i, p in enumerate(
+                [p for p in re.split(r"\n\s*\n", text) if p.strip()], start=1))
+        key = "infog:" + hashlib.sha256(numbered.encode()).hexdigest()[:24]
+        answers, old_model = cache_read(key)
+        if answers is None:
+            qs = {}
+            for p in picks:
+                try:
+                    n = int(p.get("paragraph"))
+                except (TypeError, ValueError):
+                    continue
+                if not 2 <= n <= numbered.count("["):
+                    continue
+                para = numbered.split(f"[{n}] ", 1)[1].split("\n[", 1)[0][:600]
+                qs[f"pick{n}"] = {
+                    "type": "noul",
+                    "instructions": (
+                        f'Does this TV script paragraph carry genuinely visual content '
+                        f'(numbers, money, percentages, counts, comparisons, timelines, '
+                        f'before/after, routes, process steps) that a motion infographic '
+                        f'could show? «{para}»'),
+                }
+            if qs:
+                answers, model = metered_questions(
+                    "NEWSROOM infographic director corroboration (TV news script)", qs)
+                if model and old_model and model != old_model:
+                    from .jev_gates import flush_cache
+                    flush_cache()
+                cache_write(key, answers, model)
+        if answers:
+            jev["jev_model"] = model
+            for p in picks:
+                try:
+                    n = int(p.get("paragraph"))
+                except (TypeError, ValueError):
+                    continue
+                prob = (answers.get(f"pick{n}") or {}).get("noul")
+                if isinstance(prob, (int, float)) and prob < 0.60:
+                    jev["disputed"].append(n)
+                    p["jev_disputed"] = True
+    except Exception:  # noqa: BLE001 — an op never dies to Jev
+        pass
+    return {"annotated": _annotate_infographics(text, picks), "count": len(picks), "jev": jev}
 
 
 # Antigravity IDE rewrite writes its handoff here (see 10-knowledge/newsroom-rewrite-
