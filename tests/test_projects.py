@@ -573,7 +573,16 @@ async def test_real_fixtures_on_disk() -> None:
 
 # ── API Endpoint Tests ───────────────────────────────────────────────────────
 
+# These three hit the live config roots (~/GameDev) and assert real home fixtures.
+# ponytail: machine-guard only — proper fix is tmp-root fixtures via config
+# injection, upgrade path in tests/test_projects.py § API.
+_GAMEDEV_FIXTURES = (
+    Path("/home/naz6395/GameDev/payont-siam").exists()
+    and Path("/home/naz6395/GameDev/protocol").exists()
+)
 
+
+@pytest.mark.skipif(not _GAMEDEV_FIXTURES, reason="GameDev fixtures not present on this machine")
 def test_api_projects_summary(client: TestClient) -> None:
     res = client.get("/api/projects/summary")
     assert res.status_code == 200
@@ -594,6 +603,7 @@ def test_api_projects_summary(client: TestClient) -> None:
     assert "source_file" in payont["next_action"]
 
 
+@pytest.mark.skipif(not _GAMEDEV_FIXTURES, reason="GameDev fixtures not present on this machine")
 def test_api_projects_detail(client: TestClient) -> None:
     res = client.get("/api/projects/payont-siam")
     assert res.status_code == 200
@@ -609,6 +619,7 @@ def test_api_projects_detail(client: TestClient) -> None:
     assert res_404.status_code == 404
 
 
+@pytest.mark.skipif(not _GAMEDEV_FIXTURES, reason="GameDev fixtures not present on this machine")
 def test_api_projects_rescan(client: TestClient) -> None:
     res = client.post("/api/projects/rescan")
     assert res.status_code == 200
