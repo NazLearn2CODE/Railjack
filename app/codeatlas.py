@@ -99,12 +99,24 @@ def resolve_target(name: str) -> dict:
     raise HTTPException(400, f"no mappable target named '{name}'. Tried: " + ", ".join(tried))
 
 
+def _git_root(path: Path) -> Path | None:
+    """The repo governing ``path`` — the path itself, or the nearest ancestor
+    with .git (skill folders live inside the skill-library repo)."""
+    if (path / ".git").exists():
+        return path
+    for parent in path.parents:
+        if (parent / ".git").exists():
+            return parent
+    return None
+
+
 def _head_sha(path: Path) -> str | None:
-    if not (path / ".git").exists():
+    root = _git_root(path)
+    if root is None:
         return None
     try:
         import subprocess
-        out = subprocess.run(["git", "-C", str(path), "rev-parse", "HEAD"],
+        out = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"],
                              capture_output=True, text=True, timeout=15)
         return out.stdout.strip() or None
     except Exception:
@@ -178,11 +190,12 @@ def validate_artifacts(mapdir: Path) -> list[str]:
 
 
 def _gitignore_law(target: Path) -> str | None:
-    """Generated maps never dirty the target repo: CODEATLAS/ must be
-    ignored. Appends when missing; None on repos without git needs."""
-    if not (target / ".git").exists():
+    """Generated maps never dirty the governing repo: CODEATLAS/ must be
+    ignored there. Appends when missing; None when no repo governs."""
+    root = _git_root(target)
+    if root is None:
         return None
-    gi = target / ".gitignore"
+    gi = root / ".gitignore"
     try:
         if gi.exists():
             if any(line.strip() in ("CODEATLAS/", "/CODEATLAS/")
@@ -277,6 +290,7 @@ OUTPUT — write EXACTLY these files (create the directory if needed):
 {focus_block}
 RULES:
 - Inspect folder structure, package manifests, and import/use patterns yourself before writing anything.
+- Module `name`s are PATHS: use real file/folder paths relative to the target root (e.g. `frontend/src/components/NewsroomPanel.tsx`, `app/newsroom.py`) — never invented dotted groupings.
 - Do NOT invent modules or relations you did not see evidence for.
 - Do NOT write any meta.json — the calling module owns that file.
 - Keep everything else about the template untouched (styles, layout, render JS).
