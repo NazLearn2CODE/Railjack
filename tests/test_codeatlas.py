@@ -259,3 +259,71 @@ def test_generate_focus_flows_into_brief_and_meta(monkeypatch, tmp_path):
         meta = json.loads((proj / "CODEATLAS" / "meta.json").read_text())
         assert meta["focus"] == "IDE SCOUT"
         assert codeatlas.check_target("focused")["focus"] == "IDE SCOUT"
+
+
+# ── folder browser + path targets (Naz 2026-09-24: "codes in project folders")
+
+
+def test_browse_lists_dirs_filters_junk_and_maps_existence(monkeypatch, tmp_path):
+    monkeypatch.setattr(codeatlas, "_HOME", tmp_path)    # jail = tmp "home"
+    (tmp_path / "real-repo" / ".git").mkdir(parents=True)
+    (tmp_path / "junknode").mkdir()
+    (tmp_path / "node_modules").mkdir()
+    _write_map(tmp_path / "mapped" / "CODEATLAS")
+    (tmp_path / "mapped").mkdir(exist_ok=True)
+    monkeypatch.setattr(codeatlas, "_projects_root", lambda: tmp_path)
+    c = TestClient(app)
+    r = c.get("/api/codeatlas/browse")
+    assert r.status_code == 200
+    names = {e["name"] for e in r.json()["entries"]}
+    assert "node_modules" not in names                   # junk filtered
+    assert {"real-repo", "junknode", "mapped"} <= names
+    by_name = {e["name"]: e for e in r.json()["entries"]}
+    assert by_name["real-repo"]["is_repo"] is True
+    assert by_name["mapped"]["has_map"] is True
+
+
+def test_browse_home_jailed(monkeypatch, tmp_path):
+    monkeypatch.setattr(codeatlas, "_projects_root", lambda: tmp_path)
+    monkeypatch.setattr(codeatlas, "_HOME", tmp_path)    # jail = tmp "home"
+    c = TestClient(app)
+    outside = tmp_path.parent                            # above the jail
+    r = c.get(f"/api/codeatlas/browse?path={outside}")
+    assert r.status_code == 400
+
+
+def test_generate_accepts_explicit_path(monkeypatch, tmp_path):
+    monkeypatch.setattr(codeatlas, "_HOME", tmp_path)    # jail = tmp "home"
+    proj = tmp_path / "deep" / "nested-proj"             # NOT directly under root
+    (proj / ".git").mkdir(parents=True)
+    monkeypatch.setattr(codeatlas, "_head_sha", lambda p: "H")
+    monkeypatch.setattr(codeatlas, "_agy_timeout", lambda: 30)
+    monkeypatch.setattr(codeatlas.shutil, "which", lambda name: "/usr/bin/agy")
+
+    class FakeProc:
+        returncode = 0
+
+        async def communicate(self):
+            _write_map(proj / "CODEATLAS", head=None)
+            return b"done", b""
+
+    async def fake_exec(*a, **kw):
+        return FakeProc()
+
+    monkeypatch.setattr(codeatlas.asyncio, "create_subprocess_exec", fake_exec)
+    c = TestClient(app)
+    r = c.post("/api/codeatlas/generate", json={"path": str(proj)})
+    assert r.status_code == 200, r.text
+    jid = r.json()["id"]
+    for _ in range(100):
+        j = c.get(f"/api/codeatlas/job/{jid}").json()
+        if j["status"] in ("done", "error"):
+            break
+        time.sleep(0.05)
+    assert j["status"] == "done", j                      # nested folder reachable by path
+
+
+def test_generate_rejects_outside_home(monkeypatch, tmp_path):
+    c = TestClient(app)
+    r = c.post("/api/codeatlas/generate", json={"path": "/etc"})
+    assert r.status_code == 400

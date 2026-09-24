@@ -41,9 +41,23 @@ async function post<T>(url: string, body: unknown): Promise<{ ok: boolean; data?
   }
 }
 
+interface BrowseEntry {
+  name: string;
+  path: string;
+  has_map: boolean;
+  is_repo: boolean;
+}
+
+interface BrowseState {
+  path: string;
+  parent: string | null;
+  entries: BrowseEntry[];
+}
+
 export default function CodeAtlasPanel({ module }: { module: ModuleConfig }) {
   const [target, setTarget] = useState("");
   const [focus, setFocus] = useState("");
+  const [browse, setBrowse] = useState<BrowseState | null>(null);
   const [job, setJob] = useState<AtlasJobState | null>(null);
   const [check, setCheck] = useState<CheckState | null>(null);
   const [busy, setBusy] = useState(false);
@@ -69,7 +83,11 @@ export default function CodeAtlasPanel({ module }: { module: ModuleConfig }) {
   const generate = async () => {
     if (!target.trim()) { setError("name a target first"); return; }
     setBusy(true); setError(null); setJob(null); setCheck(null);
-    const r = await post<{ id: string }>("/api/codeatlas/generate", { target: target.trim(), focus: focus.trim() });
+    const t = target.trim();
+    const body = t.startsWith("/")
+      ? { path: t, focus: focus.trim() }
+      : { target: t, focus: focus.trim() };
+    const r = await post<{ id: string }>("/api/codeatlas/generate", body);
     if (!r.ok || !r.data?.id) {
       setError(r.error || "generate failed");
       setBusy(false);
@@ -81,10 +99,36 @@ export default function CodeAtlasPanel({ module }: { module: ModuleConfig }) {
     pollRef.current = window.setInterval(() => void poll(jid), 4000);
   };
 
+  const openBrowse = async (path: string) => {
+    setError(null);
+    const q = path ? `?path=${encodeURIComponent(path)}` : "";
+    const r = await fetch(`/api/codeatlas/browse${q}`);
+    if (!r.ok) {
+      const d = await r.json().catch(() => ({}));
+      setError(typeof d.detail === "string" ? d.detail : "browse failed");
+      return;
+    }
+    setBrowse((await r.json()) as BrowseState);
+  };
+
+  const pickFolder = (p: string) => {
+    setTarget(p);
+    setBrowse(null);
+    void runCheckPath(p);
+  };
+
   const runCheck = async () => {
     if (!target.trim()) { setError("name a target first"); return; }
     setError(null);
-    const c = await fetch(`/api/codeatlas/check?target=${encodeURIComponent(target.trim())}`);
+    const t = target.trim();
+    const q = t.startsWith("/") ? `path=${encodeURIComponent(t)}` : `target=${encodeURIComponent(t)}`;
+    const c = await fetch(`/api/codeatlas/check?${q}`);
+    if (c.ok) setCheck((await c.json()) as CheckState);
+  };
+
+  const runCheckPath = async (p: string) => {
+    setError(null);
+    const c = await fetch(`/api/codeatlas/check?path=${encodeURIComponent(p)}`);
     if (c.ok) setCheck((await c.json()) as CheckState);
   };
 
@@ -121,9 +165,39 @@ export default function CodeAtlasPanel({ module }: { module: ModuleConfig }) {
         <button className="btn btn--compact" disabled={!target.trim()} onClick={() => void runCheck()}>
           CHECK
         </button>
+        <button className="btn btn--compact" onClick={() => void (browse ? setBrowse(null) : openBrowse(""))}>
+          {browse ? "CLOSE BROWSER" : "BROWSE…"}
+        </button>
       </div>
 
       {error && <div className="mono text-xs" style={{ color: "var(--color-critical)" }}>{error}</div>}
+
+      {browse && (
+        <div className="mono text-xs flex flex-col gap-0.5" style={{ border: "1px solid var(--color-edge)", padding: 8, maxHeight: 280, overflow: "auto" }}>
+          <div style={{ color: "var(--color-muted)" }}>
+            {browse.path} — pick a folder to map:
+          </div>
+          {browse.parent && (
+            <button className="btn btn--compact" style={{ justifySelf: "start" }} onClick={() => void openBrowse(browse.parent!)}>
+              ↑ ..
+            </button>
+          )}
+          {browse.entries.length === 0 && (
+            <div style={{ color: "var(--color-muted)" }}>no sub-folders here</div>
+          )}
+          {browse.entries.map((e) => (
+            <button
+              key={e.path}
+              className="btn btn--compact"
+              style={{ justifySelf: "start" }}
+              onClick={() => pickFolder(e.path)}
+              title={`map ${e.path}`}
+            >
+              📁 {e.name}{e.is_repo ? "" : " (folder)"}{e.has_map ? " · ✓ map exists" : ""}
+            </button>
+          ))}
+        </div>
+      )}
 
       {check && (
         <div className="mono text-xs flex flex-wrap items-center gap-2" style={{ color: badgeColor }}>

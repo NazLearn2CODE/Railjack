@@ -38,6 +38,11 @@ from .config import CONFIG
 router = APIRouter()
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
+_HOME = Path.home()
+# Browsing noise: never offer these as mappable targets.
+_JUNK_DIRS = {"node_modules", ".venv", "venv", "__pycache__", ".git", "dist",
+              "build", "target", ".pytest_cache", ".mypy_cache", ".ruff_cache",
+              "site-packages", ".next", ".svelte-kit", "CODEATLAS"}
 
 # ------------------------------------------------------------------ options
 
@@ -69,6 +74,19 @@ def _agy_timeout() -> int:
 
 
 # ------------------------------------------------------------- target resolve
+
+
+def resolve_path(raw: str) -> dict:
+    """Resolve an explicit browsed path (absolute, must live under $HOME,
+    must exist)."""
+    p = Path(raw).expanduser().resolve()
+    home = _HOME.resolve()
+    if not (p == home or home in p.parents):
+        raise HTTPException(400, "path must live under your home directory")
+    if not p.is_dir():
+        raise HTTPException(400, f"not a folder: {p}")
+    return {"path": p, "kind": "repo" if (p / ".git").exists() else "folder",
+            "label": str(p)}
 
 
 def resolve_target(name: str) -> dict:
@@ -302,15 +320,20 @@ RULES:
 
 
 class GenerateReq(BaseModel):
-    target: str
+    target: str = ""
+    path: str = ""      # explicit browsed folder (wins over target name)
     focus: str = ""
 
 
 @router.post("/api/codeatlas/generate")
 async def generate(req: GenerateReq) -> dict:
-    """Map a named target: spawn the agy run, poll /job/{id}. Single-flight
-    per target — one map run at a time (agy quota + no double-writes)."""
-    t = resolve_target(req.target)
+    """Map a named target (or an explicit browsed path): spawn the agy run,
+    poll /job/{id}. Single-flight per target — one map run at a time (agy
+    quota + no double-writes)."""
+    if req.path:
+        t = resolve_path(req.path)
+    else:
+        t = resolve_target(req.target)
     if any(j.status in ("queued", "running") and j.target_path == str(t["path"])
            for j in _JOBS.values()):
         raise HTTPException(409, f"a CODEATLAS run for {t['label']} is already running")
@@ -375,9 +398,50 @@ async def serve_map(jid: str):
     return HTMLResponse(html_p.read_text(encoding="utf-8"))
 
 
+@router.get("/api/codeatlas/browse")
+async def browse(path: str = "") -> dict:
+    """Folder browser for the panel: list mappable sub-folders of ``path``
+    (default: the projects root). Home-jailed, junk dirs filtered. Each
+    entry notes whether a map already exists there."""
+    base = Path(path).expanduser().resolve() if path else _projects_root()
+    home = _HOME.resolve()
+    if not (base == home or home in base.parents):
+        raise HTTPException(400, "path must live under your home directory")
+    if not base.is_dir():
+        raise HTTPException(404, f"not a folder: {base}")
+    entries = []
+    try:
+        for child in sorted(base.iterdir(), key=lambda c: c.name.lower()):
+            if not child.is_dir() or child.name in _JUNK_DIRS:
+                continue
+            entries.append({
+                "name": child.name,
+                "path": str(child),
+                "has_map": (child / "CODEATLAS" / "meta.json").exists(),
+                "is_repo": (child / ".git").exists(),
+            })
+    except OSError as e:
+        raise HTTPException(403, f"unreadable: {e}")
+    return {"path": str(base), "parent": str(base.parent) if base != home else None,
+            "entries": entries}
+
+
 @router.get("/api/codeatlas/check")
-async def check(target: str) -> dict:
-    """Presence + staleness for a target's map (CURRENT / STALE / missing)."""
+async def check(target: str = "", path: str = "") -> dict:
+    """Presence + staleness: missing | current | stale. Accepts a name
+    (``target``) or a browsed absolute ``path``."""
+    if path:
+        t = resolve_path(path)
+        meta = read_meta(t["path"])
+        if not meta:
+            return {"target": t["label"], "state": "missing", "map_url": None}
+        head = _head_sha(t["path"])
+        mapped = meta.get("head")
+        state = "stale" if (head and mapped and head != mapped) else "current"
+        age_days = round((time.time() - float(meta.get("generated", 0))) / 86400, 1)
+        return {"target": t["label"], "state": state, "mapped_head": mapped,
+                "head": head, "age_days": age_days, "kind": t["kind"],
+                "focus": meta.get("focus") or ""}
     return check_target(target)
 
 
