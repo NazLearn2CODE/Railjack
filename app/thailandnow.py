@@ -4081,13 +4081,24 @@ def _wp_site_host() -> str:
 
 
 async def _wp(method: str, path: str, params: dict | None = None, json_body: dict | None = None):
-    """Authed WP REST call (Basic auth via httpx). Returns parsed JSON or dict/None."""
+    """Authed WP REST call (Basic auth via httpx). Returns parsed JSON or dict/None.
+    A 2xx with a non-JSON body (Sucuri/LiteSpeed HTML interstitial, seen live) is
+    retried once, then surfaced as an honest 502 carrying the body snippet."""
     url, user, pwd = _wp_creds()
     async with httpx.AsyncClient(timeout=30, auth=(user, pwd), follow_redirects=True) as c:
-        r = await c.request(method, f"{url}/wp-json/wp/v2{path}", params=params or {}, json=json_body)
-        if r.status_code >= 400:
-            raise HTTPException(502, f"WP {method} {path}: {r.status_code} {r.text[:200]}")
-        return r.json() if r.content else {}
+        for attempt in (1, 2):
+            r = await c.request(method, f"{url}/wp-json/wp/v2{path}", params=params or {}, json=json_body)
+            if r.status_code >= 400:
+                raise HTTPException(502, f"WP {method} {path}: {r.status_code} {r.text[:200]}")
+            if not r.content:
+                return {}
+            try:
+                return r.json()
+            except ValueError:
+                if attempt == 1:
+                    await asyncio.sleep(1.5)
+                    continue
+                raise HTTPException(502, f"WP {method} {path}: non-JSON 2xx body: {r.text[:120]!r}")
 
 
 _WP_RB_CACHE: dict[int, str] = {}           # post_id -> rest_base (process-lifetime)
@@ -4395,14 +4406,18 @@ async def _seo_fetch_all() -> tuple[list[dict], list[dict], list[dict], list[dic
 def _seo_internal_report(
     posts: list[dict], pages: list[dict], events: list[dict], other_cpts: list[dict] | None,
     media_urls: set[str], extra_paths: set[str], site_host: str,
+    chrome_inbound: set[str] | None = None,
 ) -> dict:
     """Pure: from content-bearing WP records (posts + pages + event CPT + other CPTs; each with
     ``id``, ``link``, ``title.rendered``, ``content.rendered``) + the media URL set
     (originals + crops) + extra valid paths (category/tag archives), compute broken
     internal links, internal image candidates (src ∉ media set — HTTP-probed later
-    by the flow), orphan posts/events/CPTs, and the external link/image sets. No network.
+    by the flow), orphan posts/events/CPTs/pages, and the external link/image sets. No network.
     Image crops/edit-variants are matched to their media original by stripping the
-    -WxH / -e{ts} suffix; extensionless refs are skipped."""
+    -WxH / -e{ts} suffix; extensionless refs are skipped.
+    ``chrome_inbound`` = paths linked from theme chrome (menus/footers/homepage/archives),
+    fetched by the flow — a record linked only from chrome is NOT an orphan (this is the
+    Ahrefs-parity fix: crawler views see chrome; content.rendered alone does not)."""
     media_bases = {_seo_img_base(m) for m in media_urls}
     other_cpts = other_cpts or []
 
@@ -4424,8 +4439,10 @@ def _seo_internal_report(
     e_items = [parse(r) for r in events]
     g_items = [parse(r) for r in pages]
     o_items = [parse(r) for r in other_cpts]
-    article_items = p_items + e_items + o_items   # orphan-eligible (posts, events, and extra CPTs)
-    all_items = article_items + g_items          # everything that bears links
+    # Orphan-eligible = EVERYTHING (posts + events + CPTs + pages). Crawlers count
+    # pages too; excluding pages was the main source of "our orphan count ≠ Ahrefs".
+    article_items = p_items + e_items + o_items + g_items
+    all_items = article_items                     # everything that bears links
     valid_paths = {it["path"] for it in all_items if it["link"]} | set(extra_paths)
 
     # S1.3: Per-post attribution for external links and images
@@ -4461,14 +4478,18 @@ def _seo_internal_report(
                 image_candidates.append(
                     {"from": it["link"], "from_id": it["id"], "from_title": it["title"], "src": src})
 
-    # orphan ARTICLES (posts + events + CPTs): zero inbound internal links from anywhere
+    # orphan ANYTHING (posts + events + CPTs + pages): zero inbound internal links
+    # from content AND from theme chrome (menus/footers/archives — the flow fetches
+    # those; crawler views count them, content.rendered alone does not).
     inbound = {it["path"]: 0 for it in article_items}
     for src_it in all_items:
         for tgt, _ in src_it["internal_link_pairs"]:
             if tgt != src_it["path"] and tgt in inbound:
                 inbound[tgt] += 1
+    chrome = {_seo_path(p) for p in (chrome_inbound or set())}  # normalize — paths vary in slash-ness
     orphans = [{"id": it["id"], "link": it["link"], "title": it["title"]}
-               for it in article_items if inbound.get(it["path"], 0) == 0]
+               for it in article_items
+               if inbound.get(it["path"], 0) == 0 and it["path"] not in chrome]
 
     return {
         "post_count": len(posts),
@@ -4482,6 +4503,13 @@ def _seo_internal_report(
         "external_links": sorted({u for it in all_items for u in it["external_links"]}),
         "external_imgs": sorted({u for it in all_items for u in it["external_imgs"]}),
         "ext_sources": ext_sources,
+        # internals — the flow pops these before storing the report:
+        "valid_paths_list": sorted(valid_paths),
+        "internal_link_pairs_all": [  # every internal link pair (sitemap-redirect matching)
+            {"from": it["link"], "from_id": it["id"], "from_title": it["title"],
+             "tgt": tgt, "href": raw}
+            for it in all_items for tgt, raw in it["internal_link_pairs"]
+        ],
     }
 
 
@@ -4534,7 +4562,13 @@ async def _flow_seo_health(job: "TnJob") -> None:
     if job.cancel:
         raise _TnCancelled()
     job.progress = 25
-    rep = _seo_internal_report(posts, pages, events, other_cpts, media, extra, _wp_site_host())
+    site_host = _wp_site_host()
+    site_origin = _wp_creds()[0].rstrip("/")  # e.g. "https://www.thailandnow.in.th"
+    # Theme-chrome inbound links (menus/footers/homepage/archives) — the Ahrefs-parity
+    # fix for orphan detection. Best-effort: fetch failures just shrink the set.
+    chrome_inbound = await _seo_chrome_inbound(extra, site_host)
+    rep = _seo_internal_report(posts, pages, events, other_cpts, media, extra, site_host,
+                               chrome_inbound=chrome_inbound)
     job.progress = 40
     # orphan suggestions: top-3 by title-token overlap (exclude the orphan itself)
     titles = [(p.get("link", ""), (p.get("title") or {}).get("rendered", ""))
@@ -4593,9 +4627,7 @@ async def _flow_seo_health(job: "TnJob") -> None:
     image_manual: list[dict] = []
     broken_internal: list[dict] = []        # Fix 1: HTTP-confirmed broken internal links
     internal_manual: list[dict] = []        # Fix 1: internal links that need manual check
-
-    site_host = _wp_site_host()
-    site_origin = _wp_creds()[0].rstrip("/")  # e.g. "https://www.thailandnow.in.th"
+    redirecting_internal: list[dict] = []   # 3xx internal links — rewrite candidates
 
     async def probe(url: str) -> int:
         if url.startswith("//"):
@@ -4605,6 +4637,18 @@ async def _flow_seo_health(job: "TnJob") -> None:
             if r.status_code == 405:  # some hosts reject HEAD → fall back to GET
                 r = await c.get(url, headers=probe_headers)
             return r.status_code
+
+    async def probe_nofollow(url: str) -> tuple[int, str]:
+        """Like probe() but redirects are NOT followed (owns the semaphore).
+        Returns (status, Location header)."""
+        if url.startswith("//"):
+            url = "https:" + url
+        async with sem:
+            async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as c:
+                r = await c.head(url, headers=probe_headers)
+                if r.status_code == 405:
+                    r = await c.get(url, headers=probe_headers)
+                return r.status_code, (r.headers.get("location") or "")
 
     async def check_ext(url: str) -> None:
         srcs = ext_sources.get(url, [])
@@ -4633,19 +4677,27 @@ async def _flow_seo_health(job: "TnJob") -> None:
         # 2xx/3xx → image exists (crop/variant the media set didn't list) → drop
 
     async def check_internal_link(cand: dict) -> None:
-        """Fix 1: HTTP-verify an internal link candidate (unauthed, clean UA)."""
+        """Fix 1: HTTP-verify an internal link candidate (unauthed, clean UA).
+        Redirects are NOT followed: a 3xx is its own finding (link points at a
+        redirect — rewrite candidate), never a silent pass."""
         abs_url = _seo_resolve_href(cand["href"], site_origin)
         if not abs_url:
             return  # empty href — skip
-        async with sem:
-            try:
-                code = await probe(abs_url)
-            except (httpx.HTTPError, OSError):
-                internal_manual.append({
-                    **cand,
-                    "reason": _seo_internal_link_reason(cand["href"], site_host),
-                })
-                return
+        try:
+            code, loc = await probe_nofollow(abs_url)
+        except (httpx.HTTPError, OSError):
+            internal_manual.append({
+                **cand,
+                "reason": _seo_internal_link_reason(cand["href"], site_host),
+            })
+            return
+        if code in _SEO_REDIRECT_STATUSES:
+            final = await _seo_follow_redirects(abs_url, loc, timeout)
+            redirecting_internal.append({
+                **cand, "abs_url": abs_url, "status": code, "final_url": final,
+                "final_path": _seo_path(final) if final else "",
+            })
+            return
         if code in (404, 410):
             broken_internal.append({
                 **cand,
@@ -4656,7 +4708,7 @@ async def _flow_seo_health(job: "TnJob") -> None:
                 **cand,
                 "reason": _seo_internal_link_reason(cand["href"], site_host),
             })
-        # 200/3xx → page exists (theme route, etc.) → drop (e.g. /interviews)
+        # 200 → page exists (theme route, etc.) → drop
 
     tasks = [asyncio.create_task(check_ext(u)) for u in ext]
     tasks += [asyncio.create_task(check_img(c)) for c in img_cands]
@@ -4671,6 +4723,52 @@ async def _flow_seo_health(job: "TnJob") -> None:
                     for t in tasks:
                         t.cancel()
                     raise _TnCancelled()
+    job.progress = 90
+    # --- SITEMAP HYGIENE (3XX in sitemap / noindex in sitemap / broken in sitemap) ---
+    # The Ahrefs "Top issues" trio: sitemap URLs that redirect, that carry noindex,
+    # or that 404. Probe unfollowed, stream-capped. Best-effort: no sitemap → note.
+    sitemap_urls: list[str] = []
+    sitemap_note = ""
+    try:
+        sitemap_urls, sitemap_note = await _seo_sitemap_urls()
+    except (httpx.HTTPError, OSError) as e:
+        sitemap_urls, sitemap_note = [], f"sitemap unreachable ({e})"[:120]
+    hygiene = await _seo_sitemap_hygiene(sitemap_urls)
+    hygiene["note"] = sitemap_note
+
+    # sitemap redirect path map → flag content links riding those redirects even
+    # when the old path is still a "valid" WP path (the HTTP probe never saw them).
+    redir_paths = {r["url_path"]: r.get("final_path", "") for r in hygiene["redirects"]
+                   if r.get("url_path")}
+    pairs_all = rep.pop("internal_link_pairs_all", [])
+    seen_rd = {(d.get("from"), d.get("href")) for d in redirecting_internal}
+    for pr in pairs_all:
+        fin = redir_paths.get(pr["tgt"])
+        if not fin or (pr["from"], pr["href"]) in seen_rd:
+            continue
+        seen_rd.add((pr["from"], pr["href"]))
+        redirecting_internal.append({**pr, "via": "sitemap", "final_path": fin})
+    redirecting_internal.sort(key=lambda d: (d.get("from") or "", d.get("href") or ""))
+
+    # sitemap-only URLs that return 200 but nothing links to (closest analog to the
+    # crawler's orphan-URL universe — WP REST records can't see stale/external URLs)
+    valid_list = set(rep.pop("valid_paths_list", []))
+    unlinked = sorted(
+        u for u in hygiene.get("ok", [])
+        if _seo_path(u) not in valid_list and _seo_path(u) not in chrome_inbound
+    )
+    hygiene["unlinked"] = {"count": len(unlinked), "urls": unlinked[:200]}
+    hygiene["ok_count"] = len(hygiene.pop("ok", []))  # consumed — never store the full list
+
+    # --- OVERSIZED IMAGES (crawler: "Image file size too large") ---
+    oversized = await _seo_oversized_media()
+
+    # keep the stored report lean (frontend caches it in localStorage): cap buckets
+    def _cap(lst: list[dict], n: int = 200) -> list[dict]:
+        return lst[:n]
+    for k in ("redirects", "noindex", "broken", "manual"):
+        hygiene[k] = _cap(hygiene.get(k, []))
+
     job.progress = 95
     job.result = {
         **rep,
@@ -4680,6 +4778,9 @@ async def _flow_seo_health(job: "TnJob") -> None:
         "image_manual_check": image_manual,
         "broken_external_links": broken_external,
         "manual_check": manual_check,
+        "redirecting_internal_links": redirecting_internal,
+        "oversized_images": oversized,
+        "sitemap": hygiene,
         "external_checked": len(ext),
         "at": datetime.now().isoformat(timespec="seconds"),
     }
@@ -4974,6 +5075,286 @@ def _seo_insert_link(html: str, phrase: str, href: str) -> tuple[str, int, str, 
     return html, 0, "", ""
 
 
+# --- SEO site-audit extensions (sitemap hygiene / oversized media / redirects) ---
+
+_SEO_REDIRECT_STATUSES = {301, 302, 303, 307, 308}
+# <meta name="robots" content="…"> — attribute order varies; cover both
+_META_ROBOTS_RES = (
+    re.compile(r"<meta[^>]*\bname\s*=\s*[\"']robots[\"'][^>]*\bcontent\s*=\s*[\"']([^\"']*)[\"']", re.I),
+    re.compile(r"<meta[^>]*\bcontent\s*=\s*[\"']([^\"']*)[\"'][^>]*\bname\s*=\s*[\"']robots[\"']", re.I),
+)
+_SITEMAP_LOC_RE = re.compile(r"<loc>\s*(.*?)\s*</loc>", re.I | re.S)
+
+
+def _seo_noindex_reason(html: str, x_robots_tag: str = "") -> str:
+    """Pure: '' when indexable, else why — 'meta robots', 'X-Robots-Tag', or both."""
+    reasons: list[str] = []
+    for rx in _META_ROBOTS_RES:
+        if any("noindex" in (m.group(1) or "").lower() for m in rx.finditer(html or "")):
+            reasons.append("meta robots")
+            break
+    if "noindex" in (x_robots_tag or "").lower():
+        reasons.append("X-Robots-Tag")
+    return " + ".join(reasons)
+
+
+async def _seo_fetch_text(url: str, sem: asyncio.Semaphore, timeout: float,
+                          max_bytes: int = 2_000_000) -> str:
+    """GET a text resource (sitemap / theme chrome) with the browser UA, body capped.
+    Raises httpx.HTTPError / OSError on failure (caller decides soft vs hard)."""
+    async with sem:
+        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True,
+                                     headers={"User-Agent": _BROWSER_UA}) as c:
+            async with c.stream("GET", url) as r:
+                r.raise_for_status()
+                buf = bytearray()
+                async for chunk in r.aiter_bytes():
+                    buf += chunk
+                    if len(buf) >= max_bytes:
+                        break
+                return buf.decode("utf-8", errors="replace")
+
+
+async def _seo_sitemap_urls() -> tuple[list[str], str]:
+    """Fetch the sitemap index — WP core ``wp-sitemap.xml``, then Yoast/RankMath
+    ``sitemap_index.xml``, then ``sitemap.xml`` — expand child sitemaps one level,
+    return (same-site page URLs, note-when-empty). Best-effort: no sitemap → ([], why)."""
+    site_origin = _wp_creds()[0].rstrip("/")
+    site_host = _wp_site_host()
+    conc = max(1, int(_opts().get("seo_external_concurrency", 8)))
+    timeout = float(_opts().get("seo_external_timeout_s", 10))
+    sem = asyncio.Semaphore(conc)
+    body, why = "", ""
+    for index_path in ("/wp-sitemap.xml", "/sitemap_index.xml", "/sitemap.xml"):
+        try:
+            body = await _seo_fetch_text(site_origin + index_path, sem, timeout)
+        except (httpx.HTTPError, OSError) as e:
+            why = f"no sitemap ({index_path}: {e})"[:120]
+            continue
+        if "<loc" in body.lower():
+            why = ""
+            break
+        body, why = "", f"no sitemap ({index_path}: no <loc> entries)"
+    if not body:
+        return [], why
+
+    locs = [m.group(1).strip() for m in _SITEMAP_LOC_RE.finditer(body)]
+    page_urls: list[str] = []
+    children: list[str] = []
+    for u in locs:
+        target = children if u.lower().split("?")[0].endswith((".xml", ".xsl")) else page_urls
+        target.append(u)
+    if children:  # a sitemap index — expand one level
+        cap = max(1, int(_opts().get("seo_sitemap_max_children", 50)))
+
+        async def one_child(cu: str) -> list[str]:
+            try:
+                cb = await _seo_fetch_text(cu, sem, timeout)
+            except (httpx.HTTPError, OSError):
+                return []
+            return [m.group(1).strip() for m in _SITEMAP_LOC_RE.finditer(cb)]
+
+        for res in await asyncio.gather(*(one_child(c) for c in children[:cap])):
+            for u in res:
+                if not u.lower().split("?")[0].endswith((".xml", ".xsl")):
+                    page_urls.append(u)
+
+    out: list[str] = []
+    seen: set[str] = set()
+    for u in page_urls:
+        if u in seen:
+            continue
+        seen.add(u)
+        host = urllib.parse.urlparse(u).netloc
+        if host and not _seo_host_eq(host, site_host):
+            continue  # child sitemap leaked a foreign URL (translations, CDN) — skip
+        out.append(u)
+    return out, ""
+
+
+async def _seo_follow_redirects(url: str, first_location: str, timeout: float,
+                                max_hops: int = 5) -> str:
+    """Manually follow a redirect chain (HEAD, unfollowed) from url; return the final
+    URL ('' impossible — on error the last known URL wins). Caps hops at max_hops."""
+    cur, loc = url, first_location
+    for _ in range(max_hops):
+        if not loc:
+            return cur
+        cur = str(httpx.URL(cur).join(loc))
+        try:
+            async with httpx.AsyncClient(timeout=timeout, follow_redirects=False,
+                                         headers={"User-Agent": _BROWSER_UA}) as c:
+                r = await c.head(cur)
+        except (httpx.HTTPError, OSError):
+            return cur
+        if r.status_code in _SEO_REDIRECT_STATUSES:
+            loc = r.headers.get("location") or ""
+        else:
+            return cur
+    return cur
+
+
+async def _seo_sitemap_hygiene(urls: list[str]) -> dict:
+    """Probe every sitemap URL WITHOUT following redirects (stream-capped GET):
+    3xx → redirects (Location + resolved final URL), 200+noindex → noindex,
+    404/410 → broken, other ≥400 → manual, 200 indexable → ok (consumed by the
+    flow's unlinked-URL calc, then dropped from the stored report)."""
+    conc = max(1, int(_opts().get("seo_external_concurrency", 8)))
+    timeout = float(_opts().get("seo_external_timeout_s", 10))
+    sem = asyncio.Semaphore(conc)
+    redirects: list[dict] = []
+    noindex: list[dict] = []
+    broken: list[dict] = []
+    manual: list[dict] = []
+    ok: list[str] = []
+
+    async def one(u: str) -> None:
+        try:
+            async with sem:
+                async with httpx.AsyncClient(timeout=timeout, follow_redirects=False,
+                                             headers={"User-Agent": _BROWSER_UA}) as c:
+                    async with c.stream("GET", u) as r:
+                        status = r.status_code
+                        xrob = r.headers.get("x-robots-tag") or ""
+                        loc = r.headers.get("location") or ""
+                        buf = bytearray()
+                        if status == 200:
+                            async for chunk in r.aiter_bytes():
+                                buf += chunk
+                                if len(buf) >= 300_000:
+                                    break
+        except (httpx.HTTPError, OSError):
+            manual.append({"url": u, "reason": "timeout/error"})
+            return
+        entry = {"url": u, "url_path": _seo_path(u)}
+        if status in _SEO_REDIRECT_STATUSES:
+            final = await _seo_follow_redirects(u, loc, timeout)
+            redirects.append({**entry, "status": status, "location": loc,
+                              "final_url": final,
+                              "final_path": _seo_path(final) if final else ""})
+        elif status == 200:
+            why = _seo_noindex_reason(buf.decode("utf-8", errors="replace"), xrob)
+            if why:
+                noindex.append({**entry, "why": why})
+            else:
+                ok.append(u)
+        elif status in (404, 410):
+            broken.append({**entry, "status": status})
+        elif status >= 400:
+            manual.append({**entry, "status": status, "reason": "client-error/blocked"})
+        # 1xx/2xx-other: treat as ok-ish, skip
+
+    if urls:
+        await asyncio.gather(*(one(u) for u in urls))
+    return {"checked": len(urls), "redirects": redirects, "noindex": noindex,
+            "broken": broken, "manual": manual, "ok": ok}
+
+
+async def _seo_oversized_media() -> list[dict]:
+    """Media-library images above ``seo_image_max_bytes`` (default 1 MB ≈ the crawler
+    'Image file size too large' threshold), heaviest first. Items without a filesize
+    (offloaded to a CDN, metadata never generated) are skipped — we can't weigh them.
+    Best-effort: a WP error or non-JSON response (Sucuri interstitial / truncated
+    heavy listing) → [] — an advisory section must never kill the scan."""
+    try:
+        items = await _wp_list_all("/media", "id,source_url,mime_type,media_details")
+    except (HTTPException, ValueError):  # ValueError: .json() on a non-JSON 2xx body
+        return []
+    max_bytes = int(_opts().get("seo_image_max_bytes", 1_000_000))
+    out: list[dict] = []
+    for m in items or []:
+        if not str(m.get("mime_type") or "").startswith("image/"):
+            continue
+        try:
+            size = int((m.get("media_details") or {}).get("filesize") or 0)
+        except (TypeError, ValueError):
+            continue
+        if size > max_bytes:
+            out.append({"id": m.get("id"), "source_url": m.get("source_url"), "filesize": size})
+    out.sort(key=lambda d: -d["filesize"])
+    return out
+
+
+async def _seo_chrome_inbound(extra_paths: set[str], site_host: str) -> set[str]:
+    """Paths linked from THEME CHROME — homepage, home pagination, category/tag
+    archives — that ``content.rendered`` can't see (menus, footers, listing pages).
+    A record linked only from chrome is NOT an orphan in crawler views (Ahrefs); this
+    set is what makes our orphan count comparable. Best-effort: failures skip.
+    Capped by ``seo_chrome_max_pages`` (default 20 fetches)."""
+    site_origin = _wp_creds()[0].rstrip("/")
+    conc = max(1, int(_opts().get("seo_external_concurrency", 8)))
+    timeout = float(_opts().get("seo_external_timeout_s", 10))
+    sem = asyncio.Semaphore(conc)
+    cap = max(1, int(_opts().get("seo_chrome_max_pages", 20)))
+    urls = [site_origin + "/", site_origin + "/page/2/", site_origin + "/page/3/"]
+    urls += [site_origin + p for p in sorted(extra_paths)]
+    urls = urls[:cap]
+    linked: set[str] = set()
+
+    async def one(u: str) -> None:
+        try:
+            html = await _seo_fetch_text(u, sem, timeout)
+        except (httpx.HTTPError, OSError):
+            return
+        for h in _seo_extract(html, site_host)["internal_links"]:
+            p = _seo_path(h)
+            if p and p != "/":
+                linked.add(p)
+
+    if len(urls) > 1:
+        await asyncio.gather(*(one(u) for u in urls))
+    return linked
+
+
+_A_HREF_RE = re.compile(r"<a\b[^>]*?\bhref\s*=\s*(\"[^\"]*\"|'[^']*'|[^>\s]+)", re.IGNORECASE)
+
+
+def _seo_rewrite_href(html: str, old_href: str, new_url: str) -> tuple[str, int, str, str]:
+    """Pure: retarget every ``<a href>`` equal to old_href (exact raw match, else
+    URL-normalized, mirroring _seo_strip_target's loose matching) to new_url.
+    Returns (new_html, match_count, snippet_before, snippet_after)."""
+    if not html or not old_href or not new_url:
+        return html, 0, "", ""
+    old_raw = old_href.strip()
+    old_norm = _seo_norm_url(old_raw)
+    if not old_norm:
+        return html, 0, "", ""
+
+    matches = 0
+    first_start = first_end = -1
+    pos = 0
+    chunks: list[str] = []
+    for m in _A_HREF_RE.finditer(html):
+        raw = m.group(1)
+        quoted = raw[:1] in "\"'"
+        val = raw[1:-1] if quoted else raw
+        if val != old_raw and _seo_norm_url(val) != old_norm:
+            continue
+        matches += 1
+        vs = m.start(1) + (1 if quoted else 0)
+        ve = m.end(1) - (1 if quoted else 0)
+        if first_start == -1:
+            first_start, first_end = m.start(0), m.end(0)
+        chunks.append(html[pos:vs])
+        chunks.append(new_url)
+        pos = ve
+    chunks.append(html[pos:])
+    if not matches:
+        return html, 0, "", ""
+    new_html = "".join(chunks)
+
+    ctx_s, ctx_e = max(0, first_start - 40), min(len(html), first_end + 40)
+    tag = html[first_start:first_end]
+    mm = _A_HREF_RE.search(tag)
+    raw1 = mm.group(1)
+    quoted = raw1[:1] in "\"'"
+    vs, ve = mm.start(1) + (1 if quoted else 0), mm.end(1) - (1 if quoted else 0)
+    new_tag = tag[:vs] + new_url + tag[ve:]
+    before = html[ctx_s:ctx_e]
+    after = html[ctx_s:first_start] + new_tag + html[first_end:ctx_e]
+    return new_html, matches, before, after
+
+
 class SeoFixReq(BaseModel):
     post_id: int
     kind: str  # "link" | "image"
@@ -5107,6 +5488,81 @@ async def seo_apply_fix_bulk(req: SeoApplyFixBulkReq):
         "failed": failed,        # WP error (wrong type 404, perms, etc.)
         "successful": removed,   # honest alias: a real removal (was: any ok, incl. no-ops)
     }
+
+
+class SeoRewriteReq(BaseModel):
+    post_id: int
+    old_href: str
+    new_url: str
+
+
+class SeoRewriteBulkReq(BaseModel):
+    items: list[SeoRewriteReq]
+
+
+@router.post("/api/thailandnow/seo/preview-rewrite")
+async def seo_preview_rewrite(req: SeoRewriteReq):
+    """Preview retargeting an <a href> (old_href → new_url) in a WP record's raw
+    content. Does NOT modify WP. Returns {post_id, matches, before, after}."""
+    rb = await _wp_resolve_rest_base(req.post_id)
+    try:
+        rec = await _wp("GET", f"/{rb}/{req.post_id}", {"context": "edit"})
+    except HTTPException as e:
+        if e.status_code in (401, 403):
+            raise HTTPException(403, f"WP edit context permission denied for post {req.post_id}. Verify WP credentials app-password has edit capabilities.")
+        raise
+    if not rec or not isinstance(rec, dict):
+        raise HTTPException(404, f"WP record {req.post_id} not found")
+    raw_content = (rec.get("content") or {}).get("raw", "")
+    new_html, matches, before, after = _seo_rewrite_href(raw_content, req.old_href, req.new_url)
+    return {
+        "post_id": req.post_id,
+        "old_href": req.old_href,
+        "new_url": req.new_url,
+        "matches": matches,
+        "before": before,
+        "after": after,
+    }
+
+
+@router.post("/api/thailandnow/seo/apply-rewrite")
+async def seo_apply_rewrite(req: SeoRewriteReq):
+    """Apply rewrite: retarget every <a href> old_href → new_url in the record's raw
+    content. Idempotent: 0 matches → {ok: true, matches: 0}, no write."""
+    rb = await _wp_resolve_rest_base(req.post_id)
+    try:
+        rec = await _wp("GET", f"/{rb}/{req.post_id}", {"context": "edit"})
+    except HTTPException as e:
+        if e.status_code in (401, 403):
+            raise HTTPException(403, f"WP edit context permission denied for post {req.post_id}.")
+        raise
+    if not rec or not isinstance(rec, dict):
+        raise HTTPException(404, f"WP record {req.post_id} not found")
+    raw_content = (rec.get("content") or {}).get("raw", "")
+    new_html, matches, before, after = _seo_rewrite_href(raw_content, req.old_href, req.new_url)
+    if matches == 0:
+        return {"ok": True, "matches": 0, "post_id": req.post_id, "post_link": rec.get("link", "")}
+    await _wp("POST", f"/{rb}/{req.post_id}", json_body={"content": new_html})
+    return {"ok": True, "matches": matches, "post_id": req.post_id, "post_link": rec.get("link", "")}
+
+
+@router.post("/api/thailandnow/seo/apply-rewrite-bulk")
+async def seo_apply_rewrite_bulk(req: SeoRewriteBulkReq):
+    """Bulk retarget redirecting internal links (one WP write per affected record).
+    Continues on per-item errors; counts mirror apply-fix-bulk."""
+    results = []
+    for item in req.items:
+        try:
+            res = await seo_apply_rewrite(item)
+            results.append(res)
+        except Exception as e:
+            results.append({"ok": False, "error": str(e), "post_id": item.post_id,
+                            "old_href": item.old_href})
+    rewritten = len([r for r in results if r.get("ok") and r.get("matches", 0) > 0])
+    noop = len([r for r in results if r.get("ok") and r.get("matches", 0) == 0])
+    failed = len([r for r in results if not r.get("ok")])
+    return {"results": results, "total": len(req.items),
+            "rewritten": rewritten, "noop": noop, "failed": failed, "successful": rewritten}
 
 
 @router.post("/api/thailandnow/seo/analyze-anchors")

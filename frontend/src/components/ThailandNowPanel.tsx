@@ -187,7 +187,33 @@ interface HealthReport {
   external_links: string[]; external_imgs: string[];
   broken_external_links: { url: string; status: number; from?: HealthSource[] }[];
   manual_check: { url: string; status?: number; reason: string; from?: HealthSource[] }[];
+  redirecting_internal_links?: RedirectingLink[];
+  oversized_images?: OversizedImage[];
+  sitemap?: SitemapHygiene;
   external_checked: number; at: string;
+}
+
+/** Internal link that 3xx-redirects (probed live, or caught via the sitemap redirect map). */
+interface RedirectingLink {
+  from: string; from_id?: number; from_title: string; href: string; to?: string; tgt?: string;
+  status?: number; final_url?: string; final_path?: string; via?: string;
+}
+/** Media-library image above the size threshold (crawler: "Image file size too large"). */
+interface OversizedImage { id?: number; source_url: string; filesize: number }
+/** Sitemap probe: 3xx / noindex / broken entries living in the sitemap + unlinked 200s. */
+interface SitemapHygiene {
+  checked: number; note?: string; ok_count?: number;
+  redirects: { url: string; url_path: string; status: number; location: string; final_url: string; final_path: string }[];
+  noindex: { url: string; url_path: string; why: string }[];
+  broken: { url: string; url_path: string; status: number }[];
+  manual: { url: string; status?: number; reason: string }[];
+  unlinked?: { count: number; urls: string[] };
+}
+
+/** 1.2 MB / 480 KB formatting for oversized-image rows. */
+function fmtBytes(n: number): string {
+  if (n >= 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+  return `${Math.max(1, Math.round(n / 1024))} KB`;
 }
 
 /** WP admin "edit post" URL derived from a record's own permalink (admin is
@@ -306,6 +332,29 @@ function healthCopyText(r: HealthReport): string {
     L.push("");
     L.push(`IMAGE MANUAL CHECK (${r.image_manual_check.length}) — blocked/timeout, verify by hand:`);
     for (const m of r.image_manual_check) L.push(`- ${m.src}  (in: ${m.from_title}) (${m.reason})`);
+  }
+  if (r.redirecting_internal_links?.length) {
+    L.push("");
+    L.push(`REDIRECTING INTERNAL LINKS (${r.redirecting_internal_links.length}) — href points at a 3xx; rewrite to the final URL:`);
+    for (const d of r.redirecting_internal_links) {
+      L.push(`- ${d.from_title} -> [${d.status ?? "?"}] ${d.href} => ${d.final_url || d.final_path || "?"}${d.via === "sitemap" ? " (via sitemap)" : ""}`);
+    }
+  }
+  if (r.sitemap) {
+    const s = r.sitemap;
+    L.push("");
+    L.push(`SITEMAP HYGIENE (checked ${s.checked}${s.ok_count != null ? ` · ${s.ok_count} clean` : ""}):`);
+    if (s.note) L.push(`- note: ${s.note}`);
+    for (const x of s.redirects) L.push(`- 3XX in sitemap: [${x.status}] ${x.url} => ${x.final_url || x.location}`);
+    for (const x of s.noindex) L.push(`- NOINDEX in sitemap: ${x.url} (${x.why})`);
+    for (const x of s.broken) L.push(`- BROKEN in sitemap: [${x.status}] ${x.url}`);
+    for (const x of s.manual) L.push(`- MANUAL: ${x.url} (${x.reason})`);
+    if (s.unlinked?.count) L.push(`- UNLINKED (200 but nothing links to them): ${s.unlinked.count}`);
+  }
+  if (r.oversized_images?.length) {
+    L.push("");
+    L.push(`OVERSIZED IMAGES (${r.oversized_images.length}) — above the size threshold, compress or serve smaller variants:`);
+    for (const m of r.oversized_images) L.push(`- ${fmtBytes(m.filesize)} ${m.source_url}`);
   }
   return L.join("\n");
 }
@@ -656,6 +705,48 @@ function HealthSubTab() {
     }
   };
 
+  // Redirect rewrite: preview retargeting an <a href> old → final URL, confirm, apply.
+  const [rewritePreview, setRewritePreview] = useState<{
+    key: string; postId: number; oldHref: string; newUrl: string;
+    loading?: boolean; applied?: boolean; error?: string;
+    data?: { matches: number; before: string; after: string };
+  } | null>(null);
+
+  const handleStartRewrite = async (key: string, postId: number, oldHref: string, newUrl: string) => {
+    setRewritePreview({ key, postId, oldHref, newUrl, loading: true });
+    const res = await post<{ matches: number; before: string; after: string }>(
+      "/api/thailandnow/seo/preview-rewrite",
+      { post_id: postId, old_href: oldHref, new_url: newUrl },
+    );
+    if (res.ok && res.data) {
+      setRewritePreview({ key, postId, oldHref, newUrl, data: res.data });
+    } else {
+      setRewritePreview({ key, postId, oldHref, newUrl, error: res.error || "Failed to load preview" });
+    }
+  };
+
+  const handleApplyRewrite = async () => {
+    if (!rewritePreview?.data) return;
+    const { postId, oldHref, newUrl } = rewritePreview;
+    setRewritePreview((prev) => prev ? { ...prev, loading: true } : null);
+    const res = await post<{ ok: boolean; matches: number }>("/api/thailandnow/seo/apply-rewrite", {
+      post_id: postId, old_href: oldHref, new_url: newUrl,
+    });
+    if (res.ok) {
+      if ((res.data?.matches ?? 0) > 0) {
+        // optimistic local trim: drop this record's redirect rows pointing at oldHref
+        setReport((prev) => prev ? {
+          ...prev,
+          redirecting_internal_links: (prev.redirecting_internal_links ?? [])
+            .filter((d) => !(d.from_id === postId && (d.href === oldHref))),
+        } : prev);
+      }
+      setRewritePreview((prev) => prev ? { ...prev, loading: false, applied: true } : null);
+    } else {
+      setRewritePreview((prev) => prev ? { ...prev, loading: false, error: res.error || "Failed to apply rewrite" } : null);
+    }
+  };
+
   const handleAnalyze = async (hostId: number, orphanTitle: string, orphanLink: string,
                                orphanDescription = "") => {
     setInsertPreview(null);
@@ -841,7 +932,7 @@ function HealthSubTab() {
           </button>
         )}
         <span className="mono" style={{ color: "var(--color-muted)" }}>
-          pulls posts+media via authed WP REST, HTTP-checks links + image candidates — ~1-2 min
+          pulls posts+pages+media+sitemap via authed WP REST, HTTP-checks links + images + every sitemap URL — a few minutes
         </span>
       </div>
 
@@ -1162,6 +1253,123 @@ function HealthSubTab() {
               );
             })}
           </HealthList>
+
+          {r.redirecting_internal_links && r.redirecting_internal_links.length > 0 && (
+            <HealthList title="REDIRECTING INTERNAL LINKS" count={r.redirecting_internal_links.length} accent="var(--color-hazard)"
+              hint="href points at a 3xx — crawl equity leaks at every hop. REWRITE retargets the href to the final URL (preview → confirm).">
+              {r.redirecting_internal_links.map((d, i) => {
+                const rowKey = `rw-${i}-${d.from_id}-${d.href}`;
+                const newUrl = d.final_path || d.final_url || "";
+                return (
+                  <div key={i} className="text-sm mt-1 flex flex-col gap-0.5">
+                    <div>
+                      <span style={{ color: "var(--color-phosphor-dim)" }}>{d.from_title || d.from}</span>
+                      {" → "}
+                      <span className="mono" style={{ color: "var(--color-hazard)" }}>[{d.status ?? "?"}]</span>{" "}
+                      <a href={safeOrigin(d.from) + (d.tgt || d.to || d.href)} target="_blank" rel="noreferrer"
+                        style={{ color: "var(--color-hazard)" }}>{d.href}</a>
+                      {newUrl && <>{" ⇒ "}<span className="mono" style={{ color: "var(--color-go)" }}>{newUrl}</span></>}
+                      {d.via === "sitemap" && (
+                        <span className="mono text-xs ml-2" style={{ color: "var(--color-muted)" }}>[via sitemap]</span>
+                      )}
+                      <WpEdit id={d.from_id} link={d.from} />
+                      {d.from_id && newUrl && (
+                        <button className="seo-icon seo-icon--remove" title="Rewrite href to the final URL"
+                          onClick={() => handleStartRewrite(rowKey, d.from_id!, d.href, newUrl)}>
+                          ⇄
+                        </button>
+                      )}
+                    </div>
+                    {rewritePreview && rewritePreview.key === rowKey && (
+                      <div className="p-2 border bg-shade flex flex-col gap-1 my-1" style={{ borderColor: "var(--color-hazard)" }}>
+                        {rewritePreview.loading && <div className="mono text-xs">loading preview…</div>}
+                        {rewritePreview.error && <div className="mono text-xs" style={{ color: "var(--color-critical)" }}>{rewritePreview.error}</div>}
+                        {rewritePreview.data && (
+                          <>
+                            <div className="mono text-xs" style={{ color: "var(--color-critical)" }}>before: {rewritePreview.data.before}</div>
+                            <div className="mono text-xs" style={{ color: "var(--color-go)" }}>after: {rewritePreview.data.after}</div>
+                            <div className="mono text-xs" style={{ color: "var(--color-muted)" }}>
+                              {rewritePreview.data.matches} href match{rewritePreview.data.matches === 1 ? "" : "es"} in this record
+                            </div>
+                          </>
+                        )}
+                        {rewritePreview.applied && <div className="mono text-xs" style={{ color: "var(--color-go)" }}>✓ rewritten — re-scan to refresh</div>}
+                        {!rewritePreview.applied && (
+                          <div className="flex gap-2">
+                            <button className="btn btn--compact btn--crit" disabled={!!rewritePreview.loading}
+                              onClick={() => void handleApplyRewrite()}>APPLY REWRITE</button>
+                            <button className="btn btn--compact" onClick={() => setRewritePreview(null)}>CANCEL</button>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </HealthList>
+          )}
+
+          {r.sitemap && (
+            <HealthList
+              title="SITEMAP HYGIENE"
+              count={r.sitemap.redirects.length + r.sitemap.noindex.length + r.sitemap.broken.length}
+              accent="var(--color-signal)"
+              hint="URLs living in the sitemap that shouldn't: 3xx redirects, noindex pages, broken. Sitemaps should list clean 200s only."
+            >
+              {!!r.sitemap.note && (
+                <div className="mono text-xs" style={{ color: "var(--color-hazard)" }}>{r.sitemap.note}</div>
+              )}
+              <div className="mono text-xs" style={{ color: "var(--color-muted)" }}>
+                checked {r.sitemap.checked}{r.sitemap.ok_count != null ? ` · ${r.sitemap.ok_count} clean 200s` : ""}
+                {r.sitemap.unlinked ? ` · ${r.sitemap.unlinked.count} 200s nothing links to (crawler-orphan universe)` : ""}
+              </div>
+              {r.sitemap.redirects.map((x, i) => (
+                <div key={`sr-${i}`} className="text-sm mt-1">
+                  <span className="mono" style={{ color: "var(--color-hazard)" }}>[{x.status}]</span>{" "}
+                  <a href={x.url} target="_blank" rel="noreferrer" style={{ color: "var(--color-hazard)" }}>{x.url_path || x.url}</a>
+                  {" ⇒ "}
+                  <span className="mono" style={{ color: "var(--color-go)" }}>{x.final_path || x.final_url || x.location}</span>
+                </div>
+              ))}
+              {r.sitemap.noindex.map((x, i) => (
+                <div key={`sn-${i}`} className="text-sm mt-1">
+                  <span className="mono" style={{ color: "var(--color-signal)" }}>[NOINDEX]</span>{" "}
+                  <a href={x.url} target="_blank" rel="noreferrer" style={{ color: "var(--color-signal)" }}>{x.url_path || x.url}</a>
+                  <span className="mono text-xs ml-2" style={{ color: "var(--color-muted)" }}>({x.why})</span>
+                </div>
+              ))}
+              {r.sitemap.broken.map((x, i) => (
+                <div key={`sb-${i}`} className="text-sm mt-1">
+                  <span className="mono" style={{ color: "var(--color-critical)" }}>[{x.status}]</span>{" "}
+                  <a href={x.url} target="_blank" rel="noreferrer" style={{ color: "var(--color-critical)" }}>{x.url_path || x.url}</a>
+                </div>
+              ))}
+              {r.sitemap.manual.map((x, i) => (
+                <div key={`sm-${i}`} className="text-sm mt-1">
+                  <span className="mono" style={{ color: "var(--color-muted)" }}>[{x.status ?? "?"}]</span>{" "}
+                  <span className="mono" style={{ color: "var(--color-muted)" }}>{x.url} ({x.reason})</span>
+                </div>
+              ))}
+            </HealthList>
+          )}
+
+          {r.oversized_images && r.oversized_images.length > 0 && (
+            <HealthList title="OVERSIZED IMAGES" count={r.oversized_images.length} accent="var(--color-hazard)"
+              hint="media-library images above the size threshold (opts: seo_image_max_bytes, default 1 MB) — compress or serve smaller variants. ✎ opens the WP media editor.">
+              {r.oversized_images.map((m, i) => (
+                <div key={`oi-${i}`} className="text-sm mt-1">
+                  <span className="mono" style={{ color: "var(--color-hazard)" }}>{fmtBytes(m.filesize)}</span>{" "}
+                  <a href={m.source_url} target="_blank" rel="noreferrer" style={{ color: "var(--color-phosphor)" }}>{m.source_url.split("/").pop() || m.source_url}</a>
+                  {m.id != null && (() => {
+                    const mediaUrl = (() => { try { return `${new URL(m.source_url).origin}/wp-admin/upload.php?item=${m.id}`; } catch { return null; } })();
+                    return mediaUrl
+                      ? <a className="seo-icon seo-icon--edit" href={mediaUrl} target="_blank" rel="noreferrer" title="Edit in WP media library">✎</a>
+                      : null;
+                  })()}
+                </div>
+              ))}
+            </HealthList>
+          )}
 
           {r.internal_manual_check && r.internal_manual_check.length > 0 && (
             <HealthList
