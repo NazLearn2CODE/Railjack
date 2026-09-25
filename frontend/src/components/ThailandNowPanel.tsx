@@ -190,6 +190,7 @@ interface HealthReport {
   redirecting_internal_links?: RedirectingLink[];
   oversized_images?: OversizedImage[];
   sitemap?: SitemapHygiene;
+  scan_notes?: string[];
   external_checked: number; at: string;
 }
 
@@ -310,6 +311,7 @@ function healthCopyText(r: HealthReport): string {
   const L: string[] = [];
   L.push(`THAILAND NOW — SEO HEALTH report (${r.at})`);
   L.push(`Scanned ${r.post_count} posts / ${r.page_count} pages / ${r.event_count} events · ${r.external_checked} external links checked`);
+  for (const n of r.scan_notes ?? []) L.push(`NOTE: ${n}`);
   L.push("");
   L.push(`ORPHAN ARTICLES (${r.orphans.length}) — zero inbound internal links:`);
   for (const o of r.orphans) {
@@ -947,6 +949,17 @@ function HealthSubTab() {
             {r.post_count} posts / {r.page_count} pages / {r.event_count} events{r.other_cpt_count ? ` / ${r.other_cpt_count} CPTs` : ""} · {r.external_checked} external checked · {r.at}
           </div>
 
+          {r.scan_notes && r.scan_notes.length > 0 && (
+            <div className="p-2 border bg-shade flex flex-col gap-1" style={{ borderColor: "var(--color-hazard)" }}>
+              <div className="mono text-xs font-bold" style={{ color: "var(--color-hazard)" }}>
+                SCAN NOTES — some checks ran degraded this run:
+              </div>
+              {r.scan_notes.map((n, i) => (
+                <div key={i} className="mono text-xs" style={{ color: "var(--color-muted)" }}>· {n}</div>
+              ))}
+            </div>
+          )}
+
           <HealthList title="ORPHAN ARTICLES" count={r.orphans.length} accent="var(--color-critical)"
             hint="zero inbound internal links — the SEO priority. ✎ opens the editor to un-orphan by hand; click an article to analyze where to embed an inbound link."
             action={
@@ -1314,7 +1327,7 @@ function HealthSubTab() {
               title="SITEMAP HYGIENE"
               count={r.sitemap.redirects.length + r.sitemap.noindex.length + r.sitemap.broken.length}
               accent="var(--color-signal)"
-              hint="URLs living in the sitemap that shouldn't: 3xx redirects, noindex pages, broken. Sitemaps should list clean 200s only."
+              hint="URLs living in the sitemap that shouldn't: 3xx redirects, noindex pages, broken. UNLINKED = 200s nothing links to (archive/legacy pages count — the crawler-orphan universe Ahrefs reports)."
             >
               {!!r.sitemap.note && (
                 <div className="mono text-xs" style={{ color: "var(--color-hazard)" }}>{r.sitemap.note}</div>

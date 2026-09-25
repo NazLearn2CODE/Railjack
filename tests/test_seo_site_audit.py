@@ -143,21 +143,26 @@ def test_sitemap_hygiene_buckets(monkeypatch):
             return httpx.Response(404, text="gone")
         if p == "/blocked/":
             return httpx.Response(403, text="no")
+        if p == "/selfloop/":  # Sucuri challenge signature: 307 pointing at itself
+            return httpx.Response(307, headers={"location": "/selfloop/"})
         return httpx.Response(200, text="<p>fine</p>")
 
     _mock_client(monkeypatch, handler)
     base = SITE
     urls = [base + u for u in ("/redir/", "/noindex-meta/", "/noindex-header/",
-                               "/gone/", "/blocked/", "/fine/")]
+                               "/gone/", "/blocked/", "/fine/", "/selfloop/")]
     h = asyncio.run(thailandnow._seo_sitemap_hygiene(urls))
-    assert h["checked"] == 6
+    assert h["checked"] == 7
     assert len(h["redirects"]) == 1
     r = h["redirects"][0]
     assert r["url_path"] == "/redir" and r["final_path"] == "/final"
     assert r["final_url"] == base + "/final/"
     assert {e["url_path"] for e in h["noindex"]} == {"/noindex-meta", "/noindex-header"}
     assert {e["url_path"] for e in h["broken"]} == {"/gone"}
-    assert {e["url_path"] for e in h["manual"]} == {"/blocked"}
+    assert {e["url_path"] for e in h["manual"]} == {"/blocked", "/selfloop"}
+    loop = [m for m in h["manual"] if m["url_path"] == "/selfloop"][0]
+    assert "WAF challenge" in loop["reason"]
+    assert h["challenge_loops"] == 1
     assert h["ok"] == [base + "/fine/"]
 
 
@@ -176,18 +181,20 @@ def test_oversized_media_filters_mime_and_threshold(monkeypatch):
         ]
 
     monkeypatch.setattr(thailandnow, "_wp_list_all", fake_list)
-    out = asyncio.run(thailandnow._seo_oversized_media())
+    out, note = asyncio.run(thailandnow._seo_oversized_media())
+    assert note == ""
     assert out == [{"id": 1, "source_url": f"{SITE}/big.jpg", "filesize": 2_500_000}]
 
 
 def test_oversized_media_degrades_on_non_json(monkeypatch):
-    """Live-scan scar (2026-09-25): a non-JSON 2xx media listing must not kill the
-    scan — the advisory section degrades to []."""
+    """Live-scan scar (2026-09-26): a non-JSON 2xx media listing must not kill the
+    scan — it degrades to [] WITH a note (never looks like 'no oversized images')."""
     async def boom(endpoint, fields):
         raise ValueError("Expecting value: line 1 column 10 (char 9)")
 
     monkeypatch.setattr(thailandnow, "_wp_list_all", boom)
-    assert asyncio.run(thailandnow._seo_oversized_media()) == []
+    out, note = asyncio.run(thailandnow._seo_oversized_media())
+    assert out == [] and "media listing failed" in note
 
 
 def test_chrome_inbound_parses_home_and_archives(monkeypatch):
@@ -203,8 +210,10 @@ def test_chrome_inbound_parses_home_and_archives(monkeypatch):
 
     monkeypatch.setattr(thailandnow, "_seo_fetch_text", fake_fetch)
     monkeypatch.setattr(thailandnow, "_wp_creds", lambda: (SITE + "/", "u", "p"))
-    linked = asyncio.run(thailandnow._seo_chrome_inbound({"/cat/food/"}, "www.thailandnow.in.th"))
+    linked, fetched, attempted = asyncio.run(
+        thailandnow._seo_chrome_inbound({"/cat/food/"}, "www.thailandnow.in.th"))
     assert linked == {"/menu-post", "/paged-post", "/archive-only"}
+    assert (fetched, attempted) == (4, 4)
 
 
 # ------------------------------------------------------------- endpoints ----
@@ -288,7 +297,8 @@ def test_flow_seo_health_report_wiring(monkeypatch):
     """Full HEALTH flow with faked WP + HTTP: orphans honour chrome, redirecting
     internal links land (probed + sitemap merge, deduped), hygiene + oversized ride."""
     posts = [
-        _rec(1, "/linker/", '<p>see <a href="/old-slug/">old</a> and <a href="/target/">t</a></p>'),
+        _rec(1, "/linker/", '<p>see <a href="/old-slug/">old</a> and <a href="/target/">t</a>'
+                            ' and <a href="/loop-page/">loop</a></p>'),
         _rec(2, "/target/", "<p>x</p>"),
         _rec(3, "/new-slug/", "<p>y</p>"),
     ]
@@ -298,26 +308,29 @@ def test_flow_seo_health_report_wiring(monkeypatch):
         return posts, pages, [], [], set(), set()
 
     async def fake_chrome(extra, host):
-        return {"/chrome-page"}
+        return {"/chrome-page"}, 1, 1  # fetched == attempted → no degradation note
 
     async def fake_sitemap_urls():
-        return [f"{SITE}/old-slug/", f"{SITE}/ghost/"], ""
+        return [f"{SITE}/old-slug/", f"{SITE}/ghost/", f"{SITE}/tag/khon-kaen/"], ""
 
     async def fake_hygiene(urls):
-        return {"checked": 2,
+        return {"checked": 3,
                 "redirects": [{"url": f"{SITE}/old-slug/", "url_path": "/old-slug",
                                "status": 301, "location": "/new-slug/",
                                "final_url": f"{SITE}/new-slug/", "final_path": "/new-slug"}],
                 "noindex": [], "broken": [], "manual": [],
-                "ok": [f"{SITE}/ghost/"]}
+                "ok": [f"{SITE}/ghost/", f"{SITE}/tag/khon-kaen/"],
+                "challenge_loops": 4}  # firewall challenged the sitemap probe
 
     async def fake_oversized():
-        return [{"id": 9, "source_url": f"{SITE}/heavy.jpg", "filesize": 3_000_000}]
+        return [{"id": 9, "source_url": f"{SITE}/heavy.jpg", "filesize": 3_000_000}], ""
 
     def handler(request: httpx.Request) -> httpx.Response:
         p = request.url.path
         if p == "/old-slug/":
             return httpx.Response(301, headers={"location": "/new-slug/"})
+        if p == "/loop-page/":  # WAF challenge: 307 to itself
+            return httpx.Response(307, headers={"location": "/loop-page/"})
         return httpx.Response(200, text="<html><body>fine</body></html>")
 
     monkeypatch.setattr(thailandnow, "_wp_creds", lambda: (SITE, "u", "p"))
@@ -336,20 +349,76 @@ def test_flow_seo_health_report_wiring(monkeypatch):
     # orphans: pages count; chrome-rescued page excluded
     opaths = {thailandnow._seo_path(o["link"]) for o in res["orphans"]}
     assert "/orphan-page" in opaths and "/chrome-page" not in opaths
-    # redirecting internal links: probed (301) + sitemap merge deduped to ONE entry
+    # redirecting internal links: probed (301) + sitemap merge deduped to ONE entry;
+    # the 307-to-self loop is a challenge artifact → manual, never a redirect
     rd = res["redirecting_internal_links"]
     assert len(rd) == 1
     assert rd[0]["from_id"] == 1 and rd[0]["status"] == 301
     assert rd[0]["final_path"] == "/new-slug"
-    # hygiene wired through + ok/ghost unlinked (nothing links /ghost/)
-    assert res["sitemap"]["checked"] == 2
-    assert res["sitemap"]["unlinked"]["count"] == 1
-    assert res["sitemap"]["unlinked"]["urls"] == [f"{SITE}/ghost/"]
+    loop = [m for m in res["internal_manual_check"] if "/loop-page" in (m.get("to") or "")]
+    assert len(loop) == 1 and "WAF challenge" in loop[0]["reason"]
+    # hygiene wired through + unlinked = 200s that are neither content records nor
+    # chrome-linked — ghost page AND the tag archive (the Ahrefs-orphan universe)
+    assert res["sitemap"]["checked"] == 3
+    assert res["sitemap"]["unlinked"]["count"] == 2
+    assert res["sitemap"]["unlinked"]["urls"] == [f"{SITE}/ghost/", f"{SITE}/tag/khon-kaen/"]
     assert "ok" not in res["sitemap"] and "ok_count" in res["sitemap"]
+    assert res["scan_notes"] != []  # 4 challenge loops ≥ 3 → firewall warning surfaced
+    assert any("looped a redirect to themselves" in n for n in res["scan_notes"])
     # internals popped, oversized present
     assert "internal_link_pairs_all" not in res and "valid_paths_list" not in res
+    assert "record_paths_list" not in res
     assert res["oversized_images"][0]["id"] == 9
+
+
+def test_flow_scan_notes_surface_degraded_runs(monkeypatch):
+    """A degraded run (chrome partially blocked, media listing failed) must surface
+    scan_notes, never look like zero problems."""
+    posts = [_rec(1, "/linker/", "<p>x</p>")]
+    pages = [_rec(2, "/orphan-page/", "<p>p</p>")]
+
+    async def fake_fetch_all():
+        return posts, pages, [], [], set(), set()
+
+    async def fake_chrome(extra, host):
+        return set(), 3, 8  # 5 of 8 chrome pages failed to fetch
+
+    async def fake_sitemap_urls():
+        return [], "no sitemap (403 Forbidden on sitemap.xml)"
+
+    async def fake_hygiene(urls):
+        return {"checked": 0, "redirects": [], "noindex": [], "broken": [],
+                "manual": [], "ok": []}
+
+    async def fake_oversized():
+        return [], "media listing failed (Expecting value) — oversized report unavailable"
+
+    monkeypatch.setattr(thailandnow, "_wp_creds", lambda: (SITE, "u", "p"))
+    monkeypatch.setattr(thailandnow, "_wp_site_host", lambda: "www.thailandnow.in.th")
+    monkeypatch.setattr(thailandnow, "_seo_fetch_all", fake_fetch_all)
+    monkeypatch.setattr(thailandnow, "_seo_chrome_inbound", fake_chrome)
+    monkeypatch.setattr(thailandnow, "_seo_sitemap_urls", fake_sitemap_urls)
+    monkeypatch.setattr(thailandnow, "_seo_sitemap_hygiene", fake_hygiene)
+    monkeypatch.setattr(thailandnow, "_seo_oversized_media", fake_oversized)
+    _mock_client(monkeypatch, lambda req: httpx.Response(200, text="<p>ok</p>"))
+
+    job = _flow_job()
+    asyncio.run(thailandnow._flow_seo_health(job))
+    res = job.result
+    notes = " ".join(res["scan_notes"])
+    assert "3/8" in notes and "sitemap" in notes and "media listing failed" in notes
+    assert res["sitemap"]["checked"] == 0 and res["oversized_images"] == []
 
 
 def test_rewrite_href_rejects_empty():
     assert thailandnow._seo_rewrite_href("<p>x</p>", "", "/new/") == ("<p>x</p>", 0, "", "")
+
+
+def test_resolve_href_cleans_dot_segments():
+    """Page-builder nav writes './arts-culture/' — must probe as /arts-culture/,
+    never the malformed /.//arts-culture/ (live-scan scar 2026-09-26)."""
+    base = SITE + "/"
+    assert thailandnow._seo_resolve_href("./arts-culture/", base) == f"{SITE}/arts-culture/"
+    assert thailandnow._seo_resolve_href("/events", base) == f"{SITE}/events"
+    assert thailandnow._seo_resolve_href("foo/bar", base) == f"{SITE}/foo/bar"
+    assert thailandnow._seo_resolve_href(f"{SITE}/x/", base) == f"{SITE}/x/"
