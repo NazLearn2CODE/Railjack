@@ -39,3 +39,8 @@ KANBAN-SEARCH-SPEC.md
 *.tsbuildinfo
 
 CODEATLAS/
+
+# agent-browser sandbox scratch (not project files)
+.ab-rt/
+.ab-cache/
+.scan_report.json
