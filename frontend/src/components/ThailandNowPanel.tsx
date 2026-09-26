@@ -200,7 +200,10 @@ interface RedirectingLink {
   status?: number; final_url?: string; final_path?: string; via?: string;
 }
 /** Media-library image above the size threshold (crawler: "Image file size too large"). */
-interface OversizedImage { id?: number; source_url: string; filesize: number }
+interface OversizedImage {
+  id?: number; source_url: string; filesize: number; shrink_to?: string;
+  used_in?: { from: string; from_id?: number; from_title: string }[];
+}
 /** Sitemap probe: 3xx / noindex / broken entries living in the sitemap + unlinked 200s. */
 interface SitemapHygiene {
   checked: number; note?: string; ok_count?: number;
@@ -749,6 +752,69 @@ function HealthSubTab() {
     }
   };
 
+  // Oversized-image shrink: swap a full-size <img src> for its WP large/1536 variant.
+  const [shrinkPreview, setShrinkPreview] = useState<{
+    key: string; postId: number; oldSrc: string; newSrc: string;
+    loading?: boolean; applied?: boolean; error?: string;
+    data?: { matches: number; before: string; after: string };
+  } | null>(null);
+
+  const handleStartShrink = async (key: string, postId: number, oldSrc: string, newSrc: string) => {
+    setShrinkPreview({ key, postId, oldSrc, newSrc, loading: true });
+    const res = await post<{ matches: number; before: string; after: string }>(
+      "/api/thailandnow/seo/preview-image-shrink",
+      { post_id: postId, old_src: oldSrc, new_src: newSrc },
+    );
+    if (res.ok && res.data) {
+      setShrinkPreview({ key, postId, oldSrc, newSrc, data: res.data });
+    } else {
+      setShrinkPreview({ key, postId, oldSrc, newSrc, error: res.error || "Failed to load preview" });
+    }
+  };
+
+  const handleApplyShrink = async () => {
+    if (!shrinkPreview?.data) return;
+    const { postId, oldSrc } = shrinkPreview;
+    setShrinkPreview((prev) => prev ? { ...prev, loading: true } : null);
+    const res = await post<{ ok: boolean; matches: number }>("/api/thailandnow/seo/apply-image-shrink", {
+      post_id: postId, old_src: oldSrc, new_src: shrinkPreview.newSrc,
+    });
+    if (res.ok && (res.data?.matches ?? 0) > 0) {
+      // optimistic local trim: drop this (post, src) usage; drop the entry once no usage remains
+      setReport((prev) => {
+        if (!prev) return prev;
+        const imgs = (prev.oversized_images ?? []).map((o) =>
+          o.source_url === oldSrc
+            ? { ...o, used_in: (o.used_in ?? []).filter((u) => u.from_id !== postId) }
+            : o);
+        return { ...prev, oversized_images: imgs.filter((o) => (o.used_in?.length ?? 1) > 0) };
+      });
+      setShrinkPreview((prev) => prev ? { ...prev, loading: false, applied: true } : null);
+    } else if (res.ok) {
+      setShrinkPreview((prev) => prev ? { ...prev, loading: false, error: "no match — content may have changed since the scan" } : null);
+    } else {
+      setShrinkPreview((prev) => prev ? { ...prev, loading: false, error: res.error || "Failed to apply shrink" } : null);
+    }
+  };
+
+  // Broken-internal-link retarget: suggest live replacements for the dead target.
+  const [retargetData, setRetargetData] = useState<{
+    key: string; to: string; loading?: boolean; error?: string;
+    suggestions: { link: string; title: string }[];
+  } | null>(null);
+
+  const handleSuggestRetarget = async (key: string, to: string) => {
+    setRetargetData({ key, to, loading: true, suggestions: [] });
+    const res = await post<{ suggestions: { link: string; title: string }[] }>(
+      "/api/thailandnow/seo/suggest-retarget", { to },
+    );
+    if (res.ok && res.data) {
+      setRetargetData({ key, to, suggestions: res.data.suggestions });
+    } else {
+      setRetargetData({ key, to, error: res.error || "Failed to suggest", suggestions: [] });
+    }
+  };
+
   const handleAnalyze = async (hostId: number, orphanTitle: string, orphanLink: string,
                                orphanDescription = "") => {
     setInsertPreview(null);
@@ -1247,6 +1313,15 @@ function HealthSubTab() {
                         ✗
                       </button>
                     )}
+                    {b.from_id && (
+                      <button
+                        className="seo-icon seo-icon--remove"
+                        title="Suggest a live replacement to retarget this link to"
+                        onClick={() => handleSuggestRetarget(rowKey, b.to)}
+                      >
+                        ⇄
+                      </button>
+                    )}
                     {b.href && b.href !== b.to && b.href !== safeOrigin(b.from) + b.to && (
                       <span className="mono text-xs ml-2" style={{ color: "var(--color-muted)" }}>[raw: {b.href}]</span>
                     )}
@@ -1261,6 +1336,46 @@ function HealthSubTab() {
                       onApply={handleApplyFix}
                       onClose={() => setActivePreview(null)}
                     />
+                  )}
+                  {retargetData && retargetData.key === rowKey && (
+                    <div className="p-2 border bg-shade flex flex-col gap-1 my-1" style={{ borderColor: "var(--color-signal)" }}>
+                      {retargetData.loading && <div className="mono text-xs">finding live replacements…</div>}
+                      {retargetData.error && <div className="mono text-xs" style={{ color: "var(--color-critical)" }}>{retargetData.error}</div>}
+                      {!retargetData.loading && !retargetData.error && !retargetData.suggestions.length && (
+                        <div className="mono text-xs" style={{ color: "var(--color-muted)" }}>no close match found — REMOVE (✗) or keep as-is</div>
+                      )}
+                      {retargetData.suggestions.map((s) => (
+                        <div key={s.link} className="flex items-center gap-2">
+                          <span className="mono text-xs" style={{ color: "var(--color-phosphor)" }}>{s.title || s.link}</span>
+                          <button className="btn btn--compact" onClick={() =>
+                            b.from_id && handleStartRewrite(rowKey + ":rt", b.from_id, b.href || b.to, s.link)}>
+                            REWRITE →
+                          </button>
+                        </div>
+                      ))}
+                      {rewritePreview && rewritePreview.key === rowKey + ":rt" && (
+                        <div className="flex flex-col gap-1">
+                          {rewritePreview.loading && <div className="mono text-xs">loading preview…</div>}
+                          {rewritePreview.error && <div className="mono text-xs" style={{ color: "var(--color-critical)" }}>{rewritePreview.error}</div>}
+                          {rewritePreview.data && (
+                            <>
+                              <div className="mono text-xs" style={{ color: "var(--color-critical)" }}>before: {rewritePreview.data.before}</div>
+                              <div className="mono text-xs" style={{ color: "var(--color-go)" }}>after: {rewritePreview.data.after}</div>
+                            </>
+                          )}
+                          {rewritePreview.applied
+                            ? <div className="mono text-xs" style={{ color: "var(--color-go)" }}>✓ retargeted — re-scan to refresh</div>
+                            : (
+                              <div className="flex gap-2">
+                                <button className="btn btn--compact btn--crit" disabled={!!rewritePreview.loading}
+                                  onClick={() => void handleApplyRewrite()}>APPLY RETARGET</button>
+                                <button className="btn btn--compact" onClick={() => setRewritePreview(null)}>CANCEL</button>
+                              </div>
+                            )}
+                        </div>
+                      )}
+                      <button className="btn btn--compact self-start" onClick={() => setRetargetData(null)}>CLOSE</button>
+                    </div>
                   )}
                 </div>
               );
@@ -1368,19 +1483,66 @@ function HealthSubTab() {
 
           {r.oversized_images && r.oversized_images.length > 0 && (
             <HealthList title="OVERSIZED IMAGES" count={r.oversized_images.length} accent="var(--color-hazard)"
-              hint="media-library images above the size threshold (opts: seo_image_max_bytes, default 1 MB) — compress or serve smaller variants. ✎ opens the WP media editor.">
-              {r.oversized_images.map((m, i) => (
-                <div key={`oi-${i}`} className="text-sm mt-1">
-                  <span className="mono" style={{ color: "var(--color-hazard)" }}>{fmtBytes(m.filesize)}</span>{" "}
-                  <a href={m.source_url} target="_blank" rel="noreferrer" style={{ color: "var(--color-phosphor)" }}>{m.source_url.split("/").pop() || m.source_url}</a>
-                  {m.id != null && (() => {
-                    const mediaUrl = (() => { try { return `${new URL(m.source_url).origin}/wp-admin/upload.php?item=${m.id}`; } catch { return null; } })();
-                    return mediaUrl
-                      ? <a className="seo-icon seo-icon--edit" href={mediaUrl} target="_blank" rel="noreferrer" title="Edit in WP media library">✎</a>
-                      : null;
-                  })()}
-                </div>
-              ))}
+              hint="media-library images above the size threshold (opts: seo_image_max_bytes, default 1 MB). SHRINK swaps the content src for WP's generated large/1536 variant — no visual change, big byte cut. ✎ opens the WP media editor.">
+              {r.oversized_images.map((m, i) => {
+                const uses = m.used_in ?? [];
+                return (
+                  <div key={`oi-${i}`} className="text-sm mt-1 flex flex-col gap-0.5">
+                    <div>
+                      <span className="mono" style={{ color: "var(--color-hazard)" }}>{fmtBytes(m.filesize)}</span>{" "}
+                      <a href={m.source_url} target="_blank" rel="noreferrer" style={{ color: "var(--color-phosphor)" }}>{m.source_url.split("/").pop() || m.source_url}</a>
+                      {m.shrink_to && <span className="mono text-xs ml-2" style={{ color: "var(--color-go)" }}>→ smaller WP size available</span>}
+                      {m.id != null && (() => {
+                        const mediaUrl = (() => { try { return `${new URL(m.source_url).origin}/wp-admin/upload.php?item=${m.id}`; } catch { return null; } })();
+                        return mediaUrl
+                          ? <a className="seo-icon seo-icon--edit" href={mediaUrl} target="_blank" rel="noreferrer" title="Edit in WP media library">✎</a>
+                          : null;
+                      })()}
+                      {!uses.length && <span className="mono text-xs ml-2" style={{ color: "var(--color-muted)" }}>[not used in post content — library-only]</span>}
+                    </div>
+                    {uses.map((u, j) => {
+                      const rowKey = `sh-${i}-${j}-${u.from_id}`;
+                      return (
+                        <div key={rowKey} className="flex flex-col gap-0.5" style={{ marginLeft: "1rem" }}>
+                          <div>
+                            <span style={{ color: "var(--color-phosphor-dim)" }}>in: {u.from_title || u.from}</span>
+                            <WpEdit id={u.from_id} link={u.from} />
+                            {u.from_id && m.shrink_to && (
+                              <button className="seo-icon seo-icon--remove" title="Swap src to the smaller WP size"
+                                onClick={() => handleStartShrink(rowKey, u.from_id!, m.source_url, m.shrink_to!)}>
+                                ⇩
+                              </button>
+                            )}
+                          </div>
+                          {shrinkPreview && shrinkPreview.key === rowKey && (
+                            <div className="p-2 border bg-shade flex flex-col gap-1 my-1" style={{ borderColor: "var(--color-signal)" }}>
+                              {shrinkPreview.loading && <div className="mono text-xs">loading preview…</div>}
+                              {shrinkPreview.error && <div className="mono text-xs" style={{ color: "var(--color-critical)" }}>{shrinkPreview.error}</div>}
+                              {shrinkPreview.data && (
+                                <>
+                                  <div className="mono text-xs" style={{ color: "var(--color-critical)" }}>before: {shrinkPreview.data.before}</div>
+                                  <div className="mono text-xs" style={{ color: "var(--color-go)" }}>after: {shrinkPreview.data.after}</div>
+                                  <div className="mono text-xs" style={{ color: "var(--color-muted)" }}>
+                                    {shrinkPreview.data.matches} src match{shrinkPreview.data.matches === 1 ? "" : "es"} in this record
+                                  </div>
+                                </>
+                              )}
+                              {shrinkPreview.applied && <div className="mono text-xs" style={{ color: "var(--color-go)" }}>✓ shrunk — re-scan to refresh</div>}
+                              {!shrinkPreview.applied && (
+                                <div className="flex gap-2">
+                                  <button className="btn btn--compact btn--crit" disabled={!!shrinkPreview.loading}
+                                    onClick={() => void handleApplyShrink()}>APPLY SHRINK</button>
+                                  <button className="btn btn--compact" onClick={() => setShrinkPreview(null)}>CANCEL</button>
+                                </div>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                );
+              })}
             </HealthList>
           )}
 

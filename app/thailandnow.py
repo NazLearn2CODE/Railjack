@@ -4511,6 +4511,10 @@ def _seo_internal_report(
              "tgt": tgt, "href": raw}
             for it in all_items for tgt, raw in it["internal_link_pairs"]
         ],
+        "internal_img_pairs_all": [  # every internal <img src> per record (oversized attribution)
+            {"from": it["link"], "from_id": it["id"], "from_title": it["title"], "src": src}
+            for it in all_items for src in it["internal_imgs"]
+        ],
     }
 
 
@@ -4783,6 +4787,16 @@ async def _flow_seo_health(job: "TnJob") -> None:
     oversized, oversized_note = await _seo_oversized_media()
     if oversized_note:
         scan_notes.append(oversized_note)
+    # per-post usage attribution from every internal <img src> in content — the
+    # SHRINK fixer rewrites these exact srcs per record
+    img_pairs_all = rep.pop("internal_img_pairs_all", [])
+    if oversized:
+        src_uses: dict[str, list[dict]] = {}
+        for pr in img_pairs_all:
+            src_uses.setdefault(pr["src"], []).append(
+                {"from": pr["from"], "from_id": pr["from_id"], "from_title": pr["from_title"]})
+        for o in oversized:
+            o["used_in"] = src_uses.get(o.get("source_url") or "", [])
 
     # WAF challenge loops (307-to-self) — when the firewall challenges us, redirect
     # findings are undercounts and sitemap coverage is partial; say so loudly.
@@ -5292,10 +5306,15 @@ async def _seo_sitemap_hygiene(urls: list[str]) -> dict:
             "challenge_loops": challenge_loops}
 
 
+_SEO_SHRINK_SIZE_ORDER = ("large", "medium_large", "1536x1536", "2048x2048")
+
+
 async def _seo_oversized_media() -> tuple[list[dict], str]:
     """Media-library images above ``seo_image_max_bytes`` (default 1 MB ≈ the crawler
     'Image file size too large' threshold), heaviest first. Items without a filesize
     (offloaded to a CDN, metadata never generated) are skipped — we can't weigh them.
+    Each entry carries ``shrink_to``: the best already-generated smaller WP size
+    (large → medium_large → 1536 → 2048) to retarget content ``src`` to.
     Best-effort: a WP error or non-JSON response (Sucuri interstitial / truncated
     heavy listing) → ([], note) — an advisory section must never kill the scan, but
     the degradation is surfaced, never shown as 'no oversized images'."""
@@ -5308,12 +5327,18 @@ async def _seo_oversized_media() -> tuple[list[dict], str]:
     for m in items or []:
         if not str(m.get("mime_type") or "").startswith("image/"):
             continue
+        details = m.get("media_details") or {}
         try:
-            size = int((m.get("media_details") or {}).get("filesize") or 0)
+            size = int(details.get("filesize") or 0)
         except (TypeError, ValueError):
             continue
-        if size > max_bytes:
-            out.append({"id": m.get("id"), "source_url": m.get("source_url"), "filesize": size})
+        if size <= max_bytes:
+            continue
+        sizes = {label: s.get("source_url") for label, s in (details.get("sizes") or {}).items()
+                 if isinstance(s, dict) and s.get("source_url")}
+        shrink_to = next((sizes[label] for label in _SEO_SHRINK_SIZE_ORDER if sizes.get(label)), "")
+        out.append({"id": m.get("id"), "source_url": m.get("source_url"), "filesize": size,
+                    "shrink_to": shrink_to})
     out.sort(key=lambda d: -d["filesize"])
     return out, ""
 
@@ -5355,6 +5380,55 @@ async def _seo_chrome_inbound(extra_paths: set[str], site_host: str) -> tuple[se
 
 
 _A_HREF_RE = re.compile(r"<a\b[^>]*?\bhref\s*=\s*(\"[^\"]*\"|'[^']*'|[^>\s]+)", re.IGNORECASE)
+_IMG_SRC_RE = re.compile(r"<img\b[^>]*?\bsrc\s*=\s*(\"[^\"]*\"|'[^']*'|[^>\s]+)", re.IGNORECASE)
+
+
+def _seo_rewrite_img_src(html: str, old_src: str, new_src: str) -> tuple[str, int, str, str]:
+    """Pure: retarget every ``<img src>`` equal to old_src (exact raw match, then
+    URL-normalized, mirroring _seo_rewrite_href's loose matching) to new_src — the
+    oversized-image fix: swap a full-size src for WP's generated large/1536 variant.
+    srcset is left untouched (browsers pick from it independently).
+    Returns (new_html, match_count, snippet_before, snippet_after)."""
+    if not html or not old_src or not new_src:
+        return html, 0, "", ""
+    old_raw = old_src.strip()
+    old_norm = _seo_norm_url(old_raw)
+    if not old_norm:
+        return html, 0, "", ""
+
+    matches = 0
+    first_start = first_end = -1
+    pos = 0
+    chunks: list[str] = []
+    for m in _IMG_SRC_RE.finditer(html):
+        raw = m.group(1)
+        quoted = raw[:1] in "\"'"
+        val = raw[1:-1] if quoted else raw
+        if val != old_raw and _seo_norm_url(val) != old_norm:
+            continue
+        matches += 1
+        vs = m.start(1) + (1 if quoted else 0)
+        ve = m.end(1) - (1 if quoted else 0)
+        if first_start == -1:
+            first_start, first_end = m.start(0), m.end(0)
+        chunks.append(html[pos:vs])
+        chunks.append(new_src)
+        pos = ve
+    chunks.append(html[pos:])
+    if not matches:
+        return html, 0, "", ""
+    new_html = "".join(chunks)
+
+    ctx_s, ctx_e = max(0, first_start - 40), min(len(html), first_end + 40)
+    tag = html[first_start:first_end]
+    mm = _IMG_SRC_RE.search(tag)
+    raw1 = mm.group(1)
+    quoted = raw1[:1] in "\"'"
+    vs, ve = mm.start(1) + (1 if quoted else 0), mm.end(1) - (1 if quoted else 0)
+    new_tag = tag[:vs] + new_src + tag[ve:]
+    before = html[ctx_s:ctx_e]
+    after = html[ctx_s:first_start] + new_tag + html[first_end:ctx_e]
+    return new_html, matches, before, after
 
 
 def _seo_rewrite_href(html: str, old_href: str, new_url: str) -> tuple[str, int, str, str]:
@@ -5611,6 +5685,75 @@ async def seo_apply_rewrite_bulk(req: SeoRewriteBulkReq):
     failed = len([r for r in results if not r.get("ok")])
     return {"results": results, "total": len(req.items),
             "rewritten": rewritten, "noop": noop, "failed": failed, "successful": rewritten}
+
+
+class SeoImgShrinkReq(BaseModel):
+    post_id: int
+    old_src: str
+    new_src: str
+
+
+@router.post("/api/thailandnow/seo/preview-image-shrink")
+async def seo_preview_image_shrink(req: SeoImgShrinkReq):
+    """Preview swapping an oversized <img src> for its WP-generated smaller size.
+    Does NOT modify WP. Returns {post_id, matches, before, after}."""
+    rb = await _wp_resolve_rest_base(req.post_id)
+    try:
+        rec = await _wp("GET", f"/{rb}/{req.post_id}", {"context": "edit"})
+    except HTTPException as e:
+        if e.status_code in (401, 403):
+            raise HTTPException(403, f"WP edit context permission denied for post {req.post_id}.")
+        raise
+    if not rec or not isinstance(rec, dict):
+        raise HTTPException(404, f"WP record {req.post_id} not found")
+    raw_content = (rec.get("content") or {}).get("raw", "")
+    new_html, matches, before, after = _seo_rewrite_img_src(raw_content, req.old_src, req.new_src)
+    return {"post_id": req.post_id, "old_src": req.old_src, "new_src": req.new_src,
+            "matches": matches, "before": before, "after": after}
+
+
+@router.post("/api/thailandnow/seo/apply-image-shrink")
+async def seo_apply_image_shrink(req: SeoImgShrinkReq):
+    """Apply shrink: swap every <img src> old_src → new_src (WP-generated smaller
+    variant) in the record's raw content. Idempotent: 0 matches → no write."""
+    rb = await _wp_resolve_rest_base(req.post_id)
+    try:
+        rec = await _wp("GET", f"/{rb}/{req.post_id}", {"context": "edit"})
+    except HTTPException as e:
+        if e.status_code in (401, 403):
+            raise HTTPException(403, f"WP edit context permission denied for post {req.post_id}.")
+        raise
+    if not rec or not isinstance(rec, dict):
+        raise HTTPException(404, f"WP record {req.post_id} not found")
+    raw_content = (rec.get("content") or {}).get("raw", "")
+    new_html, matches, before, after = _seo_rewrite_img_src(raw_content, req.old_src, req.new_src)
+    if matches == 0:
+        return {"ok": True, "matches": 0, "post_id": req.post_id, "post_link": rec.get("link", "")}
+    await _wp("POST", f"/{rb}/{req.post_id}", json_body={"content": new_html})
+    return {"ok": True, "matches": matches, "post_id": req.post_id, "post_link": rec.get("link", "")}
+
+
+class SeoRetargetSuggestReq(BaseModel):
+    to: str  # broken internal-link target (path or URL)
+
+
+@router.post("/api/thailandnow/seo/suggest-retarget")
+async def seo_suggest_retarget(req: SeoRetargetSuggestReq):
+    """For a broken internal link: top-3 live records by token overlap between the
+    dead slug's words and record titles — the 'where SHOULD this point?' pick."""
+    to = (req.to or "").strip()
+    slug_words = " ".join(re.findall(r"[a-z0-9]+", to.lower())) or to
+    candidates: list[tuple[str, str]] = []
+    for ep in ("/posts", "/pages"):
+        try:
+            recs = await _wp_list_all(ep, "id,link,title")
+        except HTTPException:
+            continue
+        for r_ in recs or []:
+            t = (r_.get("title") or {}).get("rendered", "")
+            if r_.get("link"):
+                candidates.append((r_["link"], t))
+    return {"to": to, "suggestions": _seo_suggest(slug_words, candidates, n=3)}
 
 
 @router.post("/api/thailandnow/seo/analyze-anchors")

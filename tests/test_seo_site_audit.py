@@ -171,19 +171,43 @@ def test_oversized_media_filters_mime_and_threshold(monkeypatch):
         assert endpoint == "/media"
         return [
             {"id": 1, "source_url": f"{SITE}/big.jpg", "mime_type": "image/jpeg",
-             "media_details": {"filesize": 2_500_000}},
+             "media_details": {"filesize": 2_500_000,
+                               "sizes": {"large": {"source_url": f"{SITE}/big-1024x576.jpg"},
+                                         "medium": {"source_url": f"{SITE}/big-300x169.jpg"}}}},
             {"id": 2, "source_url": f"{SITE}/small.jpg", "mime_type": "image/jpeg",
-             "media_details": {"filesize": 400_000}},
+             "media_details": {"filesize": 400_000, "sizes": {}}},
             {"id": 3, "source_url": f"{SITE}/huge.mp4", "mime_type": "video/mp4",
-             "media_details": {"filesize": 90_000_000}},
+             "media_details": {"filesize": 90_000_000, "sizes": {}}},
             {"id": 4, "source_url": f"{SITE}/offloaded.png", "mime_type": "image/png",
              "media_details": {}},  # offloaded — no filesize → can't weigh
+            {"id": 5, "source_url": f"{SITE}/nosize.png", "mime_type": "image/png",
+             "media_details": {"filesize": 3_000_000, "sizes": {}}},  # oversized, no variants
         ]
 
     monkeypatch.setattr(thailandnow, "_wp_list_all", fake_list)
     out, note = asyncio.run(thailandnow._seo_oversized_media())
     assert note == ""
-    assert out == [{"id": 1, "source_url": f"{SITE}/big.jpg", "filesize": 2_500_000}]
+    assert out == [
+        {"id": 5, "source_url": f"{SITE}/nosize.png", "filesize": 3_000_000, "shrink_to": ""},
+        {"id": 1, "source_url": f"{SITE}/big.jpg", "filesize": 2_500_000,
+         "shrink_to": f"{SITE}/big-1024x576.jpg"},
+    ]
+
+
+def test_rewrite_img_src_exact_normalized_and_srcset_untouched():
+    html = ('<figure><img src="%s/big.jpg" srcset="%s/big-300x169.jpg 300w"> '
+            '<img class="x" src="%s/big.jpg"></figure>' % (SITE, SITE, SITE))
+    new_html, matches, _, _ = thailandnow._seo_rewrite_img_src(
+        html, f"{SITE}/big.jpg", f"{SITE}/big-1024x576.jpg")
+    assert matches == 2
+    assert new_html.count(f'"{SITE}/big-1024x576.jpg"') == 2  # src + the rewrite… srcset untouched
+    assert "big-300x169.jpg 300w" in new_html
+    # normalized fallback (trailing-slash/scheme variance is out of scope for files,
+    # but www/scheme normalization still matches)
+    html2 = '<img src="https://www.thailandnow.in.th/big.jpg">'
+    new2, m2, _, _ = thailandnow._seo_rewrite_img_src(html2, f"{SITE}/big.jpg", f"{SITE}/s.jpg")
+    assert m2 == 1 and 'src="https://www.thailandnow.in.th/s.jpg"' in new2
+    assert thailandnow._seo_rewrite_img_src("<p>x</p>", "/a.jpg", "/b.jpg") == ("<p>x</p>", 0, "", "")
 
 
 def test_oversized_media_degrades_on_non_json(monkeypatch):
@@ -287,6 +311,37 @@ def test_apply_rewrite_bulk_counts(client, fake_wp):
     assert d["failed"] == 1 and len(d["results"]) == 3
 
 
+def test_image_shrink_endpoints(client, fake_wp):
+    wp = fake_wp({11: f'<p><img src="{SITE}/big.jpg" alt="a"></p>'})
+    body = {"post_id": 11, "old_src": f"{SITE}/big.jpg", "new_src": f"{SITE}/big-1024x576.jpg"}
+    d = client.post("/api/thailandnow/seo/preview-image-shrink", json=body).json()
+    assert d["matches"] == 1 and "big-1024x576" in d["after"]
+    r2 = client.post("/api/thailandnow/seo/apply-image-shrink", json=body)
+    assert r2.json()["matches"] == 1 and len(wp.puts) == 1
+    assert wp.puts[0][1].count("big-1024x576") == 1
+    r3 = client.post("/api/thailandnow/seo/apply-image-shrink", json=body)
+    assert r3.json()["matches"] == 0 and len(wp.puts) == 1  # idempotent
+
+
+def test_suggest_retarget_ranks_by_overlap(client, monkeypatch):
+    async def fake_list(endpoint, fields):
+        if endpoint == "/posts":
+            return [
+                {"id": 1, "link": f"{SITE}/khon-kaen-street-food/",
+                 "title": {"rendered": "Khon Kaen Street Food Guide"}},
+                {"id": 2, "link": f"{SITE}/bangkok-malls/",
+                 "title": {"rendered": "Bangkok Malls"}},
+            ]
+        return [{"id": 5, "link": f"{SITE}/about/", "title": {"rendered": "About Us"}}]
+
+    monkeypatch.setattr(thailandnow, "_wp_list_all", fake_list)
+    r = client.post("/api/thailandnow/seo/suggest-retarget",
+                    json={"to": "/khon-kaen-night-market/"})
+    s = r.json()["suggestions"]
+    assert s and s[0]["link"] == f"{SITE}/khon-kaen-street-food/"
+    assert len(s) <= 3
+
+
 # ------------------------------------------------------------ flow wiring ---
 
 def _flow_job():
@@ -298,7 +353,8 @@ def test_flow_seo_health_report_wiring(monkeypatch):
     internal links land (probed + sitemap merge, deduped), hygiene + oversized ride."""
     posts = [
         _rec(1, "/linker/", '<p>see <a href="/old-slug/">old</a> and <a href="/target/">t</a>'
-                            ' and <a href="/loop-page/">loop</a></p>'),
+                            ' and <a href="/loop-page/">loop</a>'
+                            f' and <img src="{SITE}/heavy.jpg"></p>'),
         _rec(2, "/target/", "<p>x</p>"),
         _rec(3, "/new-slug/", "<p>y</p>"),
     ]
@@ -323,7 +379,8 @@ def test_flow_seo_health_report_wiring(monkeypatch):
                 "challenge_loops": 4}  # firewall challenged the sitemap probe
 
     async def fake_oversized():
-        return [{"id": 9, "source_url": f"{SITE}/heavy.jpg", "filesize": 3_000_000}], ""
+        return [{"id": 9, "source_url": f"{SITE}/heavy.jpg", "filesize": 3_000_000,
+                 "shrink_to": f"{SITE}/heavy-1024x576.jpg"}], ""
 
     def handler(request: httpx.Request) -> httpx.Response:
         p = request.url.path
@@ -365,10 +422,13 @@ def test_flow_seo_health_report_wiring(monkeypatch):
     assert "ok" not in res["sitemap"] and "ok_count" in res["sitemap"]
     assert res["scan_notes"] != []  # 4 challenge loops ≥ 3 → firewall warning surfaced
     assert any("looped a redirect to themselves" in n for n in res["scan_notes"])
-    # internals popped, oversized present
+    # internals popped, oversized present with per-post usage attribution
     assert "internal_link_pairs_all" not in res and "valid_paths_list" not in res
-    assert "record_paths_list" not in res
-    assert res["oversized_images"][0]["id"] == 9
+    assert "record_paths_list" not in res and "internal_img_pairs_all" not in res
+    ov = res["oversized_images"][0]
+    assert ov["id"] == 9 and ov["shrink_to"] == f"{SITE}/heavy-1024x576.jpg"
+    assert ov["used_in"] == [{"from": f"{SITE}/linker/", "from_id": 1,
+                              "from_title": "Rec 1"}]
 
 
 def test_flow_scan_notes_surface_degraded_runs(monkeypatch):
