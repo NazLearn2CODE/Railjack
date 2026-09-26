@@ -487,3 +487,18 @@ def test_resolve_href_cleans_dot_segments():
     assert thailandnow._seo_resolve_href("/events", base) == f"{SITE}/events"
     assert thailandnow._seo_resolve_href("foo/bar", base) == f"{SITE}/foo/bar"
     assert thailandnow._seo_resolve_href(f"{SITE}/x/", base) == f"{SITE}/x/"
+
+
+def test_waf_cookie_same_site_only(monkeypatch):
+    """Opt-in clearance cookie rides SAME-SITE requests only — never leaks to
+    external domains a probe happens to touch."""
+    monkeypatch.setattr(thailandnow, "_wp_site_host", lambda: "www.thailandnow.in.th")
+    monkeypatch.setattr(thailandnow, "_opts",
+                        lambda: {"seo_waf_cookie": "sucuri_cloudproxy_uuid_x=abc"})
+    site = thailandnow._seo_site_headers(f"{SITE}/wp-sitemap.xml")
+    assert site.get("Cookie") == "sucuri_cloudproxy_uuid_x=abc"
+    assert "Cookie" not in thailandnow._seo_site_headers("https://external.example.com/x",
+                                                         {"User-Agent": "ua"})
+    # feature OFF when opts carry no cookie:
+    monkeypatch.setattr(thailandnow, "_opts", lambda: {})
+    assert "Cookie" not in thailandnow._seo_site_headers(f"{SITE}/x")

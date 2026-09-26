@@ -4566,10 +4566,26 @@ async def _flow_seo_health(job: "TnJob") -> None:
     posts, pages, events, other_cpts, media, extra = await _seo_fetch_all()
     if job.cancel:
         raise _TnCancelled()
-    job.progress = 25
+    job.progress = 15
     site_host = _wp_site_host()
     site_origin = _wp_creds()[0].rstrip("/")  # e.g. "https://www.thailandnow.in.th"
     scan_notes: list[str] = []  # degraded inputs — surfaced in the report, never silent
+    # FRAGILE-FIRST: the sitemap probe is the biggest site-facing burst (hundreds of
+    # GETs) — run it while the firewall is calm. The later link probes re-arm the
+    # Sucuri challenge; sitemap/chrome/media data is what we can't afford to lose.
+    sitemap_urls: list[str] = []
+    sitemap_note = ""
+    try:
+        sitemap_urls, sitemap_note = await _seo_sitemap_urls()
+    except (httpx.HTTPError, OSError) as e:
+        sitemap_urls, sitemap_note = [], f"sitemap unreachable ({e})"[:120]
+    hygiene = await _seo_sitemap_hygiene(sitemap_urls)
+    hygiene["note"] = sitemap_note
+    if sitemap_note:
+        scan_notes.append(f"sitemap: {sitemap_note}")
+    if job.cancel:
+        raise _TnCancelled()
+    job.progress = 40
     # Theme-chrome inbound links (menus/footers/homepage/archives) — the Ahrefs-parity
     # fix for orphan detection. Best-effort: fetch failures just shrink the set.
     chrome_inbound, chrome_fetched, chrome_attempted = await _seo_chrome_inbound(extra, site_host)
@@ -4577,9 +4593,13 @@ async def _flow_seo_health(job: "TnJob") -> None:
         scan_notes.append(
             f"theme-chrome crawl fetched {chrome_fetched}/{chrome_attempted} pages — "
             "orphan counts may run high (some inbound links unseen)")
+    # OVERSIZED IMAGES early as well (single authed REST call, degrades loudly)
+    oversized, oversized_note = await _seo_oversized_media()
+    if oversized_note:
+        scan_notes.append(oversized_note)
     rep = _seo_internal_report(posts, pages, events, other_cpts, media, extra, site_host,
                                chrome_inbound=chrome_inbound)
-    job.progress = 40
+    job.progress = 50
     # orphan suggestions: top-3 by title-token overlap (exclude the orphan itself)
     titles = [(p.get("link", ""), (p.get("title") or {}).get("rendered", ""))
               for p in (posts + events + other_cpts) if p.get("link")]
@@ -4644,9 +4664,9 @@ async def _flow_seo_health(job: "TnJob") -> None:
         if url.startswith("//"):
             url = "https:" + url  # protocol-relative '//host/…' → fetchable
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as c:
-            r = await c.head(url, headers=probe_headers)
+            r = await c.head(url, headers=_seo_site_headers(url, probe_headers))
             if r.status_code == 405:  # some hosts reject HEAD → fall back to GET
-                r = await c.get(url, headers=probe_headers)
+                r = await c.get(url, headers=_seo_site_headers(url, probe_headers))
             return r.status_code
 
     async def probe_nofollow(url: str) -> tuple[int, str]:
@@ -4656,9 +4676,9 @@ async def _flow_seo_health(job: "TnJob") -> None:
             url = "https:" + url
         async with sem:
             async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as c:
-                r = await c.head(url, headers=probe_headers)
+                r = await c.head(url, headers=_seo_site_headers(url, probe_headers))
                 if r.status_code == 405:
-                    r = await c.get(url, headers=probe_headers)
+                    r = await c.get(url, headers=_seo_site_headers(url, probe_headers))
                 return r.status_code, (r.headers.get("location") or "")
 
     async def check_ext(url: str) -> None:
@@ -4743,20 +4763,6 @@ async def _flow_seo_health(job: "TnJob") -> None:
                         t.cancel()
                     raise _TnCancelled()
     job.progress = 90
-    # --- SITEMAP HYGIENE (3XX in sitemap / noindex in sitemap / broken in sitemap) ---
-    # The Ahrefs "Top issues" trio: sitemap URLs that redirect, that carry noindex,
-    # or that 404. Probe unfollowed, stream-capped. Best-effort: no sitemap → note.
-    sitemap_urls: list[str] = []
-    sitemap_note = ""
-    try:
-        sitemap_urls, sitemap_note = await _seo_sitemap_urls()
-    except (httpx.HTTPError, OSError) as e:
-        sitemap_urls, sitemap_note = [], f"sitemap unreachable ({e})"[:120]
-    hygiene = await _seo_sitemap_hygiene(sitemap_urls)
-    hygiene["note"] = sitemap_note
-    if sitemap_note:
-        scan_notes.append(f"sitemap: {sitemap_note}")
-
     # sitemap redirect path map → flag content links riding those redirects even
     # when the old path is still a "valid" WP path (the HTTP probe never saw them).
     redir_paths = {r["url_path"]: r.get("final_path", "") for r in hygiene["redirects"]
@@ -4783,12 +4789,9 @@ async def _flow_seo_health(job: "TnJob") -> None:
     hygiene["unlinked"] = {"count": len(unlinked), "urls": unlinked[:200]}
     hygiene["ok_count"] = len(hygiene.pop("ok", []))  # consumed — never store the full list
 
-    # --- OVERSIZED IMAGES (crawler: "Image file size too large") ---
-    oversized, oversized_note = await _seo_oversized_media()
-    if oversized_note:
-        scan_notes.append(oversized_note)
     # per-post usage attribution from every internal <img src> in content — the
-    # SHRINK fixer rewrites these exact srcs per record
+    # SHRINK fixer rewrites these exact srcs per record (oversized fetched early,
+    # fragile-first: the media listing is one of the first reads the firewall blocks)
     img_pairs_all = rep.pop("internal_img_pairs_all", [])
     if oversized:
         src_uses: dict[str, list[dict]] = {}
@@ -5143,13 +5146,37 @@ def _seo_noindex_reason(html: str, x_robots_tag: str = "") -> str:
     return " + ".join(reasons)
 
 
+def _seo_waf_cookie() -> str:
+    """Opt-in firewall clearance cookie (opts: ``seo_waf_cookie``) — the
+    ``sucuri_cloudproxy_uuid_*`` pair copied from a real browser on the SAME IP
+    after it passes the JS challenge once. Site-facing scan reads then ride the
+    clearance instead of being 307-challenged. Empty default = feature off."""
+    return str(_opts().get("seo_waf_cookie") or "").strip()
+
+
+def _seo_site_headers(url: str, base: dict | None = None) -> dict:
+    """Headers for a request to ``url``: base headers plus the WAF clearance cookie —
+    ONLY when the URL is same-site (never leak the cookie to external domains a
+    probe happens to touch)."""
+    h = dict(base or {})
+    h.setdefault("User-Agent", _BROWSER_UA)
+    ck = _seo_waf_cookie()
+    if ck:
+        try:
+            if _seo_host_eq(urllib.parse.urlparse(url).netloc, _wp_site_host()):
+                h["Cookie"] = ck
+        except Exception:
+            pass
+    return h
+
+
 async def _seo_fetch_text(url: str, sem: asyncio.Semaphore, timeout: float,
                           max_bytes: int = 2_000_000) -> str:
     """GET a text resource (sitemap / theme chrome) with the browser UA, body capped.
     Raises httpx.HTTPError / OSError on failure (caller decides soft vs hard)."""
     async with sem:
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=True,
-                                     headers={"User-Agent": _BROWSER_UA}) as c:
+                                     headers=_seo_site_headers(url)) as c:
             async with c.stream("GET", url) as r:
                 r.raise_for_status()
                 buf = bytearray()
@@ -5228,7 +5255,7 @@ async def _seo_follow_redirects(url: str, first_location: str, timeout: float,
         cur = str(httpx.URL(cur).join(loc))
         try:
             async with httpx.AsyncClient(timeout=timeout, follow_redirects=False,
-                                         headers={"User-Agent": _BROWSER_UA}) as c:
+                                         headers=_seo_site_headers(cur)) as c:
                 r = await c.head(cur)
         except (httpx.HTTPError, OSError):
             return cur
@@ -5246,9 +5273,13 @@ async def _seo_sitemap_hygiene(urls: list[str]) -> dict:
     flow's unlinked-URL calc, then dropped from the stored report).
     A 3xx that loops back to ITSELF is the site firewall's challenge signature
     (seen live: Sucuri 307-to-self) — counted in ``challenge_loops``, bucketed
-    manual, never reported as a real redirect."""
-    conc = max(1, int(_opts().get("seo_external_concurrency", 8)))
+    manual, never reported as a real redirect.
+    Rate: deliberately gentle — ``seo_sitemap_concurrency`` (default 3) with a
+    ``seo_sitemap_delay_s`` (default 0.25) pause per request — this burst is what
+    trips the firewall's per-IP rate rules; the scan runs plenty fast anyway."""
+    conc = max(1, int(_opts().get("seo_sitemap_concurrency", 3)))
     timeout = float(_opts().get("seo_external_timeout_s", 10))
+    delay = max(0.0, float(_opts().get("seo_sitemap_delay_s", 0.25)))
     sem = asyncio.Semaphore(conc)
     redirects: list[dict] = []
     noindex: list[dict] = []
@@ -5259,10 +5290,12 @@ async def _seo_sitemap_hygiene(urls: list[str]) -> dict:
 
     async def one(u: str) -> None:
         nonlocal challenge_loops
+        if delay:
+            await asyncio.sleep(delay)
         try:
             async with sem:
                 async with httpx.AsyncClient(timeout=timeout, follow_redirects=False,
-                                             headers={"User-Agent": _BROWSER_UA}) as c:
+                                             headers=_seo_site_headers(u)) as c:
                     async with c.stream("GET", u) as r:
                         status = r.status_code
                         xrob = r.headers.get("x-robots-tag") or ""

@@ -49,6 +49,18 @@ modules:
     options:
       google_token_path: ~/.config/railjack/google_token.json   # minted once: documents + drive scopes
       transfer_doc_owner: thailandnow.info@gmail.com            # every desk doc handed to this account on creation (creator stays editor)
+      # --- SEO HEALTH scan opts (this module's block is the one _opts() reads —
+      # the seo_* keys under codeatlas are dead config, kept only as history) ---
+      seo_media_cache_ttl_s: 86400                     # media library pulled once/day
+      seo_external_concurrency: 8                       # polite outbound HEAD concurrency
+      seo_external_timeout_s: 10                        # per-external-link HEAD timeout
+      # Sucuri challenge workaround (2026-09-26): the firewall 307-challenges bursts.
+      # Grab the clearance cookie from a browser on THIS machine (DevTools →
+      # Application → Cookies → thailandnow.in.th → copy the sucuri_cloudproxy_uuid_*
+      # row as name=value), paste below. Rides same-site scan reads only. Empty = off.
+      seo_waf_cookie: ""
+      seo_sitemap_concurrency: 3                        # sitemap probe is a big same-site burst — keep gentle
+      seo_sitemap_delay_s: 0.25                         # per-request pause in the sitemap probe
   - id: codeatlas
     title: CODEATLAS
     kind: panel          # named-target architecture maps (agy lane → <target>/CODEATLAS/)
@@ -73,10 +85,12 @@ modules:
       scout_rerank_gem_path: app/gems/story-scout-rerank.md
       scout_image_digest_gem_path: app/gems/story-scout-image-digest.md
       # --- SEO HEALTH (read-only link/image/orphan report) ---
+      # (the seo_* opts moved to the thailandnow module block 2026-09-26 — this
+      # codeatlas block was never read by _opts(); left as history)
       wordpress_url: https://www.thailandnow.in.th   # override of WORDPRESS_URL; user/password stay in ~/n8n/.secrets.env
-      seo_media_cache_ttl_s: 86400                     # media library (~5750) pulled once/day
-      seo_external_concurrency: 8                       # polite outbound HEAD concurrency (S2)
-      seo_external_timeout_s: 10                        # per-external-link HEAD timeout (S2)
+      seo_media_cache_ttl_s: 86400                     # DEAD — see thailandnow module
+      seo_external_concurrency: 8                       # DEAD — see thailandnow module
+      seo_external_timeout_s: 10                        # DEAD — see thailandnow module
       # due_weekdays: datetime.weekday() convention (0=Mon..6=Sun) — auto-computed due
       # dates for writer desks (Naz: Paul due Mon/Wed/Fri, Teerin due Thu). tian is NOT
       # given due_weekdays — its dates come from real scouted events via _date_rule.
