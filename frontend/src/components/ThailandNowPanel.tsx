@@ -800,13 +800,13 @@ function HealthSubTab() {
   // Broken-internal-link retarget: suggest live replacements for the dead target.
   const [retargetData, setRetargetData] = useState<{
     key: string; to: string; loading?: boolean; error?: string;
-    suggestions: { link: string; title: string }[];
+    suggestions: { link: string; title: string; jev?: { verdict: string; prob?: number; model?: string } }[];
   } | null>(null);
 
-  const handleSuggestRetarget = async (key: string, to: string) => {
+  const handleSuggestRetarget = async (key: string, to: string, fromLink = "", fromTitle = "") => {
     setRetargetData({ key, to, loading: true, suggestions: [] });
-    const res = await post<{ suggestions: { link: string; title: string }[] }>(
-      "/api/thailandnow/seo/suggest-retarget", { to },
+    const res = await post<{ suggestions: { link: string; title: string; jev?: { verdict: string; prob?: number; model?: string } }[] }>(
+      "/api/thailandnow/seo/suggest-retarget", { to, from_link: fromLink, from_title: fromTitle },
     );
     if (res.ok && res.data) {
       setRetargetData({ key, to, suggestions: res.data.suggestions });
@@ -1316,8 +1316,8 @@ function HealthSubTab() {
                     {b.from_id && (
                       <button
                         className="seo-icon seo-icon--remove"
-                        title="Suggest a live replacement to retarget this link to"
-                        onClick={() => handleSuggestRetarget(rowKey, b.to)}
+                        title="Suggest a live replacement to retarget this link to (JEV-judged)"
+                        onClick={() => handleSuggestRetarget(rowKey, b.to, b.from, b.from_title || "")}
                       >
                         ⇄
                       </button>
@@ -1344,15 +1344,25 @@ function HealthSubTab() {
                       {!retargetData.loading && !retargetData.error && !retargetData.suggestions.length && (
                         <div className="mono text-xs" style={{ color: "var(--color-muted)" }}>no close match found — REMOVE (✗) or keep as-is</div>
                       )}
-                      {retargetData.suggestions.map((s) => (
-                        <div key={s.link} className="flex items-center gap-2">
-                          <span className="mono text-xs" style={{ color: "var(--color-phosphor)" }}>{s.title || s.link}</span>
-                          <button className="btn btn--compact" onClick={() =>
-                            b.from_id && handleStartRewrite(rowKey + ":rt", b.from_id, b.href || b.to, s.link)}>
-                            REWRITE →
-                          </button>
-                        </div>
-                      ))}
+                      {retargetData.suggestions.map((s) => {
+                        const jv = s.jev?.verdict;
+                        const jColor = jv === "ok" ? "var(--color-go)"
+                          : jv === "weak" ? "var(--color-hazard)" : "var(--color-muted)";
+                        return (
+                          <div key={s.link} className="flex items-center gap-2">
+                            <span className="mono text-xs" style={{ color: jColor }}>
+                              {jv === "ok" ? `🧠 ok${s.jev?.prob != null ? ` ${s.jev.prob}` : ""}`
+                                : jv === "weak" ? `🧠 weak${s.jev?.prob != null ? ` ${s.jev.prob}` : ""}`
+                                : "🧠 n/a"}
+                            </span>
+                            <span className="mono text-xs" style={{ color: "var(--color-phosphor)" }}>{s.title || s.link}</span>
+                            <button className="btn btn--compact" onClick={() =>
+                              b.from_id && handleStartRewrite(rowKey + ":rt", b.from_id, b.href || b.to, s.link)}>
+                              REWRITE →
+                            </button>
+                          </div>
+                        );
+                      })}
                       {rewritePreview && rewritePreview.key === rowKey + ":rt" && (
                         <div className="flex flex-col gap-1">
                           {rewritePreview.loading && <div className="mono text-xs">loading preview…</div>}

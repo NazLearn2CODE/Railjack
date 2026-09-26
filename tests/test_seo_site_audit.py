@@ -336,10 +336,15 @@ def test_suggest_retarget_ranks_by_overlap(client, monkeypatch):
 
     monkeypatch.setattr(thailandnow, "_wp_list_all", fake_list)
     r = client.post("/api/thailandnow/seo/suggest-retarget",
-                    json={"to": "/khon-kaen-night-market/"})
+                    json={"to": "/khon-kaen-night-market/",
+                          "from_link": f"{SITE}/bangkok-weekend/",
+                          "from_title": "Bangkok Weekend Guide"})
     s = r.json()["suggestions"]
     assert s and s[0]["link"] == f"{SITE}/khon-kaen-street-food/"
     assert len(s) <= 3
+    # every suggestion carries an advisory JEV verdict (degrades to 'skipped'
+    # under the test fixture's missing meter — never blocks the pick)
+    assert all("jev" in x and x["jev"]["verdict"] in ("ok", "weak", "skipped") for x in s)
 
 
 # ------------------------------------------------------------ flow wiring ---

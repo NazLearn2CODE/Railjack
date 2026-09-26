@@ -131,3 +131,40 @@ def test_verdict_insert_cache_hit_stamps_model(fresh_cache, monkeypatch):
     assert len(calls) == 1
     assert first["verdict"] == second["verdict"] == "ok"
     assert second["model"] == "jev-1.13.0"          # was the crash
+
+
+def test_verdict_retarget_advisory(fresh_cache, monkeypatch):
+    """Retarget gate: ok above threshold, weak below — same scale as insert."""
+    monkeypatch.setattr(
+        "app.jev_gates.metered_questions",
+        lambda s, q: ({"ret0": {"noul": 0.82}}, "jev-test"))
+    out = seo_jev.verdict_retarget("/khon-kaen-night-market/", "Bangkok Weekend Guide",
+                                   "https://x/khon-kaen-street-food/", "Khon Kaen Street Food Guide")
+    assert out["verdict"] == "ok" and out["prob"] >= 0.6 and out["model"] == "jev-test"
+    monkeypatch.setattr(
+        "app.jev_gates.metered_questions",
+        lambda s, q: ({"ret0": {"noul": 0.15}}, "jev-test"))
+    out2 = seo_jev.verdict_retarget("/crypto-scam/", "Bangkok Weekend Guide",
+                                    "https://x/bangkok-malls/", "Bangkok Malls")
+    assert out2["verdict"] == "weak"
+
+
+def test_verdict_retarget_degrades(fresh_cache, monkeypatch):
+    monkeypatch.setattr("app.jev_gates.metered_questions",
+                        lambda s, q: (_ for _ in ()).throw(RuntimeError("down")))
+    out = seo_jev.verdict_retarget("/dead/", "From Page", "https://x/live/", "Live Page")
+    assert out["verdict"] == "skipped"
+
+
+def test_verdict_retarget_cache_hit_stamps_model(fresh_cache, monkeypatch):
+    calls = []
+
+    def fake_metered(state, questions):
+        calls.append(1)
+        return {"ret0": {"noul": 0.75}}, "jev-1.13.0"
+
+    monkeypatch.setattr("app.jev_gates.metered_questions", fake_metered)
+    args = ("/dead-slug/", "Source Page", "https://x/live/", "Live Page")
+    seo_jev.verdict_retarget(*args)
+    second = seo_jev.verdict_retarget(*args)
+    assert len(calls) == 1 and second["model"] == "jev-1.13.0"

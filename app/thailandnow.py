@@ -5735,12 +5735,16 @@ async def seo_apply_image_shrink(req: SeoImgShrinkReq):
 
 class SeoRetargetSuggestReq(BaseModel):
     to: str  # broken internal-link target (path or URL)
+    from_link: str = ""  # source page (optional — JEV judges in context)
+    from_title: str = ""
 
 
 @router.post("/api/thailandnow/seo/suggest-retarget")
 async def seo_suggest_retarget(req: SeoRetargetSuggestReq):
     """For a broken internal link: top-3 live records by token overlap between the
-    dead slug's words and record titles — the 'where SHOULD this point?' pick."""
+    dead slug's words and record titles — the 'where SHOULD this point?' pick.
+    Each suggestion carries an advisory JEV verdict (token overlap alone can
+    recommend a plausible-looking wrong page; Jev judges the reader's intent)."""
     to = (req.to or "").strip()
     slug_words = " ".join(re.findall(r"[a-z0-9]+", to.lower())) or to
     candidates: list[tuple[str, str]] = []
@@ -5753,7 +5757,11 @@ async def seo_suggest_retarget(req: SeoRetargetSuggestReq):
             t = (r_.get("title") or {}).get("rendered", "")
             if r_.get("link"):
                 candidates.append((r_["link"], t))
-    return {"to": to, "suggestions": _seo_suggest(slug_words, candidates, n=3)}
+    sugg = _seo_suggest(slug_words, candidates, n=3)
+    from .seo_jev import verdict_retarget
+    for s in sugg:
+        s["jev"] = verdict_retarget(to, req.from_title or req.from_link, s["link"], s["title"])
+    return {"to": to, "suggestions": sugg}
 
 
 @router.post("/api/thailandnow/seo/analyze-anchors")

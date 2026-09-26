@@ -120,6 +120,39 @@ def verdict_insert(phrase: str, orphan_title: str, host_title: str,
         return {"verdict": "skipped", "detail": str(exc)[:120]}
 
 
+def verdict_retarget(old_to: str, from_title: str, new_link: str, new_title: str) -> dict:
+    """Advisory JEV verdict for a broken-link RETARGET suggestion (suggest-retarget):
+    is ``new_link`` a natural replacement for the dead ``old_to`` on this source page?
+    Token overlap can recommend a plausible-looking wrong page — Jev is the judge.
+    Never raises; ``{"verdict": "ok"|"weak"|"skipped", "prob": x, "model": m}``."""
+    try:
+        from .jev_gates import cache_read, cache_write, metered_questions
+
+        key = f"seo-retarget:{orphan_link_key(old_to, new_link, from_title)}"
+        answers, old_model = cache_read(key)
+        model = old_model  # cache hit → this IS the judging model
+        if answers is None:
+            questions = {"ret0": {
+                "type": "noul",
+                "instructions": (
+                    f'On the page "{from_title}", a link to "{old_to}" is broken '
+                    "(the page no longer exists). Would replacing it with a link to "
+                    f'"{new_title}" ({new_link}) preserve the link\'s intent for a '
+                    "reader who clicks it? Answer no if the replacement is off-topic, "
+                    "unrelated to what the dead link promised, or would mislead.")}}
+            answers, model = metered_questions(_STATE, questions)
+            if model and old_model and model != old_model:
+                flush_cache()
+            cache_write(key, answers, model)
+        prob = (answers.get("ret0") or {}).get("noul")
+        if not isinstance(prob, (int, float)):
+            return {"verdict": "skipped", "model": model}
+        return {"verdict": "ok" if prob >= GATE_THRESHOLD else "weak",
+                "prob": round(prob, 2), "model": model}
+    except Exception as exc:  # noqa: BLE001 — an op never dies to Jev
+        return {"verdict": "skipped", "detail": str(exc)[:120]}
+
+
 def orphan_link_key(orphan_title: str, phrase: str, host_title: str) -> str:
     import re as _re
     return _re.sub(r"[^a-z0-9]+", "-", f"{orphan_title} {phrase} {host_title}".lower())[:120]
