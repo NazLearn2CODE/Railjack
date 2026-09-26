@@ -135,3 +135,56 @@ def test_legacy_bracket_unverified_shows_readable_form():
     blob = "EN: t\nTH: ห\n\n**[Arada Fuangtong(อารดา เฟื่องทอง)]** spoke."
     out = check_rewritten(blob)
     assert out["names"]["unverified"] == ["Arada Fuangtong (อารดา เฟื่องทอง)"]
+
+
+def test_surname_only_later_mention_warns():
+    """Thai convention (Naz 2026-09-26): later mentions use the GIVEN name,
+    never the family name — a bare surname after the first mention warns."""
+    blob = (
+        "EN: t\nTH: ห\n\n"
+        "**Anutin Charnvirakul [อนุทิน ชาญวีรกูล]** spoke. Later, Charnvirakul added."
+    )
+    out = check_rewritten(blob)
+    assert out["ok"]  # advisory, never an error
+    hit = [w for w in out["warnings"] if w["kind"] == "surname-mention"]
+    assert len(hit) == 1
+    assert hit[0]["name"] == "Charnvirakul"
+    assert "Anutin" in hit[0]["detail"]
+
+
+def test_given_name_later_mention_stays_clean():
+    """Given-name and full-name repeats are the correct forms — no warning."""
+    blob = (
+        "EN: t\nTH: ห\n\n"
+        "**Anutin Charnvirakul [อนุทิน ชาญวีรกูล]** spoke. Later, Anutin added. "
+        "Prime Minister Anutin Charnvirakul repeated the pledge."
+    )
+    out = check_rewritten(blob)
+    assert not any(w["kind"] == "surname-mention" for w in out["warnings"])
+
+
+def test_surname_check_covers_legacy_parens_overlay():
+    blob = (
+        "EN: t\nTH: ห\n\n"
+        "**[Anutin Charnvirakul(อนุทิน ชาญวีรกูล)]** spoke. Charnvirakul left."
+    )
+    out = check_rewritten(blob)
+    assert any(w["kind"] == "surname-mention" for w in out["warnings"])
+
+
+def test_place_overlay_never_surname_checked():
+    """Places repeat in full — the surname scan skips place-word overlays."""
+    blob = (
+        "EN: t\nTH: ห\n\n"
+        "**Nong Bun Mak district [อำเภอโนนบุรำ]** votes today."
+    )
+    out = check_rewritten(blob)
+    assert not any(w["kind"] == "surname-mention" for w in out["warnings"])
+
+
+def test_english_source_name_not_surname_checked():
+    """A non-Thai name (no Thai in the bracket zone) is exempt — Western style
+    legitimately reuses the family name."""
+    blob = "EN: t\nTH: ห\n\n**Donald Trump** spoke. Trump added."
+    out = check_rewritten(blob)
+    assert not any(w["kind"] == "surname-mention" for w in out["warnings"])

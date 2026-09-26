@@ -11,6 +11,9 @@ IDE handoff or metered alike:
      warning, so new names surface for registration.
   3. Names carry NO honorifics or titles (นาย / นาง / ranks / ตำแหน่ง) —
      titles change over time; the registry stores the bare name only.
+  4. Later mentions of a Thai person use the GIVEN (first) name, never the
+     family name (Thai convention, Naz 2026-09-26) — a bare surname token
+     after the first full mention is an advisory warning.
 
 Advisory by design (Naz's call 2026-08-27): results are surfaced in the
 panel, they never block the relay. Only the CLI exits non-zero on errors,
@@ -61,6 +64,21 @@ _HONORIFICS = (
 )
 
 DEFAULT_REGISTRY_DIR = Path.home() / "Cephalon" / "10-knowledge" / "name-wiki"
+
+# Thai place words that start a place name — overlays beginning with one are
+# places, exempt from the person surname check (places repeat in full anyway).
+_PLACE_THAI_PREFIXES = (
+    "อำเภอ",
+    "จังหวัด",
+    "ตำบล",
+    "ตึก",
+    "ทะเล",
+    "แม่น้ำ",
+    "เขต",
+    "ถนน",
+    "เกาะ",
+    "อ่าว",
+)
 
 
 def _body(text: str) -> str:
@@ -131,6 +149,7 @@ def check_rewritten(text: str, registry_dir: Path | None = None) -> dict:
 
     verified: list[str] = []
     unverified: list[str] = []
+    surname_candidates: dict[tuple[str, str], tuple[str, str]] = {}
     seen: set[str] = set()
     for a, b in allowed:
         raw = body[a + 1 : b - 1].strip()
@@ -159,6 +178,19 @@ def check_rewritten(text: str, registry_dir: Path | None = None) -> dict:
                     "detail": "name overlay carries a title/rank — strip to the bare name",
                 }
             )
+        # 4. collect person names (Thai-bearing, non-place) for the
+        #    surname-only-mention scan below. The title rides BEFORE the name,
+        #    so the overlay's last two English tokens are (given, family).
+        thai_part = thai_name or (raw if re.search(rf"[{THAI}]", raw) else None)
+        if thai_part and not thai_part.startswith(_PLACE_THAI_PREFIXES):
+            tokens = [
+                t for t in (english if thai_name else (english_hint or "")).split()
+                if re.search(r"[A-Za-z]", t)
+            ]
+            if len(tokens) >= 2:
+                surname = tokens[-1].strip(".,;:")
+                given = tokens[-2]
+                surname_candidates.setdefault((surname, given), (display, surname))
         if lookup in reg:
             verified.append(display)
             reg_en = reg[lookup]
@@ -180,6 +212,29 @@ def check_rewritten(text: str, registry_dir: Path | None = None) -> dict:
                     "detail": "not in name-wiki yet — verify the English form, then register",
                 }
             )
+
+    # 4. bare-surname later mention (Thai convention): after the first full
+    #    mention a Thai person is referenced by the GIVEN name. An occurrence
+    #    of the family-name token outside the overlay and outside a full-name
+    #    repeat is flagged once per name.
+    for (surname, given), (display, _) in surname_candidates.items():
+        for m in re.finditer(rf"\b{re.escape(surname)}\b", body):
+            if any(a <= m.start() and m.end() <= b for a, b in allowed):
+                continue  # inside an overlay bracket — part of the name form
+            prefix = body[max(0, m.start() - len(given) - 1) : m.start()].rstrip()
+            if prefix.endswith(given):
+                continue  # directly follows the given name — full-name mention
+            warnings.append(
+                {
+                    "kind": "surname-mention",
+                    "name": surname,
+                    "detail": (
+                        f'"{surname}" alone after the first mention — Thai style '
+                        f'repeats the given name "{given}", not the family name'
+                    ),
+                }
+            )
+            break  # one advisory per name
 
     return {
         "errors": errors,

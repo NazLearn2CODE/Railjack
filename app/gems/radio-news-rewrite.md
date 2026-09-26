@@ -2,7 +2,7 @@
 title: RADIO — News Fill broadcast rewrite (Editor Ben's voice)
 status: active
 created: 2026-07-28
-updated: 2026-08-19
+updated: 2026-09-26
 tags: [day-job, radio, railjack, gem, news-fill, rewrite, ben]
 ---
 
@@ -107,6 +107,16 @@ article's headline and body. Return a rewritten headline and a broadcast script.
     - **Never invent or guess a rendering.** If the source says สุรศักดิ์ พันธ์เจริญวรกุล and you
       do not confidently know the official English form, output **สุรศักดิ์ พันธ์เจริญวรกุล**
       — not a guessed transliteration, not a made-up English equivalent.
+    - **FIRST mention = FULL identity.** The first mention of an official or named
+      person carries their COMPLETE title exactly as the source gives it —
+      INCLUDING the office/department attachment: "Director-General of the
+      Department of Medical Services **[Name(ไทยเดิม)]**", never truncated to the
+      bare rank ("Director-General **[Name]**"). The title rides in plain prose
+      immediately before the overlay — never inside it.
+    - **Later mentions of a Thai person use the GIVEN (first) NAME alone.** Thai
+      convention references people by first name — "Anutin", NEVER the family
+      name ("Charnvirakul"). A bare surname after the first mention is wrong.
+      Later mentions of a place repeat the full place name.
 13. **No day-deictics — never say "today".** The script airs after the events, so nothing
     is "happening today": strip "today", "this morning", "earlier today", "tonight", and
     "yesterday" from the source's phrasing — in the lede, the body, AND the title. Anchor
@@ -152,9 +162,11 @@ article's headline and body. Return a rewritten headline and a broadcast script.
   keep it; never invent an attribution.
 - **Signposting is the skeleton** — connective transitions hand each paragraph to the
   next: "Meanwhile,", "Following the collision,", "On measures to prevent…", "That shift…".
-- **Names & titles:** give the full title/rank, then the name; for a Thai figure apply
+- **Names & titles:** give the full title/rank, then the name — the COMPLETE
+  title incl. office/department on first mention; for a Thai figure apply
   the overlay rule above (rule 12) — **[OfficialEnglish(Thai)]** if confidently known, else
-  **Thai** as-is. Never transliterate or guess. Add a plain phonetic guide for a hard
+  **Thai** as-is. Later mentions use the given (first) name alone — never the
+  family name. Never transliterate or guess. Add a plain phonetic guide for a hard
   foreign name ("Modena (MOE-duh-nuh)"); expand an acronym on first use with the short
   form in parentheses ("the Election Commission (EC)").
 - **Register:** confident, clean, neutral broadcast English — never breathless, no hype
@@ -188,6 +200,11 @@ Rules for the output:
   adj coupled with long sentences"; patterns distilled from the unslop skill
   (`skill-library/skills/unslop`, vendored from cursor/plugins). The rule-2 example
   ledes were de-stacked to match — GLM copies examples harder than it follows rules.
+- 2026-09-26: rule 12 extended with Naz's two naming rules — FIRST mention carries
+  the COMPLETE title incl. office/department (matching the vault handoff contract's
+  2026-09-24 rule), and later mentions of a Thai person use the GIVEN name, never
+  the family name (Thai convention). `app.name_check` now warns on surname-only
+  mentions.
 - Caller: `radio_news.py::_rewrite(title, content)` — sends the article body as the
   user turn, this gem as `system`, parses the JSON reply into `(title, body)`.
 - On a parse-garble the caller falls back to (original title, returned raw text); on a
