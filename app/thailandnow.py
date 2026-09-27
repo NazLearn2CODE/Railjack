@@ -4375,10 +4375,10 @@ async def _seo_fetch_all() -> tuple[list[dict], list[dict], list[dict], list[dic
     + the media set + category/tag archive paths. Content types feed parsing; their
     paths plus the taxonomy paths form the valid-internal-path set. Soft on the
     optional types — event/cpts/categories/tags that aren't REST-enabled are skipped."""
-    posts = await _wp_list_all("/posts", "id,link,slug,title,content,excerpt")
-    pages = await _wp_list_all("/pages", "id,link,slug,title,content")
+    posts = await _wp_list_all("/posts", "id,link,slug,title,content,excerpt,featured_media")
+    pages = await _wp_list_all("/pages", "id,link,slug,title,content,featured_media")
     try:
-        events = await _wp_list_all("/event", "id,link,slug,title,content,excerpt")
+        events = await _wp_list_all("/event", "id,link,slug,title,content,excerpt,featured_media")
     except HTTPException:
         events = []
 
@@ -4399,7 +4399,7 @@ async def _seo_fetch_all() -> tuple[list[dict], list[dict], list[dict], list[dic
                 # rest_base presence only (+ skip builtins).
                 if rest_base and slug not in _skip_types:
                     try:
-                        cpt_items = await _wp_list_all(f"/{rest_base}", "id,link,slug,title,content,excerpt")
+                        cpt_items = await _wp_list_all(f"/{rest_base}", "id,link,slug,title,content,featured_media")
                         other_cpts.extend(cpt_items)
                     except HTTPException:
                         pass
@@ -4808,14 +4808,34 @@ async def _flow_seo_health(job: "TnJob") -> None:
     # per-post usage attribution from every internal <img src> in content — the
     # SHRINK fixer rewrites these exact srcs per record (oversized fetched early,
     # fragile-first: the media listing is one of the first reads the firewall blocks)
+    # per-post usage attribution + per-image class from every internal <img src> in
+    # content — the SHRINK fixer rewrites exact srcs; UNUSED entries are deletable.
+    # Classes: full-used (content embeds the FULL file -> shrink),
+    #          featured (a record's featured image — manual review, not deletable),
+    #          variant-used (a -1024.. size is embedded; no page loads the full file),
+    #          unused (neither -> deletable; WP media cannot trash, delete is permanent)
     img_pairs_all = rep.pop("internal_img_pairs_all", [])
     if oversized:
         src_uses: dict[str, list[dict]] = {}
+        content_bases: set[str] = set()
         for pr in img_pairs_all:
             src_uses.setdefault(pr["src"], []).append(
                 {"from": pr["from"], "from_id": pr["from_id"], "from_title": pr["from_title"]})
+            content_bases.add(_seo_img_base(pr["src"]))
+        featured_ids = {r.get("featured_media") for r in (posts + pages + events + other_cpts)
+                        if r.get("featured_media")}
         for o in oversized:
-            o["used_in"] = src_uses.get(o.get("source_url") or "", [])
+            src = o.get("source_url") or ""
+            o["used_in"] = src_uses.get(src, [])
+            o["featured"] = o.get("id") in featured_ids
+            if o["used_in"]:
+                o["klass"] = "full-used"
+            elif o["featured"]:
+                o["klass"] = "featured"
+            elif _seo_img_base(src) in content_bases:
+                o["klass"] = "variant-used"
+            else:
+                o["klass"] = "unused"
 
     # WAF challenge loops (307-to-self) — when the firewall challenges us, redirect
     # findings are undercounts and sitemap coverage is partial; say so loudly.
@@ -5806,6 +5826,82 @@ async def seo_apply_image_shrink(req: SeoImgShrinkReq):
         return {"ok": True, "matches": 0, "post_id": req.post_id, "post_link": rec.get("link", "")}
     await _wp("POST", f"/{rb}/{req.post_id}", json_body={"content": new_html})
     return {"ok": True, "matches": matches, "post_id": req.post_id, "post_link": rec.get("link", "")}
+
+
+class SeoImgShrinkBulkReq(BaseModel):
+    items: list[SeoImgShrinkReq]
+
+
+@router.post("/api/thailandnow/seo/apply-image-shrink-bulk")
+async def seo_apply_image_shrink_bulk(req: SeoImgShrinkBulkReq):
+    """Bulk SHRINK: swap full-size <img src> → the WP smaller variant across
+    records. Paced (seo_bulk_delay_s); continues on error; error_sample included."""
+    delay = max(0.0, float(_opts().get("seo_bulk_delay_s", 1.0)))
+    results = []
+    for i, item in enumerate(req.items):
+        if i and delay:
+            await asyncio.sleep(delay)
+        try:
+            res = await seo_apply_image_shrink(item)
+            results.append(res)
+        except Exception as e:
+            results.append({"ok": False, "error": str(e), "post_id": item.post_id,
+                            "old_src": item.old_src})
+    shrunk = len([r for r in results if r.get("ok") and r.get("matches", 0) > 0])
+    noop = len([r for r in results if r.get("ok") and r.get("matches", 0) == 0])
+    failed = len([r for r in results if not r.get("ok")])
+    return {"results": results, "total": len(req.items), "shrunk": shrunk,
+            "noop": noop, "failed": failed, "successful": shrunk,
+            "error_sample": _seo_bulk_error_sample(results)}
+
+
+class SeoDeleteMediaReq(BaseModel):
+    media_id: int
+
+
+class SeoDeleteMediaBulkReq(BaseModel):
+    ids: list[int]
+
+
+@router.post("/api/thailandnow/seo/delete-media")
+async def seo_delete_media(req: SeoDeleteMediaReq):
+    """PERMANENTLY delete a media-library attachment. WP cannot trash media —
+    force=true is the only delete, so the caller must have verified the image
+    unused (the scan only offers DELETE on klass=='unused' entries). Double-guard:
+    refuses non-image attachments."""
+    try:
+        att = await _wp("GET", f"/media/{req.media_id}", {"context": "edit"})
+    except HTTPException as e:
+        if e.status_code in (401, 403):
+            raise HTTPException(403, f"WP permission denied for media {req.media_id}.")
+        raise
+    if not att or not isinstance(att, dict):
+        raise HTTPException(404, f"media {req.media_id} not found")
+    if not str(att.get("mime_type") or "").startswith("image/"):
+        raise HTTPException(415, f"media {req.media_id} is not an image — refusing")
+    await _wp("DELETE", f"/media/{req.media_id}", params={"force": "true"})
+    return {"ok": True, "deleted": req.media_id, "source_url": att.get("source_url")}
+
+
+@router.post("/api/thailandnow/seo/delete-media-bulk")
+async def seo_delete_media_bulk(req: SeoDeleteMediaBulkReq):
+    """PERMANENTLY delete unused oversized attachments, paced (seo_bulk_delay_s).
+    Continues on error; per-item results + distinct-error sample."""
+    delay = max(0.0, float(_opts().get("seo_bulk_delay_s", 1.0)))
+    results = []
+    for i, mid in enumerate(req.ids):
+        if i and delay:
+            await asyncio.sleep(delay)
+        try:
+            res = await seo_delete_media(SeoDeleteMediaReq(media_id=mid))
+            results.append(res)
+        except Exception as e:
+            results.append({"ok": False, "error": str(e), "media_id": mid})
+    deleted = len([r for r in results if r.get("ok")])
+    failed = len(results) - deleted
+    return {"results": results, "total": len(req.ids), "deleted": deleted,
+            "failed": failed, "successful": deleted,
+            "error_sample": _seo_bulk_error_sample(results)}
 
 
 class SeoRetargetSuggestReq(BaseModel):

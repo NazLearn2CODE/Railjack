@@ -379,6 +379,7 @@ def test_flow_seo_health_report_wiring(monkeypatch):
         _rec(2, "/target/", "<p>x</p>"),
         _rec(3, "/new-slug/", "<p>y</p>"),
     ]
+    posts[1]["featured_media"] = 11  # feat.png is post 2's featured image
     pages = [_rec(4, "/orphan-page/", "<p>p</p>"), _rec(5, "/chrome-page/", "<p>c</p>")]
 
     async def fake_fetch_all():
@@ -401,7 +402,11 @@ def test_flow_seo_health_report_wiring(monkeypatch):
 
     async def fake_oversized():
         return [{"id": 9, "source_url": f"{SITE}/heavy.jpg", "filesize": 3_000_000,
-                 "shrink_to": f"{SITE}/heavy-1024x576.jpg"}], ""
+                 "shrink_to": f"{SITE}/heavy-1024x576.jpg"},
+                {"id": 10, "source_url": f"{SITE}/ghost.png", "filesize": 2_000_000,
+                 "shrink_to": ""},
+                {"id": 11, "source_url": f"{SITE}/feat.png", "filesize": 1_500_000,
+                 "shrink_to": f"{SITE}/feat-1024x576.jpg"}], ""
 
     def handler(request: httpx.Request) -> httpx.Response:
         p = request.url.path
@@ -446,10 +451,12 @@ def test_flow_seo_health_report_wiring(monkeypatch):
     # internals popped, oversized present with per-post usage attribution
     assert "internal_link_pairs_all" not in res and "valid_paths_list" not in res
     assert "record_paths_list" not in res and "internal_img_pairs_all" not in res
-    ov = res["oversized_images"][0]
-    assert ov["id"] == 9 and ov["shrink_to"] == f"{SITE}/heavy-1024x576.jpg"
-    assert ov["used_in"] == [{"from": f"{SITE}/linker/", "from_id": 1,
-                              "from_title": "Rec 1"}]
+    ov = {o["id"]: o for o in res["oversized_images"]}
+    assert ov[9]["klass"] == "full-used"      # post 1 embeds the full file
+    assert ov[9]["used_in"] == [{"from": f"{SITE}/linker/", "from_id": 1,
+                                 "from_title": "Rec 1"}]
+    assert ov[10]["klass"] == "unused"        # nothing embeds it → deletable
+    assert ov[11]["klass"] == "featured"      # post 2's featured image → manual
 
 
 def test_flow_scan_notes_surface_degraded_runs(monkeypatch):
@@ -561,3 +568,63 @@ def test_wp_429_forever_surfaces_honest_502(monkeypatch):
     with pytest.raises(HTTPException) as ei:
         asyncio.run(thailandnow._wp("GET", "/posts"))
     assert "429" in ei.value.detail and "WP GET /posts" in ei.value.detail
+
+
+class _FakeMedia:
+    """DELETE/GET media backend for the delete tests — records force-deletes."""
+
+    def __init__(self, images):
+        self.images = dict(images)  # id -> mime_type
+        self.deleted: list[int] = []
+
+    async def __call__(self, method, path, params=None, json_body=None):
+        mid = int(path.strip("/").split("/")[-1])
+        if method == "GET":
+            if mid not in self.images:
+                raise HTTPException(404, f"media {mid} not found")
+            return {"id": mid, "mime_type": self.images[mid],
+                    "source_url": f"{SITE}/m{mid}.png"}
+        if method == "DELETE":
+            if str((params or {}).get("force")) != "true":
+                raise HTTPException(400, "does not support trashing")
+            self.deleted.append(mid)
+            return {"deleted": True, "id": mid}
+        raise HTTPException(500, f"unexpected {method}")
+
+
+def test_delete_media_guards_and_deletes(client, monkeypatch):
+    fake = _FakeMedia({9: "image/png", 10: "video/mp4"})
+    monkeypatch.setattr(thailandnow, "_wp_creds", lambda: (SITE, "u", "p"))
+    monkeypatch.setattr(thailandnow, "_wp", fake)
+
+    # refuses non-image
+    r = client.post("/api/thailandnow/seo/delete-media", json={"media_id": 10})
+    assert r.status_code == 415
+    # deletes image with force=true
+    r2 = client.post("/api/thailandnow/seo/delete-media", json={"media_id": 9})
+    assert r2.json()["ok"] is True and fake.deleted == [9]
+
+
+def test_delete_media_bulk_paced_counts(client, monkeypatch):
+    fake = _FakeMedia({9: "image/png", 11: "image/png", 12: "image/png"})
+    monkeypatch.setattr(thailandnow, "_wp_creds", lambda: (SITE, "u", "p"))
+    monkeypatch.setattr(thailandnow, "_wp", fake)
+    monkeypatch.setattr(thailandnow, "_opts", lambda: {"seo_bulk_delay_s": 0})
+    r = client.post("/api/thailandnow/seo/delete-media-bulk",
+                    json={"ids": [9, 11, 12, 99]})
+    d = r.json()
+    assert d["deleted"] == 3 and d["failed"] == 1
+    assert d["error_sample"] and "not found" in d["error_sample"][0]
+    assert fake.deleted == [9, 11, 12]
+
+
+def test_apply_image_shrink_bulk_counts(client, fake_wp, monkeypatch):
+    monkeypatch.setattr(thailandnow, "_opts", lambda: {"seo_bulk_delay_s": 0})
+    fake_wp({11: f'<p><img src="{SITE}/big.jpg"></p>', 12: "<p>none</p>"})
+    r = client.post("/api/thailandnow/seo/apply-image-shrink-bulk", json={"items": [
+        {"post_id": 11, "old_src": f"{SITE}/big.jpg", "new_src": f"{SITE}/big-1024x576.jpg"},
+        {"post_id": 12, "old_src": f"{SITE}/big.jpg", "new_src": f"{SITE}/big-1024x576.jpg"},
+    ]})
+    d = r.json()
+    assert d["shrunk"] == 1 and d["noop"] == 1 and d["failed"] == 0
+    assert d["total"] == 2

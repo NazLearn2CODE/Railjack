@@ -202,6 +202,8 @@ interface RedirectingLink {
 /** Media-library image above the size threshold (crawler: "Image file size too large"). */
 interface OversizedImage {
   id?: number; source_url: string; filesize: number; shrink_to?: string;
+  klass?: "full-used" | "variant-used" | "featured" | "unused";
+  featured?: boolean;
   used_in?: { from: string; from_id?: number; from_title: string }[];
 }
 /** Sitemap probe: 3xx / noindex / broken entries living in the sitemap + unlinked 200s. */
@@ -358,8 +360,11 @@ function healthCopyText(r: HealthReport): string {
   }
   if (r.oversized_images?.length) {
     L.push("");
-    L.push(`OVERSIZED IMAGES (${r.oversized_images.length}) — above the size threshold, compress or serve smaller variants:`);
-    for (const m of r.oversized_images) L.push(`- ${fmtBytes(m.filesize)} ${m.source_url}`);
+    L.push(`OVERSIZED IMAGES (${r.oversized_images.length}) — above the size threshold:`);
+    for (const m of r.oversized_images) {
+      L.push(`- [${m.klass || "?"}] ${fmtBytes(m.filesize)} ${m.source_url}`);
+      for (const u of m.used_in ?? []) L.push(`    used in: ${u.from_title || u.from}`);
+    }
   }
   return L.join("\n");
 }
@@ -820,6 +825,62 @@ function HealthSubTab() {
       setRetargetData({ key, to, suggestions: res.data.suggestions });
     } else {
       setRetargetData({ key, to, error: res.error || "Failed to suggest", suggestions: [] });
+    }
+  };
+
+  // Oversized-image bulk actions: SHRINK ALL (embedded full-size) / DELETE UNUSED.
+  const [shrinkBulkConfirm, setShrinkBulkConfirm] = useState(false);
+  const [shrinkBulkMsg, setShrinkBulkMsg] = useState<string | null>(null);
+  const [deleteBulkConfirm, setDeleteBulkConfirm] = useState(false);
+  const [deleteBulkMsg, setDeleteBulkMsg] = useState<string | null>(null);
+
+  const fmtRateHint = (sample?: string[]) => {
+    if (!sample?.length) return "";
+    let m = ` Why: ${sample.join(" | ")}`;
+    if (sample.some((e) => e.includes("429"))) m += " — RATE LIMITED: wait 15-30 min, retry.";
+    return m;
+  };
+
+  const handleShrinkAll = async () => {
+    const items = (report?.oversized_images ?? [])
+      .filter((m) => m.klass === "full-used")
+      .flatMap((m) => (m.used_in ?? [])
+        .filter((u) => u.from_id && m.shrink_to)
+        .map((u) => ({ post_id: u.from_id!, old_src: m.source_url, new_src: m.shrink_to! })));
+    if (!items.length) return;
+    setShrinkBulkMsg(`shrinking ${items.length} embeds…`);
+    const res = await post<{ shrunk: number; total: number; noop: number; failed: number; error_sample?: string[] }>(
+      "/api/thailandnow/seo/apply-image-shrink-bulk", { items });
+    if (res.ok && res.data) {
+      const d = res.data;
+      setShrinkBulkMsg(`Shrunk ${d.shrunk}/${d.total}`
+        + (d.noop ? ` · ${d.noop} no-match` : "") + (d.failed ? ` · ${d.failed} failed` : "")
+        + fmtRateHint(d.error_sample) + " Re-scan to refresh.");
+      setReport((prev) => prev
+        ? { ...prev, oversized_images: (prev.oversized_images ?? []).filter((o) => o.klass !== "full-used") }
+        : prev);
+    } else {
+      setShrinkBulkMsg(`Error: ${res.error || "failed"}`);
+    }
+  };
+
+  const handleDeleteUnused = async () => {
+    const ids = (report?.oversized_images ?? [])
+      .filter((m) => m.klass === "unused" && m.id).map((m) => m.id!);
+    if (!ids.length) return;
+    setDeleteBulkMsg(`deleting ${ids.length} unused images…`);
+    const res = await post<{ deleted: number; total: number; failed: number; error_sample?: string[] }>(
+      "/api/thailandnow/seo/delete-media-bulk", { ids });
+    if (res.ok && res.data) {
+      const d = res.data;
+      setDeleteBulkMsg(`Deleted ${d.deleted}/${d.total}`
+        + (d.failed ? ` · ${d.failed} failed` : "") + fmtRateHint(d.error_sample)
+        + " Re-scan to refresh.");
+      setReport((prev) => prev
+        ? { ...prev, oversized_images: (prev.oversized_images ?? []).filter((o) => o.klass !== "unused") }
+        : prev);
+    } else {
+      setDeleteBulkMsg(`Error: ${res.error || "failed"}`);
     }
   };
 
@@ -1499,24 +1560,53 @@ function HealthSubTab() {
             </HealthList>
           )}
 
-          {r.oversized_images && r.oversized_images.length > 0 && (
-            <HealthList title="OVERSIZED IMAGES" count={r.oversized_images.length} accent="var(--color-hazard)"
-              hint="media-library images above the size threshold (opts: seo_image_max_bytes, default 1 MB). SHRINK swaps the content src for WP's generated large/1536 variant — no visual change, big byte cut. ✎ opens the WP media editor.">
-              {r.oversized_images.map((m, i) => {
+          {r.oversized_images && r.oversized_images.length > 0 && (() => {
+            const imgs = r.oversized_images;
+            const fullUsed = imgs.filter((m) => m.klass === "full-used" || (!m.klass && (m.used_in?.length ?? 0) > 0));
+            const unused = imgs.filter((m) => m.klass === "unused");
+            const served = imgs.filter((m) => m.klass === "variant-used" || m.klass === "featured");
+            const shrinkItems = fullUsed.flatMap((m) => (m.used_in ?? [])
+              .filter((u) => u.from_id && m.shrink_to)
+              .map((u) => ({ post_id: u.from_id!, old_src: m.source_url, new_src: m.shrink_to! })));
+            return (
+            <HealthList title="OVERSIZED IMAGES" count={imgs.length} accent="var(--color-hazard)"
+              hint={`library images above 1 MB (opts: seo_image_max_bytes). FULL-USED ${fullUsed.length} · UNUSED ${unused.length} · SERVED-SMALL/FEATURED ${served.length}. SHRINK swaps the src to WP's 1024 variant (no visual change). DELETE is PERMANENT — WP media has no trash; scan-verified unused only.`}>
+              {fullUsed.length > 0 && (
+                <div className="my-1">
+                  {shrinkBulkConfirm ? (
+                    <div className="p-2 border bg-shade flex flex-col gap-1" style={{ borderColor: "var(--color-critical)" }}>
+                      <div className="mono text-xs font-bold" style={{ color: "var(--color-critical)" }}>
+                        CONFIRM SHRINK ALL — {shrinkItems.length} embeds across {fullUsed.length} images
+                      </div>
+                      <div className="mono text-xs text-muted">Each swaps the embedded full-size src for its WP 1024/1536 variant. Paced 1 write/s.</div>
+                      <div className="flex gap-2">
+                        <button className="btn btn--compact btn--crit" disabled={!!shrinkBulkMsg?.startsWith("shrinking")}
+                          onClick={() => void handleShrinkAll()}>CONFIRM — SHRINK ALL</button>
+                        <button className="btn btn--compact" onClick={() => setShrinkBulkConfirm(false)}>CANCEL</button>
+                      </div>
+                    </div>
+                  ) : (
+                    <button className="btn btn--compact btn--crit" onClick={() => { setShrinkBulkConfirm(true); setShrinkBulkMsg(null); }}>
+                      SHRINK ALL ({shrinkItems.length})
+                    </button>
+                  )}
+                  {shrinkBulkMsg && <div className="mono text-xs mt-1" style={{ color: "var(--color-signal)" }}>{shrinkBulkMsg}</div>}
+                </div>
+              )}
+              {fullUsed.map((m, i) => {
                 const uses = m.used_in ?? [];
                 return (
-                  <div key={`oi-${i}`} className="text-sm mt-1 flex flex-col gap-0.5">
+                  <div key={`of-${i}`} className="text-sm mt-1 flex flex-col gap-0.5">
                     <div>
                       <span className="mono" style={{ color: "var(--color-hazard)" }}>{fmtBytes(m.filesize)}</span>{" "}
                       <a href={m.source_url} target="_blank" rel="noreferrer" style={{ color: "var(--color-phosphor)" }}>{m.source_url.split("/").pop() || m.source_url}</a>
-                      {m.shrink_to && <span className="mono text-xs ml-2" style={{ color: "var(--color-go)" }}>→ smaller WP size available</span>}
+                      <span className="mono text-xs ml-2" style={{ color: "var(--color-muted)" }}>[full-used]</span>
                       {m.id != null && (() => {
                         const mediaUrl = (() => { try { return `${new URL(m.source_url).origin}/wp-admin/upload.php?item=${m.id}`; } catch { return null; } })();
                         return mediaUrl
                           ? <a className="seo-icon seo-icon--edit" href={mediaUrl} target="_blank" rel="noreferrer" title="Edit in WP media library">✎</a>
                           : null;
                       })()}
-                      {!uses.length && <span className="mono text-xs ml-2" style={{ color: "var(--color-muted)" }}>[not used in post content — library-only]</span>}
                     </div>
                     {uses.map((u, j) => {
                       const rowKey = `sh-${i}-${j}-${u.from_id}`;
@@ -1561,8 +1651,56 @@ function HealthSubTab() {
                   </div>
                 );
               })}
+              {unused.length > 0 && (
+                <div className="my-1 mt-2">
+                  {deleteBulkConfirm ? (
+                    <div className="p-2 border bg-shade flex flex-col gap-1" style={{ borderColor: "var(--color-critical)" }}>
+                      <div className="mono text-xs font-bold" style={{ color: "var(--color-critical)" }}>
+                        CONFIRM DELETE — {unused.length} unused images, PERMANENT
+                      </div>
+                      <div className="mono text-xs text-muted">
+                        Scan-verified: none is embedded in content, none is a featured image. WP media cannot be trashed — this cannot be undone from WordPress.
+                      </div>
+                      <div className="flex gap-2">
+                        <button className="btn btn--compact btn--crit" disabled={!!deleteBulkMsg?.startsWith("deleting")}
+                          onClick={() => void handleDeleteUnused()}>CONFIRM — DELETE PERMANENTLY</button>
+                        <button className="btn btn--compact" onClick={() => setDeleteBulkConfirm(false)}>CANCEL</button>
+                      </div>
+                    </div>
+                  ) : (
+                    <button className="btn btn--compact btn--crit" onClick={() => { setDeleteBulkConfirm(true); setDeleteBulkMsg(null); }}>
+                      DELETE UNUSED ({unused.length})
+                    </button>
+                  )}
+                  {deleteBulkMsg && <div className="mono text-xs mt-1" style={{ color: "var(--color-signal)" }}>{deleteBulkMsg}</div>}
+                </div>
+              )}
+              {unused.map((m, i) => (
+                <div key={`ou-${i}`} className="text-sm mt-1">
+                  <span className="mono" style={{ color: "var(--color-hazard)" }}>{fmtBytes(m.filesize)}</span>{" "}
+                  <a href={m.source_url} target="_blank" rel="noreferrer" style={{ color: "var(--color-phosphor)" }}>{m.source_url.split("/").pop() || m.source_url}</a>
+                  <span className="mono text-xs ml-2" style={{ color: "var(--color-muted)" }}>[unused — deletable]</span>
+                  {m.id != null && (() => {
+                    const mediaUrl = (() => { try { return `${new URL(m.source_url).origin}/wp-admin/upload.php?item=${m.id}`; } catch { return null; } })();
+                    return mediaUrl
+                      ? <a className="seo-icon seo-icon--edit" href={mediaUrl} target="_blank" rel="noreferrer" title="Edit in WP media library">✎</a>
+                      : null;
+                  })()}
+                </div>
+              ))}
+              {served.length > 0 && (
+                <div className="mono text-xs mt-2" style={{ color: "var(--color-muted)" }}>
+                  SERVED-SMALL / FEATURED ({served.length}) — a smaller variant is embedded or the image is a featured image; no page loads the full file. No action needed.
+                  {served.map((m, i) => (
+                    <div key={`os-${i}`} style={{ marginLeft: "1rem" }}>
+                      {fmtBytes(m.filesize)} {m.source_url.split("/").pop()} [{m.klass}]
+                    </div>
+                  ))}
+                </div>
+              )}
             </HealthList>
-          )}
+            );
+          })()}
 
           {r.internal_manual_check && r.internal_manual_check.length > 0 && (
             <HealthList
