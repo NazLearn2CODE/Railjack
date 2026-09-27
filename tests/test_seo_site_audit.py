@@ -26,6 +26,12 @@ def _no_jev_meter(monkeypatch, tmp_path):
     monkeypatch.setattr(jev_gates, "CACHE_DIR", tmp_path / "cache")
 
 
+@pytest.fixture(autouse=True)
+def _fresh_content_cache(monkeypatch):
+    """The content snapshot is a module global — tests must not leak into each other."""
+    monkeypatch.setattr(thailandnow, "_SEO_CONTENT_CACHE", None)
+
+
 SITE = "https://www.thailandnow.in.th"
 
 
@@ -628,3 +634,115 @@ def test_apply_image_shrink_bulk_counts(client, fake_wp, monkeypatch):
     d = r.json()
     assert d["shrunk"] == 1 and d["noop"] == 1 and d["failed"] == 0
     assert d["total"] == 2
+
+
+# ------------------------------------------------------------------- scopes ---
+
+def test_content_cache_reuses_snapshot(monkeypatch):
+    calls = {"n": 0}
+
+    async def fake_fetch_all():
+        calls["n"] += 1
+        return [], [], [], [], set(), set()
+
+    monkeypatch.setattr(thailandnow, "_seo_fetch_all", fake_fetch_all)
+    first, cached1 = asyncio.run(thailandnow._seo_fetch_all_cached())
+    second, cached2 = asyncio.run(thailandnow._seo_fetch_all_cached())
+    assert calls["n"] == 1 and not cached1 and cached2 and first is second
+
+
+def test_content_cache_ttl_expires(monkeypatch):
+    calls = {"n": 0}
+
+    async def fake_fetch_all():
+        calls["n"] += 1
+        return [], [], [], [], set(), set()
+
+    monkeypatch.setattr(thailandnow, "_seo_fetch_all", fake_fetch_all)
+    monkeypatch.setattr(thailandnow, "_opts", lambda: {"seo_content_cache_ttl_s": 0})
+    asyncio.run(thailandnow._seo_fetch_all_cached())
+    asyncio.run(thailandnow._seo_fetch_all_cached())
+    assert calls["n"] == 2  # ttl 0 → always fresh
+
+
+def test_flow_scope_sitemap_skips_content(monkeypatch):
+    async def boom(*a, **k):
+        raise AssertionError("fetch_all must not run in sitemap scope")
+
+    async def fake_urls():
+        return [f"{SITE}/a/", f"{SITE}/b/"], ""
+
+    async def fake_hyg(urls):
+        return {"checked": 2, "redirects": [], "noindex": [], "broken": [], "manual": [],
+                "ok": [f"{SITE}/a/"], "challenge_loops": 0}
+
+    monkeypatch.setattr(thailandnow, "_seo_fetch_all", boom)
+    monkeypatch.setattr(thailandnow, "_seo_sitemap_urls", fake_urls)
+    monkeypatch.setattr(thailandnow, "_seo_sitemap_hygiene", fake_hyg)
+    monkeypatch.setattr(thailandnow, "_wp_creds", lambda: (SITE, "u", "p"))
+    monkeypatch.setattr(thailandnow, "_wp_site_host", lambda: "www.thailandnow.in.th")
+    job = _flow_job()
+    asyncio.run(thailandnow._flow_seo_health(job, scope="sitemap"))
+    assert job.result["scope"] == "sitemap"
+    assert job.result["sitemap"]["checked"] == 2
+    assert "orphans" not in job.result
+
+
+def test_flow_scope_images_no_probes(monkeypatch):
+    probe_hits = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        probe_hits["n"] += 1
+        return httpx.Response(200, text="<p>x</p>")
+
+    async def fake_fetch_all():
+        posts = [_rec(1, "/linker/", f'<p><img src="{SITE}/heavy.jpg"></p>')]
+        return posts, [], [], [], set(), set()
+
+    async def fake_oversized():
+        return [{"id": 9, "source_url": f"{SITE}/heavy.jpg", "filesize": 3_000_000,
+                 "shrink_to": f"{SITE}/heavy-1024x576.jpg"}], ""
+
+    monkeypatch.setattr(thailandnow, "_wp_creds", lambda: (SITE, "u", "p"))
+    monkeypatch.setattr(thailandnow, "_wp_site_host", lambda: "www.thailandnow.in.th")
+    monkeypatch.setattr(thailandnow, "_seo_fetch_all", fake_fetch_all)
+    monkeypatch.setattr(thailandnow, "_seo_oversized_media", fake_oversized)
+    _mock_client(monkeypatch, handler)
+    job = _flow_job()
+    asyncio.run(thailandnow._flow_seo_health(job, scope="images"))
+    res = job.result
+    assert res["scope"] == "images"
+    assert res["oversized_images"][0]["klass"] == "full-used"
+    assert probe_hits["n"] == 0  # REST only — no probing at all
+    assert "broken_external_links" not in res
+
+
+def test_flow_scope_links_no_sitemap_section(monkeypatch):
+    posts = [_rec(1, "/linker/", '<p><a href="/target/">t</a></p>'),
+             _rec(2, "/target/", "<p>x</p>")]
+
+    async def fake_fetch_all():
+        return posts, [], [], [], set(), set()
+
+    async def fake_chrome(extra, host):
+        return set(), 0, 0
+
+    async def boom(*a, **k):
+        raise AssertionError("sitemap must not run in links scope")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="<html><body>fine</body></html>")
+
+    monkeypatch.setattr(thailandnow, "_wp_creds", lambda: (SITE, "u", "p"))
+    monkeypatch.setattr(thailandnow, "_wp_site_host", lambda: "www.thailandnow.in.th")
+    monkeypatch.setattr(thailandnow, "_seo_fetch_all", fake_fetch_all)
+    monkeypatch.setattr(thailandnow, "_seo_chrome_inbound", fake_chrome)
+    monkeypatch.setattr(thailandnow, "_seo_sitemap_urls", boom)
+    monkeypatch.setattr(thailandnow, "_seo_oversized_media", boom)
+    _mock_client(monkeypatch, handler)
+    job = _flow_job()
+    asyncio.run(thailandnow._flow_seo_health(job, scope="links"))
+    res = job.result
+    assert res["scope"] == "links"
+    assert "sitemap" not in res and "oversized_images" not in res
+    assert {thailandnow._seo_path(o["link"]) for o in res["orphans"]} == {"/linker"}

@@ -61,6 +61,7 @@ modules:
       seo_waf_cookie: ""
       seo_sitemap_concurrency: 3                        # sitemap probe is a big same-site burst — keep gentle
       seo_sitemap_delay_s: 0.25                         # per-request pause in the sitemap probe
+      seo_content_cache_ttl_s: 21600                    # content snapshot shared across scoped scans (6 h)
   - id: codeatlas
     title: CODEATLAS
     kind: panel          # named-target architecture maps (agy lane → <target>/CODEATLAS/)

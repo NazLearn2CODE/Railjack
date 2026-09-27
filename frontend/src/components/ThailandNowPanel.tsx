@@ -178,7 +178,8 @@ const TIER_COLORS: Record<string, string> = {
   "dead-end": "var(--color-critical)",
 };
 interface HealthReport {
-  post_count: number; page_count: number; event_count: number; other_cpt_count?: number; valid_paths: number;
+  scope?: "full" | "sitemap" | "links" | "images";
+  post_count?: number; page_count: number; event_count: number; other_cpt_count?: number; valid_paths: number;
   broken_internal_links: { from: string; from_id?: number; from_title: string; to: string; href?: string; reason?: string }[];
   internal_manual_check?: { from: string; from_id?: number; from_title: string; to: string; href?: string; reason?: string }[];
   broken_internal_images: { from: string; from_id?: number; from_title: string; src: string; status?: number }[];
@@ -191,7 +192,7 @@ interface HealthReport {
   oversized_images?: OversizedImage[];
   sitemap?: SitemapHygiene;
   scan_notes?: string[];
-  external_checked: number; at: string;
+  external_checked?: number; at: string;
 }
 
 /** Internal link that 3xx-redirects (probed live, or caught via the sitemap redirect map). */
@@ -659,7 +660,7 @@ function HealthSubTab() {
   const [err, setErr] = useState<string | null>(null);
   
   const jobs = jobsData?.jobs ?? [];
-  const scanJob = jobs.find((j) => j.kind === "seo-health") ?? null;
+  const scanJob = [...jobs].reverse().find((j) => j.kind === "seo-health") ?? null;
   const scanning = !!scanJob && (scanJob.status === "queued" || scanJob.status === "running");
 
   // Slice 2: Preview / Fix / Dismiss / Bulk states
@@ -1000,9 +1001,9 @@ function HealthSubTab() {
     await refetchJobs();
   };
 
-  const startScan = useCallback(async () => {
+  const startScan = useCallback(async (scope: string = "full") => {
     setErr(null);
-    const r = await post<{ id: string }>("/api/thailandnow/seo/scan", {});
+    const r = await post<{ id: string }>("/api/thailandnow/seo/scan", { scope });
     if (!r.ok) { setErr(r.error ?? "SCAN failed to start"); return; }
     await refetchJobs();
   }, [refetchJobs]);
@@ -1016,7 +1017,14 @@ function HealthSubTab() {
     for (const j of newly) {
       if (j.kind !== "seo-health") continue;
       fetchJSON<HealthReport>(`/api/thailandnow/seo/report/${j.id}`)
-        .then(setReport)
+        .then((fresh) => {
+          setReport((prev) => {
+            // sub-scope runs carry only their sections — merge into the cached
+            // report; a FULL run replaces it wholesale
+            if (fresh.scope && fresh.scope !== "full" && prev) return { ...prev, ...fresh };
+            return fresh;
+          });
+        })
         .catch(() => setErr("failed to fetch the report"));
     }
   }, [jobs, setReport]);
@@ -1046,9 +1054,16 @@ function HealthSubTab() {
   return (
     <section className="hud hud--bracket reveal reveal-1 p-3 flex flex-col gap-2">
       <div className="flex flex-wrap items-center gap-2">
-        <button className="btn btn--signal" disabled={scanning} onClick={startScan}>
-          {scanning ? "SCANNING…" : "SCAN"}
+        <button className="btn btn--signal" disabled={scanning} onClick={() => void startScan("full")}>
+          {scanning ? "SCANNING…" : "SCAN (FULL)"}
         </button>
+        {([["sitemap", "SITEMAP"], ["links", "LINKS"], ["images", "IMAGES"]] as const).map(([sc, label]) => (
+          <button key={sc} className="btn btn--compact" disabled={scanning}
+            title={`Run only the ${sc} checks — small same-site footprint, merges into the cached report`}
+            onClick={() => void startScan(sc)}>
+            {label}
+          </button>
+        ))}
         {scanJob && (
           <div className="flex items-center gap-2">
             <span className="pip" style={{
@@ -1081,7 +1096,7 @@ function HealthSubTab() {
       {r ? (
         <div className="flex flex-col gap-2">
           <div className="mono" style={{ color: "var(--color-muted)" }}>
-            {r.post_count} posts / {r.page_count} pages / {r.event_count} events{r.other_cpt_count ? ` / ${r.other_cpt_count} CPTs` : ""} · {r.external_checked} external checked · {r.at}
+            [{(r.scope || "full").toUpperCase()}]{typeof r.post_count === "number" && ` ${r.post_count} posts / ${r.page_count} pages / ${r.event_count} events${r.other_cpt_count ? ` / ${r.other_cpt_count} CPTs` : ""} ·`}{typeof r.external_checked === "number" && ` ${r.external_checked} external checked ·`} {r.at}
           </div>
 
           {r.scan_notes && r.scan_notes.length > 0 && (
@@ -1560,8 +1575,8 @@ function HealthSubTab() {
             </HealthList>
           )}
 
-          {r.oversized_images && r.oversized_images.length > 0 && (() => {
-            const imgs = r.oversized_images;
+          {(() => {
+            const imgs = r.oversized_images ?? [];
             const fullUsed = imgs.filter((m) => m.klass === "full-used" || (!m.klass && (m.used_in?.length ?? 0) > 0));
             const unused = imgs.filter((m) => m.klass === "unused");
             const served = imgs.filter((m) => m.klass === "variant-used" || m.klass === "featured");
@@ -1570,7 +1585,9 @@ function HealthSubTab() {
               .map((u) => ({ post_id: u.from_id!, old_src: m.source_url, new_src: m.shrink_to! })));
             return (
             <HealthList title="OVERSIZED IMAGES" count={imgs.length} accent="var(--color-hazard)"
-              hint={`library images above 1 MB (opts: seo_image_max_bytes). FULL-USED ${fullUsed.length} · UNUSED ${unused.length} · SERVED-SMALL/FEATURED ${served.length}. SHRINK swaps the src to WP's 1024 variant (no visual change). DELETE is PERMANENT — WP media has no trash; scan-verified unused only.`}>
+              hint={imgs.length
+                ? `library images above 1 MB (opts: seo_image_max_bytes). FULL-USED ${fullUsed.length} · UNUSED ${unused.length} · SERVED-SMALL/FEATURED ${served.length}. SHRINK swaps the src to WP's 1024 variant (no visual change). DELETE is PERMANENT — WP media has no trash; scan-verified unused only.`
+                : "no oversized data in this report — the media listing was likely blocked this run (see SCAN NOTES). Run the IMAGES scan — it is cheap (REST-only) and fills this section."}>
               {fullUsed.length > 0 && (
                 <div className="my-1">
                   {shrinkBulkConfirm ? (

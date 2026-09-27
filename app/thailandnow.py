@@ -4573,46 +4573,144 @@ def _seo_internal_link_reason(raw_href: str, site_host: str) -> str:
     return "not a published page"
 
 
-async def _flow_seo_health(job: "TnJob") -> None:
-    """HEALTH scan: fetch WP content → internal report → orphan suggestions →
-    external HTTP checks → assemble the full report into ``job.result``. Honours
-    ``job.cancel`` between phases + between external-check batches (raises
-    _TnCancelled). Rides the shared TnJob store (kind=seo-health)."""
-    job.progress = 5
-    posts, pages, events, other_cpts, media, extra = await _seo_fetch_all()
-    if job.cancel:
-        raise _TnCancelled()
-    job.progress = 15
+_SEO_SCOPES = ("full", "sitemap", "links", "images")
+_SEO_CONTENT_CACHE: tuple[tuple, float] | None = None  # _seo_fetch_all() → (result, ts)
+
+
+async def _seo_fetch_all_cached() -> tuple[tuple, bool]:
+    """Content snapshot shared across sub-scans (opts: ``seo_content_cache_ttl_s``,
+    default 6 h) — a SITEMAP/IMAGES/LINKS re-scan reuses it instead of re-pulling
+    every REST page. Returns (fetch_all_result, from_cache)."""
+    global _SEO_CONTENT_CACHE
+    ttl = max(0.0, float(_opts().get("seo_content_cache_ttl_s", 6 * 3600)))
+    if _SEO_CONTENT_CACHE and (time.time() - _SEO_CONTENT_CACHE[1]) < ttl:
+        return _SEO_CONTENT_CACHE[0], True
+    out = await _seo_fetch_all()
+    _SEO_CONTENT_CACHE = (out, time.time())
+    return out, False
+
+
+async def _flow_seo_health(job: "TnJob", scope: str = "full") -> None:
+    """HEALTH scan, scopeable (Naz, 2026-09-27: full scans cost ~1000 same-site
+    requests and trip the site's rate limiters):
+
+    - ``sitemap`` — the biggest same-site burst alone (~750 gentle GETs)
+    - ``images``  — media listing + oversized classification (REST reads only)
+    - ``links``   — content + chrome + link/image probes + orphans
+    - ``full``    — all of it (the classic run)
+
+    Sub-scan results carry ONLY their sections (``scope`` tags the report) — the
+    frontend merges them into the cached HealthReport. Content comes from a
+    TTL snapshot shared between sub-scans, so re-scans are cheap. Honours
+    ``job.cancel`` between phases + probe batches (raises _TnCancelled)."""
+    if scope not in _SEO_SCOPES:
+        scope = "full"
+    at = datetime.now().isoformat(timespec="seconds")
+    scan_notes: list[str] = []  # degraded inputs — surfaced in the report, never silent
     site_host = _wp_site_host()
     site_origin = _wp_creds()[0].rstrip("/")  # e.g. "https://www.thailandnow.in.th"
-    scan_notes: list[str] = []  # degraded inputs — surfaced in the report, never silent
-    # FRAGILE-FIRST: the sitemap probe is the biggest site-facing burst (hundreds of
-    # GETs) — run it while the firewall is calm. The later link probes re-arm the
-    # Sucuri challenge; sitemap/chrome/media data is what we can't afford to lose.
-    sitemap_urls: list[str] = []
-    sitemap_note = ""
-    try:
-        sitemap_urls, sitemap_note = await _seo_sitemap_urls()
-    except (httpx.HTTPError, OSError) as e:
-        sitemap_urls, sitemap_note = [], f"sitemap unreachable ({e})"[:120]
-    hygiene = await _seo_sitemap_hygiene(sitemap_urls)
-    hygiene["note"] = sitemap_note
-    if sitemap_note:
-        scan_notes.append(f"sitemap: {sitemap_note}")
+
+    # --- SITEMAP scope: the biggest site-facing burst, run alone and gently ---
+    if scope == "sitemap":
+        job.progress = 10
+        urls: list[str] = []
+        note = ""
+        try:
+            urls, note = await _seo_sitemap_urls()
+        except (httpx.HTTPError, OSError) as e:
+            note = f"sitemap unreachable ({e})"[:120]
+        hygiene = await _seo_sitemap_hygiene(urls)
+        hygiene["note"] = note
+        if note:
+            scan_notes.append(f"sitemap: {note}")
+        if int(hygiene.get("challenge_loops", 0)) >= 3:
+            scan_notes.append(
+                f"{hygiene['challenge_loops']} URLs looped a redirect to themselves — "
+                "firewall challenge; sitemap results may be partial")
+        job.progress = 95
+        job.result = {"scope": "sitemap", "sitemap": hygiene,
+                      "scan_notes": scan_notes, "at": at}
+        return
+
+    job.progress = 5
+    (posts, pages, events, other_cpts, media, extra), from_cache = await _seo_fetch_all_cached()
+    if from_cache:
+        age_min = int((time.time() - (_SEO_CONTENT_CACHE or (0, 0))[1]) // 60)
+        scan_notes.append(
+            f"content snapshot reused from cache ({age_min} min old — "
+            "seo_content_cache_ttl_s; edits younger than that are not reflected)")
     if job.cancel:
         raise _TnCancelled()
-    job.progress = 40
+
+    # --- IMAGES scope: media listing + classification, no probes at all ---
+    if scope == "images":
+        job.progress = 40
+        oversized, oversized_note = await _seo_oversized_media()
+        if oversized_note:
+            scan_notes.append(oversized_note)
+        rep = _seo_internal_report(posts, pages, events, other_cpts, media, extra, site_host)
+        img_pairs_all = rep.pop("internal_img_pairs_all", [])
+        if oversized:
+            src_uses: dict[str, list[dict]] = {}
+            content_bases: set[str] = set()
+            for pr in img_pairs_all:
+                src_uses.setdefault(pr["src"], []).append(
+                    {"from": pr["from"], "from_id": pr["from_id"], "from_title": pr["from_title"]})
+                content_bases.add(_seo_img_base(pr["src"]))
+            featured_ids = {r.get("featured_media") for r in (posts + pages + events + other_cpts)
+                            if r.get("featured_media")}
+            for o in oversized:
+                src = o.get("source_url") or ""
+                o["used_in"] = src_uses.get(src, [])
+                o["featured"] = o.get("id") in featured_ids
+                if o["used_in"]:
+                    o["klass"] = "full-used"
+                elif o["featured"]:
+                    o["klass"] = "featured"
+                elif _seo_img_base(src) in content_bases:
+                    o["klass"] = "variant-used"
+                else:
+                    o["klass"] = "unused"
+        job.progress = 95
+        job.result = {"scope": "images", "oversized_images": oversized,
+                      "post_count": len(posts), "page_count": len(pages),
+                      "event_count": len(events), "other_cpt_count": len(other_cpts),
+                      "scan_notes": scan_notes, "at": at}
+        return
+
+    # --- FULL / LINKS share the content-graph body below ---
+    job.progress = 15
+    scan_notes_append = scan_notes.append
+    if scope == "full":
+        # FRAGILE-FIRST: the sitemap probe is the biggest site-facing burst (hundreds
+        # of GETs) — run it while the firewall is calm. The later link probes re-arm
+        # the Sucuri challenge; sitemap/chrome/media data is what we can't lose.
+        sitemap_urls: list[str] = []
+        sitemap_note = ""
+        try:
+            sitemap_urls, sitemap_note = await _seo_sitemap_urls()
+        except (httpx.HTTPError, OSError) as e:
+            sitemap_urls, sitemap_note = [], f"sitemap unreachable ({e})"[:120]
+        hygiene = await _seo_sitemap_hygiene(sitemap_urls)
+        hygiene["note"] = sitemap_note
+        if sitemap_note:
+            scan_notes_append(f"sitemap: {sitemap_note}")
+        if job.cancel:
+            raise _TnCancelled()
+        job.progress = 40
     # Theme-chrome inbound links (menus/footers/homepage/archives) — the Ahrefs-parity
     # fix for orphan detection. Best-effort: fetch failures just shrink the set.
     chrome_inbound, chrome_fetched, chrome_attempted = await _seo_chrome_inbound(extra, site_host)
     if chrome_attempted and chrome_fetched < chrome_attempted:
-        scan_notes.append(
+        scan_notes_append(
             f"theme-chrome crawl fetched {chrome_fetched}/{chrome_attempted} pages — "
             "orphan counts may run high (some inbound links unseen)")
-    # OVERSIZED IMAGES early as well (single authed REST call, degrades loudly)
-    oversized, oversized_note = await _seo_oversized_media()
-    if oversized_note:
-        scan_notes.append(oversized_note)
+    oversized: list[dict] = []
+    if scope == "full":
+        # OVERSIZED IMAGES early as well (single authed REST call, degrades loudly)
+        oversized, oversized_note = await _seo_oversized_media()
+        if oversized_note:
+            scan_notes_append(oversized_note)
     rep = _seo_internal_report(posts, pages, events, other_cpts, media, extra, site_host,
                                chrome_inbound=chrome_inbound)
     job.progress = 50
@@ -4649,7 +4747,7 @@ async def _flow_seo_health(job: "TnJob") -> None:
             if has_exact:
                 break  # best tier reached — stop scanning hosts
         o["tier"] = _seo_orphan_tier(len(host_htmls), has_exact, has_related)
-    job.progress = 50
+    job.progress = 55
     # HTTP-verify external links/images, internal image candidates, AND internal
     # link candidates (Fix 1). Internal links use authed probe (Sucuri bypass).
     ext = sorted(set(rep["external_links"]) | set(rep["external_imgs"]))
@@ -4773,12 +4871,40 @@ async def _flow_seo_health(job: "TnJob") -> None:
         for i, fut in enumerate(asyncio.as_completed(tasks), 1):
             await fut
             if i % conc == 0:
-                job.progress = min(90, 50 + int(40 * i / total))
+                job.progress = min(90, 55 + int(35 * i / total))
                 if job.cancel:
                     for t in tasks:
                         t.cancel()
                     raise _TnCancelled()
     job.progress = 90
+
+    if scope == "links":
+        for k in ("internal_link_pairs_all", "valid_paths_list", "record_paths_list"):
+            rep.pop(k, None)
+        total_loops = challenge_loops
+        if total_loops >= 3:
+            scan_notes.append(
+                f"{total_loops} URLs looped a redirect to themselves — the site firewall "
+                "(Sucuri) intermittently challenges scanners; redirect findings this run "
+                "undercount reality")
+        job.progress = 95
+        job.result = {
+            **rep,
+            "scope": "links",
+            "broken_internal_links": broken_internal,
+            "internal_manual_check": internal_manual,
+            "broken_internal_images": broken_images,
+            "image_manual_check": image_manual,
+            "broken_external_links": broken_external,
+            "manual_check": manual_check,
+            "redirecting_internal_links": redirecting_internal,
+            "external_checked": len(ext),
+            "scan_notes": scan_notes,
+            "at": at,
+        }
+        return
+
+    # --- FULL assembly ---
     # sitemap redirect path map → flag content links riding those redirects even
     # when the old path is still a "valid" WP path (the HTTP probe never saw them).
     redir_paths = {r["url_path"]: r.get("final_path", "") for r in hygiene["redirects"]
@@ -4805,9 +4931,6 @@ async def _flow_seo_health(job: "TnJob") -> None:
     hygiene["unlinked"] = {"count": len(unlinked), "urls": unlinked[:200]}
     hygiene["ok_count"] = len(hygiene.pop("ok", []))  # consumed — never store the full list
 
-    # per-post usage attribution from every internal <img src> in content — the
-    # SHRINK fixer rewrites these exact srcs per record (oversized fetched early,
-    # fragile-first: the media listing is one of the first reads the firewall blocks)
     # per-post usage attribution + per-image class from every internal <img src> in
     # content — the SHRINK fixer rewrites exact srcs; UNUSED entries are deletable.
     # Classes: full-used (content embeds the FULL file -> shrink),
@@ -4855,6 +4978,7 @@ async def _flow_seo_health(job: "TnJob") -> None:
     job.progress = 95
     job.result = {
         **rep,
+        "scope": "full",
         "broken_internal_links": broken_internal,
         "internal_manual_check": internal_manual,
         "broken_internal_images": broken_images,
@@ -4866,7 +4990,7 @@ async def _flow_seo_health(job: "TnJob") -> None:
         "sitemap": hygiene,
         "scan_notes": scan_notes,
         "external_checked": len(ext),
-        "at": datetime.now().isoformat(timespec="seconds"),
+        "at": at,
     }
 
 
@@ -5569,14 +5693,24 @@ class SeoInsertReq(BaseModel):
     href: str
 
 
+class SeoScanReq(BaseModel):
+    scope: str = "full"  # full | sitemap | links | images
+
+
 @router.post("/api/thailandnow/seo/scan")
-async def seo_scan():
+async def seo_scan(req: SeoScanReq | None = None):
     """HEALTH scan — kick off an async ``seo-health`` job. 409 if one is already
-    running (single-flight). Returns ``{id}``; poll ``/api/thailandnow/jobs`` +
-    fetch the report via ``/api/thailandnow/seo/report/{id}`` when done."""
+    running (single-flight). Body optional: ``{"scope": "full|sitemap|links|images"}``.
+    Returns ``{id}``; poll ``/api/thailandnow/jobs`` + fetch the report via
+    ``/api/thailandnow/seo/report/{id}`` when done (sub-scopes carry their sections
+    only — the frontend merges them into the cached report)."""
+    scope = (req.scope if req else "full") or "full"
+    if scope not in _SEO_SCOPES:
+        scope = "full"
     if any(j.kind == "seo-health" and j.status in _TN_RUNNING for j in _TN_JOBS.values()):
         raise HTTPException(409, "an SEO HEALTH scan is already running")
-    return _tn_spawn("seo-health", "SEO HEALTH scan", _flow_seo_health)
+    label = "SEO HEALTH scan" if scope == "full" else f"SEO HEALTH scan [{scope}]"
+    return _tn_spawn("seo-health", label, lambda job: _flow_seo_health(job, scope=scope))
 
 
 @router.get("/api/thailandnow/seo/report/{jid}")
