@@ -44,4 +44,7 @@ CODEATLAS/
 .ab-rt/
 .ab-cache/
 .scan_report.json
+.images_report.json
+.oversized_browser.json
+.featured_report.json
 .uv-cache/
