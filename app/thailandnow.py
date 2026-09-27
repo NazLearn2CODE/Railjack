@@ -4080,14 +4080,29 @@ def _wp_site_host() -> str:
     return h[4:] if h.startswith("www.") else h
 
 
+_WP_429_BACKOFF_S = (3.0, 8.0, 20.0)  # cumulative waits across the 4 attempts
+
+
 async def _wp(method: str, path: str, params: dict | None = None, json_body: dict | None = None):
     """Authed WP REST call (Basic auth via httpx). Returns parsed JSON or dict/None.
-    A 2xx with a non-JSON body (Sucuri/LiteSpeed HTML interstitial, seen live) is
-    retried once, then surfaced as an honest 502 carrying the body snippet."""
+    - A 2xx with a non-JSON body (Sucuri/LiteSpeed HTML interstitial, seen live) is
+      retried once, then surfaced as an honest 502 carrying the body snippet.
+    - A 429/503 rate limit (LiteSpeed's plain 429 page, seen live 2026-09-26) is
+      retried with backoff — honoring Retry-After (capped at 30 s) — instead of
+      failing the whole scan on the first burst-budget hiccup. The WAF clearance
+      cookie (opts: seo_waf_cookie) rides along; wp-json is same-site by definition."""
     url, user, pwd = _wp_creds()
+    target = f"{url}/wp-json/wp/v2{path}"
     async with httpx.AsyncClient(timeout=30, auth=(user, pwd), follow_redirects=True) as c:
-        for attempt in (1, 2):
-            r = await c.request(method, f"{url}/wp-json/wp/v2{path}", params=params or {}, json=json_body)
+        for attempt in range(1, 5):  # 1 real try + 3 backoffs
+            r = await c.request(method, target, params=params or {}, json=json_body,
+                                headers=_seo_site_headers(target))
+            if r.status_code in (429, 503) and attempt < 4:
+                retry_after = (r.headers.get("retry-after") or "").strip()
+                wait = min(30.0, float(retry_after)) if retry_after.replace(".", "", 1).isdigit() \
+                    else _WP_429_BACKOFF_S[attempt - 1]
+                await asyncio.sleep(wait)
+                continue
             if r.status_code >= 400:
                 raise HTTPException(502, f"WP {method} {path}: {r.status_code} {r.text[:200]}")
             if not r.content:
@@ -4095,10 +4110,11 @@ async def _wp(method: str, path: str, params: dict | None = None, json_body: dic
             try:
                 return r.json()
             except ValueError:
-                if attempt == 1:
+                if attempt < 4:
                     await asyncio.sleep(1.5)
                     continue
                 raise HTTPException(502, f"WP {method} {path}: non-JSON 2xx body: {r.text[:120]!r}")
+        raise HTTPException(502, f"WP {method} {path}: exhausted retries")  # unreachable
 
 
 _WP_RB_CACHE: dict[int, str] = {}           # post_id -> rest_base (process-lifetime)

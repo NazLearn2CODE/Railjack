@@ -502,3 +502,46 @@ def test_waf_cookie_same_site_only(monkeypatch):
     # feature OFF when opts carry no cookie:
     monkeypatch.setattr(thailandnow, "_opts", lambda: {})
     assert "Cookie" not in thailandnow._seo_site_headers(f"{SITE}/x")
+
+
+def test_wp_retries_429_with_backoff(monkeypatch):
+    """Live scar 2026-09-26: LiteSpeed's plain 429 killed the scan on the first
+    REST call. _wp must ride it out (Retry-After / staged backoff), not die."""
+    monkeypatch.setattr(thailandnow, "_WP_429_BACKOFF_S", (0.0, 0.0, 0.0))
+    monkeypatch.setattr(thailandnow, "_wp_creds", lambda: (SITE, "u", "p"))
+    sleeps: list[float] = []
+
+    async def fake_sleep(s):
+        sleeps.append(s)
+
+    monkeypatch.setattr(thailandnow.asyncio, "sleep", fake_sleep)
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            return httpx.Response(429, headers={"Retry-After": "0.01"}, text="429 Too Many Requests")
+        return httpx.Response(200, json=[{"id": 1}])
+
+    _mock_client(monkeypatch, handler)
+    out = asyncio.run(thailandnow._wp("GET", "/posts", {"per_page": 1}))
+    assert out == [{"id": 1}] and calls["n"] == 3
+    assert all(s == 0.01 for s in sleeps)  # Retry-After honored (already tiny)
+
+
+def test_wp_429_forever_surfaces_honest_502(monkeypatch):
+    monkeypatch.setattr(thailandnow, "_WP_429_BACKOFF_S", (0.0, 0.0, 0.0))
+    monkeypatch.setattr(thailandnow, "_wp_creds", lambda: (SITE, "u", "p"))
+
+    async def fake_sleep(s):
+        pass
+
+    monkeypatch.setattr(thailandnow.asyncio, "sleep", fake_sleep)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(429, text="429 Too Many Requests")
+
+    _mock_client(monkeypatch, handler)
+    with pytest.raises(HTTPException) as ei:
+        asyncio.run(thailandnow._wp("GET", "/posts"))
+    assert "429" in ei.value.detail and "WP GET /posts" in ei.value.detail
