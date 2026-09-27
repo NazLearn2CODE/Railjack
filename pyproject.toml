@@ -12,6 +12,7 @@ dependencies = [
     "numpy>=2",
     "pyjwt[crypto]>=2.9",  # GA service-account JWT signing (RSA) — TRAFFIC tab
     "pillow>=10.0",  # infographic watermark crop (newsroom [inf] pipeline)
+    "curl_cffi>=0.16",  # Chrome-TLS impersonation — Sucuri fingerprint-challenges plain httpx
 ]
 
 [project.optional-dependencies]

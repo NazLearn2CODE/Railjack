@@ -32,6 +32,13 @@ def _fresh_content_cache(monkeypatch):
     monkeypatch.setattr(thailandnow, "_SEO_CONTENT_CACHE", None)
 
 
+@pytest.fixture(autouse=True)
+def _no_curl_fallback(monkeypatch):
+    """Tests fake everything through httpx mocks — the real curl_cffi fallback must
+    never fire (it would escape to the network). Re-enabled per-test explicitly."""
+    monkeypatch.setattr(thailandnow, "_CURL_OK", False)
+
+
 SITE = "https://www.thailandnow.in.th"
 
 
@@ -746,3 +753,64 @@ def test_flow_scope_links_no_sitemap_section(monkeypatch):
     assert res["scope"] == "links"
     assert "sitemap" not in res and "oversized_images" not in res
     assert {thailandnow._seo_path(o["link"]) for o in res["orphans"]} == {"/linker"}
+
+
+def test_seo_challenge_detection():
+    assert thailandnow._seo_challenge("\t <html><title>You are being redirected...</title>")
+    assert thailandnow._seo_challenge("sucuri cloudproxy block page")
+    assert not thailandnow._seo_challenge("<html><body>totally fine</body></html>")
+
+
+def test_wp_falls_back_to_curl_on_challenge(monkeypatch):
+    """httpx gets the interstitial (200 + challenge body) → _wp retries the call
+    through the impersonated fallback instead of dying on non-JSON."""
+    monkeypatch.setattr(thailandnow, "_CURL_OK", True)
+    monkeypatch.setattr(thailandnow, "_wp_creds", lambda: (SITE, "u", "p"))
+    via_curl = {"n": 0}
+
+    async def fake_via_curl(method, target, params, json_body, auth):
+        via_curl["n"] += 1
+        return [{"id": 1}]
+
+    monkeypatch.setattr(thailandnow, "_wp_via_curl", fake_via_curl)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="\t <html><title>You are being redirected...</title></html>")
+
+    _mock_client(monkeypatch, handler)
+    out = asyncio.run(thailandnow._wp("GET", "/posts", {"per_page": 1}))
+    assert out == [{"id": 1}] and via_curl["n"] == 1
+
+
+def test_wp_no_fallback_when_curl_missing(monkeypatch):
+    """Without the optional dep the old degrade applies: non-JSON → honest 502."""
+    monkeypatch.setattr(thailandnow, "_CURL_OK", False)
+    monkeypatch.setattr(thailandnow, "_wp_creds", lambda: (SITE, "u", "p"))
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="\t <html><title>You are being redirected...</title></html>")
+
+    _mock_client(monkeypatch, handler)
+    with pytest.raises(HTTPException) as ei:
+        asyncio.run(thailandnow._wp("GET", "/posts"))
+    assert "non-JSON" in ei.value.detail
+
+
+def test_sitemap_hygiene_retries_challenge_as_chrome(monkeypatch):
+    """403 from httpx + impersonation available → retried as Chrome and classified
+    from the real response (ok bucket), not dumped into challenge loops."""
+    monkeypatch.setattr(thailandnow, "_CURL_OK", True)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.headers.get("user-agent", "").startswith("curl"):
+            pass  # curl_cffi sets its own UA — can't distinguish this way
+        return httpx.Response(403, text="<html>You are being redirected...</html>")
+
+    # the impersonated call goes through _curl_get — fake IT instead
+    async def fake_curl_get(url, **kw):
+        return 200, {"x-robots-tag": ""}, b"<html><body>clean</body></html>"
+
+    monkeypatch.setattr(thailandnow, "_curl_get", fake_curl_get)
+    _mock_client(monkeypatch, handler)
+    h = asyncio.run(thailandnow._seo_sitemap_hygiene([f"{SITE}/page/"]))
+    assert h["ok"] == [f"{SITE}/page/"] and h["challenge_loops"] == 0

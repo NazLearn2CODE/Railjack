@@ -4104,17 +4104,38 @@ async def _wp(method: str, path: str, params: dict | None = None, json_body: dic
                 await asyncio.sleep(wait)
                 continue
             if r.status_code >= 400:
+                if _CURL_OK and attempt < 4 and _seo_challenge(r.text):
+                    # fingerprint challenge — retry the whole call as Chrome
+                    return await _wp_via_curl(method, target, params, json_body, (user, pwd))
                 raise HTTPException(502, f"WP {method} {path}: {r.status_code} {r.text[:200]}")
             if not r.content:
                 return {}
             try:
                 return r.json()
             except ValueError:
+                if _CURL_OK and _seo_challenge(r.text):
+                    return await _wp_via_curl(method, target, params, json_body, (user, pwd))
                 if attempt < 4:
                     await asyncio.sleep(1.5)
                     continue
                 raise HTTPException(502, f"WP {method} {path}: non-JSON 2xx body: {r.text[:120]!r}")
         raise HTTPException(502, f"WP {method} {path}: exhausted retries")  # unreachable
+
+
+async def _wp_via_curl(method: str, target: str, params: dict | None,
+                       json_body: dict | None, auth: tuple):
+    """The fingerprint fallback: the same WP REST call via curl_cffi (Chrome TLS).
+    Raises HTTPException on status errors — callers treat it like a normal _wp."""
+    code, _, content = await _curl_get(target, timeout=30, auth=auth, json_body=json_body,
+                                       params=params, method=method)
+    if code >= 400:
+        raise HTTPException(502, f"WP {method} (impersonated): {code} {content[:200]!r}")
+    if not content:
+        return {}
+    try:
+        return json.loads(content)
+    except ValueError:
+        raise HTTPException(502, f"WP {method} (impersonated): non-JSON body: {content[:120]!r}")
 
 
 _WP_RB_CACHE: dict[int, str] = {}           # post_id -> rest_base (process-lifetime)
@@ -4571,6 +4592,49 @@ def _seo_internal_link_reason(raw_href: str, site_host: str) -> str:
     if _MANGLED_HOST_RE.search(raw_clean.lstrip("/")):
         return "likely a broken external link (missing scheme)"
     return "not a published page"
+
+
+# --- browser-fingerprint fallback ------------------------------------------
+# The site's firewall (Sucuri Cloudproxy) fingerprint-passes real browsers and
+# fingerprint-CHALLENGES plain HTTP clients (httpx, Ahrefs' crawler): a 307 to
+# self with a "You are being redirected..." JS page, or a 403 HTML block. No
+# clearance cookie is ever issued to browsers (verified 2026-09-27 — Firefox/
+# Chrome hold zero cookies for the domain), so the only way through is to SPEAK
+# browser: curl_cffi impersonates Chrome's TLS/HTTP fingerprint. Optional dep —
+# when it's missing the scanner degrades to today's httpx behavior (challenges
+# are classified + noted instead).
+
+try:
+    from curl_cffi.requests import AsyncSession as _CurlSession
+    _CURL_OK = True
+except Exception:  # noqa: BLE001 — optional dep
+    _CurlSession = None
+    _CURL_OK = False
+
+
+def _seo_challenge(text: str) -> bool:
+    """Pure: does this response body carry the firewall's challenge/block marker?"""
+    t = (text or "")[:3000].lower()
+    return ("you are being redirected" in t
+            or "javascript is required" in t
+            or ("sucuri" in t and "cloudproxy" in t))
+
+
+async def _curl_get(url: str, *, timeout: float = 20.0, auth: tuple | None = None,
+                    headers: dict | None = None, follow: bool = True,
+                    json_body: dict | None = None, params: dict | None = None,
+                    method: str = "GET") -> tuple[int, dict, bytes]:
+    """Request via curl_cffi impersonating Chrome (params stay in the query).
+    Returns (status, lowercase-headers-dict, content-bytes). Raises if the
+    optional dep is missing — callers guard with _CURL_OK."""
+    async with _CurlSession(impersonate="chrome", timeout=timeout,
+                            auth=auth, allow_redirects=follow) as s:
+        if json_body is not None or method in ("POST", "PUT", "DELETE"):
+            r = await s.request(method, url, params=params, json=json_body, headers=headers)
+        else:
+            r = await s.get(url, params=params, headers=headers)
+        lower = {str(k).lower(): str(v) for k, v in r.headers.items()}
+        return r.status_code, lower, r.content
 
 
 _SEO_SCOPES = ("full", "sitemap", "links", "images")
@@ -5333,18 +5397,34 @@ def _seo_site_headers(url: str, base: dict | None = None) -> dict:
 async def _seo_fetch_text(url: str, sem: asyncio.Semaphore, timeout: float,
                           max_bytes: int = 2_000_000) -> str:
     """GET a text resource (sitemap / theme chrome) with the browser UA, body capped.
-    Raises httpx.HTTPError / OSError on failure (caller decides soft vs hard)."""
+    Firewall challenge (block page or interstitial) → retried through curl_cffi as
+    Chrome when the optional dep is present. Raises httpx.HTTPError / OSError on
+    failure (caller decides soft vs hard)."""
     async with sem:
-        async with httpx.AsyncClient(timeout=timeout, follow_redirects=True,
-                                     headers=_seo_site_headers(url)) as c:
-            async with c.stream("GET", url) as r:
-                r.raise_for_status()
-                buf = bytearray()
-                async for chunk in r.aiter_bytes():
-                    buf += chunk
-                    if len(buf) >= max_bytes:
-                        break
-                return buf.decode("utf-8", errors="replace")
+        text = ""
+        try:
+            async with httpx.AsyncClient(timeout=timeout, follow_redirects=True,
+                                         headers=_seo_site_headers(url)) as c:
+                async with c.stream("GET", url) as r:
+                    r.raise_for_status()
+                    buf = bytearray()
+                    async for chunk in r.aiter_bytes():
+                        buf += chunk
+                        if len(buf) >= max_bytes:
+                            break
+                    text = buf.decode("utf-8", errors="replace")
+        except (httpx.HTTPError, OSError):
+            text = ""
+        if text and not _seo_challenge(text):
+            return text
+        if not _CURL_OK:
+            if text:
+                return text  # challenge body, no fallback — caller sees no <loc>
+            raise httpx.HTTPError(f"fetch failed (no impersonation fallback): {url}")
+        code, _, content = await _curl_get(url, timeout=timeout, follow=True)
+        if code >= 400:
+            raise httpx.HTTPError(f"{code} on {url}")
+        return content.decode("utf-8", errors="replace")[:max_bytes]
 
 
 async def _seo_sitemap_urls() -> tuple[list[str], str]:
@@ -5469,6 +5549,17 @@ async def _seo_sitemap_hygiene(urls: list[str]) -> dict:
         except (httpx.HTTPError, OSError):
             manual.append({"url": u, "reason": "timeout/error"})
             return
+        # fingerprint challenge (403 block page or any 3xx loop) → retry as Chrome;
+        # classification then runs on the impersonated response instead
+        if _CURL_OK and (status == 403 or status in _SEO_REDIRECT_STATUSES):
+            try:
+                code2, hdrs2, content2 = await _curl_get(u, timeout=timeout, follow=False)
+                status = code2
+                xrob = hdrs2.get("x-robots-tag") or ""
+                loc = hdrs2.get("location") or ""
+                buf = bytearray(content2[:300_000]) if status == 200 else bytearray()
+            except Exception:  # noqa: BLE001 — the fallback never kills the probe
+                pass
         entry = {"url": u, "url_path": _seo_path(u)}
         if status in _SEO_REDIRECT_STATUSES:
             final = await _seo_follow_redirects(u, loc, timeout)
