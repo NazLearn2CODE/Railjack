@@ -311,6 +311,22 @@ def test_apply_rewrite_bulk_counts(client, fake_wp):
     assert d["failed"] == 1 and len(d["results"]) == 3
 
 
+def test_apply_fix_bulk_surfaces_error_sample(client, fake_wp, monkeypatch):
+    """Live scar 2026-09-26: '29 failed' with zero reasons — every failure was the
+    rate limiter and the UI swallowed it. Bulk responses now carry a distinct-error
+    sample; inter-item pacing keeps the burst under the limiter."""
+    monkeypatch.setattr(thailandnow, "_opts", lambda: {"seo_bulk_delay_s": 0})
+    wp = fake_wp({7: '<p><img src="/x.jpg"></p>'}, missing_ids=(99,))
+    r = client.post("/api/thailandnow/seo/apply-fix-bulk", json={"items": [
+        {"post_id": 7, "kind": "image", "target": "/x.jpg"},
+        {"post_id": 99, "kind": "image", "target": "/y.jpg"},
+    ]})
+    d = r.json()
+    assert d["removed"] == 1 and d["failed"] == 1
+    assert d["error_sample"] and "not found" in d["error_sample"][0]
+    assert wp.puts  # the good item really wrote
+
+
 def test_image_shrink_endpoints(client, fake_wp):
     wp = fake_wp({11: f'<p><img src="{SITE}/big.jpg" alt="a"></p>'})
     body = {"post_id": 11, "old_src": f"{SITE}/big.jpg", "new_src": f"{SITE}/big-1024x576.jpg"}

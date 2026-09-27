@@ -613,6 +613,7 @@ function BulkConfirm({
             const items = getItems();
             const res = await post<{
               successful: number; total: number; removed: number; noop: number; failed: number;
+              error_sample?: string[];
               results: { ok: boolean; matches: number; post_id: number }[];
             }>("/api/thailandnow/seo/apply-fix-bulk", { items });
             if (res.ok && res.data) {
@@ -624,7 +625,14 @@ function BulkConfirm({
               const parts = [`Removed ${d.removed}/${d.total}`];
               if (d.noop) parts.push(`${d.noop} already gone`);
               if (d.failed) parts.push(`${d.failed} failed`);
-              setBulkProgress(parts.join(" · ") + ".");
+              let msg = parts.join(" · ") + ".";
+              if (d.failed && d.error_sample?.length) {
+                msg += ` Why: ${d.error_sample.join(" | ")}`;
+              }
+              if (d.failed && d.error_sample?.some((e) => e.includes("429"))) {
+                msg += " — RATE LIMITED: wait 15-30 min after any scan, then run this again.";
+              }
+              setBulkProgress(msg);
             } else {
               setBulkProgress(`Error: ${res.error || "failed"}`);
             }

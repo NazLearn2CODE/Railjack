@@ -5632,12 +5632,32 @@ async def seo_apply_fix(req: SeoFixReq):
     }
 
 
+def _seo_bulk_error_sample(results: list[dict], n: int = 3) -> list[str]:
+    """First-n distinct failure reasons from a bulk run — the UI shows them so
+    '29 failed' is never a mystery again (429 rate limit, perms, gone…)."""
+    out: list[str] = []
+    for r in results:
+        if r.get("ok"):
+            continue
+        err = str(r.get("error") or "unknown")[:160]
+        if err not in out:
+            out.append(err)
+        if len(out) >= n:
+            break
+    return out
+
+
 @router.post("/api/thailandnow/seo/apply-fix-bulk")
 async def seo_apply_fix_bulk(req: SeoApplyFixBulkReq):
     """Bulk apply fix: remove multiple broken links/images.
-    Iterates items; continues on error; returns per-item results."""
+    Iterates items with a polite inter-item pause (``seo_bulk_delay_s``, default 1 s
+    — 29 × GET+POST back-to-back trips the site's rate limiter, seen live) and
+    continues on error; returns per-item results + a distinct-error sample."""
+    delay = max(0.0, float(_opts().get("seo_bulk_delay_s", 1.0)))
     results = []
-    for item in req.items:
+    for i, item in enumerate(req.items):
+        if i and delay:
+            await asyncio.sleep(delay)
         try:
             res = await seo_apply_fix(item)
             results.append(res)
@@ -5656,8 +5676,9 @@ async def seo_apply_fix_bulk(req: SeoApplyFixBulkReq):
         "total": len(req.items),
         "removed": removed,      # actually stripped from WP content
         "noop": noop,            # ok but target not in content (already gone / format mismatch)
-        "failed": failed,        # WP error (wrong type 404, perms, etc.)
+        "failed": failed,        # WP error (wrong type 404, perms, 429 rate limit…)
         "successful": removed,   # honest alias: a real removal (was: any ok, incl. no-ops)
+        "error_sample": _seo_bulk_error_sample(results),
     }
 
 
@@ -5720,9 +5741,13 @@ async def seo_apply_rewrite(req: SeoRewriteReq):
 @router.post("/api/thailandnow/seo/apply-rewrite-bulk")
 async def seo_apply_rewrite_bulk(req: SeoRewriteBulkReq):
     """Bulk retarget redirecting internal links (one WP write per affected record).
-    Continues on per-item errors; counts mirror apply-fix-bulk."""
+    Polite pacing like apply-fix-bulk; continues on per-item errors; counts mirror
+    apply-fix-bulk, with a distinct-error sample so failures are never opaque."""
+    delay = max(0.0, float(_opts().get("seo_bulk_delay_s", 1.0)))
     results = []
-    for item in req.items:
+    for i, item in enumerate(req.items):
+        if i and delay:
+            await asyncio.sleep(delay)
         try:
             res = await seo_apply_rewrite(item)
             results.append(res)
@@ -5733,7 +5758,8 @@ async def seo_apply_rewrite_bulk(req: SeoRewriteBulkReq):
     noop = len([r for r in results if r.get("ok") and r.get("matches", 0) == 0])
     failed = len([r for r in results if not r.get("ok")])
     return {"results": results, "total": len(req.items),
-            "rewritten": rewritten, "noop": noop, "failed": failed, "successful": rewritten}
+            "rewritten": rewritten, "noop": noop, "failed": failed, "successful": rewritten,
+            "error_sample": _seo_bulk_error_sample(results)}
 
 
 class SeoImgShrinkReq(BaseModel):
