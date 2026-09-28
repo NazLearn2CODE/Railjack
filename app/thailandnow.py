@@ -4104,8 +4104,8 @@ async def _wp(method: str, path: str, params: dict | None = None, json_body: dic
                 await asyncio.sleep(wait)
                 continue
             if r.status_code >= 400:
-                if _CURL_OK and attempt < 4 and _seo_challenge(r.text):
-                    # fingerprint challenge — retry the whole call as Chrome
+                if _CURL_OK and attempt < 4 and (_seo_challenge(r.text) or _looks_html(r.text)):
+                    # fingerprint challenge / block page — retry the call as Chrome
                     return await _wp_via_curl(method, target, params, json_body, (user, pwd))
                 raise HTTPException(502, f"WP {method} {path}: {r.status_code} {r.text[:200]}")
             if not r.content:
@@ -4113,7 +4113,7 @@ async def _wp(method: str, path: str, params: dict | None = None, json_body: dic
             try:
                 return r.json()
             except ValueError:
-                if _CURL_OK and _seo_challenge(r.text):
+                if _CURL_OK and (_seo_challenge(r.text) or _looks_html(r.text)):
                     return await _wp_via_curl(method, target, params, json_body, (user, pwd))
                 if attempt < 4:
                     await asyncio.sleep(1.5)
@@ -4224,16 +4224,21 @@ async def _wp_upload_media(image_url: str, title: str, alt_text: str, caption: s
 
 
 async def _wp_list_all(endpoint: str, fields: str) -> list[dict]:
-    """Page through a WP REST collection at per_page=100 (?page=N). Stops on a
-    short/empty page; hard cap 200 pages."""
+    """Page through a WP REST collection at per_page=100 (?page=N). Stops on an
+    EMPTY page only — a short mid-run page (edge hiccup) truncated listings and
+    hid most of the media library (5,881 items looked like 198; live scar
+    2026-09-28). Hard cap 200 pages = 20k records."""
     out: list[dict] = []
     for page in range(1, 201):
-        batch = await _wp("GET", endpoint, {"per_page": 100, "page": page, "_fields": fields})
+        try:
+            batch = await _wp("GET", endpoint, {"per_page": 100, "page": page, "_fields": fields})
+        except HTTPException as e:
+            if "invalid_page" in str(e):
+                break  # past the last page — collection complete (WP 400s here)
+            raise
         if not batch:
             break
         out.extend(batch)
-        if len(batch) < 100:
-            break
     return out
 
 
@@ -4618,6 +4623,13 @@ def _seo_challenge(text: str) -> bool:
     return ("you are being redirected" in t
             or "javascript is required" in t
             or ("sucuri" in t and "cloudproxy" in t))
+
+
+def _looks_html(text: str) -> bool:
+    """Pure: HTML where JSON was expected — on wp-json that is always the edge
+    interfering (challenge page, block page, 403 doc), never WordPress itself."""
+    t = (text or "").lstrip()[:4000].lower()
+    return t.startswith("<!doctype") or t.startswith("<html") or t.startswith("<br")
 
 
 async def _curl_get(url: str, *, timeout: float = 20.0, auth: tuple | None = None,
