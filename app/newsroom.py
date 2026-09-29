@@ -84,7 +84,8 @@ def _auth_expired(out: bytes, err: bytes) -> bool:
     return "Authentication expired" in blob
 
 
-_NLM_HEAL_DONE = False
+_NLM_HEAL_MIN_GAP = 300.0  # s; sync is idempotent, gap caps heal/retry loops
+_NLM_HEAL_LAST = float("-inf")
 
 
 def _nlm_sync_cookies() -> bool:
@@ -136,11 +137,17 @@ def _nlm_sync_cookies() -> bool:
 
 
 async def _nlm_heal() -> bool:
-    """One auth self-heal per process. Kill-switch: NEWSROOM_NLM_HEAL=0."""
-    global _NLM_HEAL_DONE
-    if _NLM_HEAL_DONE or os.environ.get("NEWSROOM_NLM_HEAL", "1") == "0":
+    """Auth self-heal, rate-limited to one attempt per _NLM_HEAL_MIN_GAP so a
+    long-lived hub keeps coverage across repeated expiries (2026-09-23: the
+    old one-shot-per-process flag lost coverage after the first heal) without
+    heal loops. Kill-switch: NEWSROOM_NLM_HEAL=0."""
+    global _NLM_HEAL_LAST
+    if os.environ.get("NEWSROOM_NLM_HEAL", "1") == "0":
         return False
-    _NLM_HEAL_DONE = True
+    now = time.monotonic()
+    if now - _NLM_HEAL_LAST < _NLM_HEAL_MIN_GAP:
+        return False
+    _NLM_HEAL_LAST = now
     return await asyncio.to_thread(_nlm_sync_cookies)
 
 

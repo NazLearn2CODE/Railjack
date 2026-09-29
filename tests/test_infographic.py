@@ -1075,7 +1075,7 @@ async def test_run_heals_auth_expiry_and_retries(monkeypatch):
 
     monkeypatch.setattr(newsroom_mod, "_exec", fake_exec)
     monkeypatch.setattr(newsroom_mod, "_nlm_heal", fake_heal)
-    monkeypatch.setattr(newsroom_mod, "_NLM_HEAL_DONE", False)
+    monkeypatch.setattr(newsroom_mod, "_NLM_HEAL_LAST", float("-inf"))
 
     rc, out, err = await newsroom_mod._run(["notebooklm", "create", "t", "--json"])
     assert rc == 0
@@ -1105,7 +1105,7 @@ async def test_run_no_heal_when_disabled_or_not_expired(monkeypatch):
 
     monkeypatch.setattr(newsroom_mod, "_exec", fake_exec)
     monkeypatch.setattr(newsroom_mod, "_nlm_sync_cookies", fake_sync)
-    monkeypatch.setattr(newsroom_mod, "_NLM_HEAL_DONE", False)
+    monkeypatch.setattr(newsroom_mod, "_NLM_HEAL_LAST", float("-inf"))
     monkeypatch.setenv("NEWSROOM_NLM_HEAL", "0")
 
     rc, out, err = await newsroom_mod._run(["notebooklm", "create", "t", "--json"])
@@ -1124,3 +1124,30 @@ async def test_run_no_heal_when_disabled_or_not_expired(monkeypatch):
     monkeypatch.setattr(newsroom_mod, "_exec", fake_exec_quota)
     rc, out, err = await newsroom_mod._run(["notebooklm", "create", "t", "--json"])
     assert rc == 2 and len(calls) == 1 and syncs == []
+
+
+@pytest.mark.anyio
+async def test_heal_rate_limited_within_gap(monkeypatch):
+    """Real _nlm_heal rate-limits: inside _NLM_HEAL_MIN_GAP no sync fires; once
+    the gap passes (LAST reset to -inf) it fires again — a long-lived hub keeps
+    coverage across repeated expiries (2026-09-23: the one-shot flag died after
+    the first heal and left later expiries raw)."""
+    import app.newsroom as newsroom_mod
+    syncs: list[bool] = []
+
+    def fake_sync():
+        syncs.append(True)
+        return True
+
+    monkeypatch.setattr(newsroom_mod, "_nlm_sync_cookies", fake_sync)
+    monkeypatch.delenv("NEWSROOM_NLM_HEAL", raising=False)
+
+    # LAST = +inf reads as "healed this instant" → inside gap → no sync
+    monkeypatch.setattr(newsroom_mod, "_NLM_HEAL_LAST", float("inf"))
+    assert await newsroom_mod._nlm_heal() is False
+    assert syncs == []
+
+    # gap passed → heal fires again
+    monkeypatch.setattr(newsroom_mod, "_NLM_HEAL_LAST", float("-inf"))
+    assert await newsroom_mod._nlm_heal() is True
+    assert syncs == [True]
