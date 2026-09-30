@@ -48,7 +48,21 @@ export default function FramePanel({ panels }: { panels: Record<string, FC<{ mod
         {iframeMods.map((m) => (
           <iframe
             key={m.id}
-            src={m.url}
+            /* Loopback-host match: a DSH auth cookie set on 127.0.0.1 never
+               rides on an iframe loaded from localhost (different cookie
+               host) — rewrite the iframe's loopback host to match the page
+               host so the browser treats it as same-site and sends the
+               cookie. (Naz: "localhost:8700 still shows the auth wall") */
+            src={(() => {
+              if (!m.url) return m.url;
+              try {
+                const u = new URL(m.url);
+                if ((u.hostname === "127.0.0.1" || u.hostname === "localhost")
+                    && (u.hostname !== window.location.hostname))
+                  u.hostname = window.location.hostname;
+                return u.toString();
+              } catch { return m.url; }
+            })()}
             title={m.title}
             className="absolute inset-0 h-full w-full border-0"
             style={{ display: activeId === m.id ? "block" : "none" }}
