@@ -62,6 +62,30 @@ modules:
       seo_sitemap_concurrency: 3                        # sitemap probe is a big same-site burst — keep gentle
       seo_sitemap_delay_s: 0.25                         # per-request pause in the sitemap probe
       seo_content_cache_ttl_s: 21600                    # content snapshot shared across scoped scans (6 h)
+      # --- restored 2026-09-28: these rode under the codeatlas block since the
+      # 09-24 module insert split this options list (WRITERS lost desks) ---
+      google_owner_token_path: ~/.config/railjack/google_token_owner.json   # minted once AS thailandnow.info (TN_TOKEN_PATH=... python -m app.tn_auth) — auto-accepts the transfer; missing → transfers stay pending on the acceptance email
+      trello_board_short: VTMuHmEj                              # board short link (thailand-now-25-26)
+      publicity_llm:
+        model: dsh          # /events/publicize; the call routes through app/zai.py (ZAI_API_KEY + z.ai Anthropic endpoint)
+      gem_path: app/gems/event-publicity.md                     # read fresh each /events/publicize call
+      notebooklm_notebook_id: ""                                # R6: DEEP RESEARCH notebook (created + cached on first use)
+      archive_gem_path: app/gems/event-archive-qa.md            # Stage 2: source-only Q&A gem
+      archive_folder_id: 1RTW44D-Ygjf-GQC8Wj_s6tX0elhNx2vI   # 'Thailand NOW 2025-26' folder, owner thailandnow.info; n.rojanasuvan granted writer 2026-08-30 (was: 'TN Content' 1MVYNNOaev_0P972YbwM01XGGLWPBP1vJ)
+      wordpress_url: https://www.thailandnow.in.th   # override of WORDPRESS_URL; user/password stay in ~/n8n/.secrets.env
+      # --- STORY SCOUT (news pitch discovery + make-a-pitch) ---
+      scout_llm:
+        model: dsh          # /scout/pitch; routes through app/zai.py (same gateway/combo as publicity_llm)
+      scout_gem_path: app/gems/story-scout-pitch.md
+      scout_rerank_gem_path: app/gems/story-scout-rerank.md
+      scout_image_digest_gem_path: app/gems/story-scout-image-digest.md
+      # due_weekdays: datetime.weekday() convention (0=Mon..6=Sun) — auto-computed due
+      # dates for writer desks (Naz: Paul due Mon/Wed/Fri, Teerin due Thu). tian is NOT
+      # given due_weekdays — its dates come from real scouted events via _date_rule.
+      desks:
+        - {id: paul,   kind: article, drive_folder_id: 1w8ESeKzvW-Er36qjMjgfLU7fMwa8KSu6, trello_list_name: "To draft (Paul)",   doc_name: "[{yyyymm}] [CAT] #{nn}",               card_name: "Article | {mon} #{nn}", count: 12, labels: ["Quota", "Happening NOW"], due_weekdays: [0, 2, 4]}
+        - {id: teerin, kind: blog,    drive_folder_id: 1jUTZ5qchpViAioBWfUpIdu5PQCwdSWSq, trello_list_name: "To draft (Teerin)", doc_name: "[{yyyymm}] [CAT] Working Title #{nn}", card_name: "Blog | #{nn}",            count: 5, labels: ["Quota", "Happening NOW"], due_weekdays: [3]}
+        - {id: tian,   kind: event,   drive_folder_id: 1_gJui6atpHTjaZWnkBNG6BwEgiZ2ZtUm, trello_list_name: "To draft (TIAN)",   doc_name: "[{yyyymm}] Empty Event Document #{nn}", card_name: "Event | Empty #{nn}",     count: 1, labels: ["Quota", "Events NOW"]}
   - id: codeatlas
     title: CODEATLAS
     kind: panel          # named-target architecture maps (agy lane → <target>/CODEATLAS/)
@@ -71,34 +95,6 @@ modules:
       skill_roots: ["~/skill-library/skills", "~/.dsh/skills"]
       codeatlas_repo: "~/Coding Projects/CodeAtlas"             # template source (Picrew/CodeAtlas checkout)
       agy_timeout: 900                                          # big repos map slow
-      google_owner_token_path: ~/.config/railjack/google_token_owner.json   # minted once AS thailandnow.info (TN_TOKEN_PATH=... python -m app.tn_auth) — auto-accepts the transfer; missing → transfers stay pending on the acceptance email
-      trello_board_short: VTMuHmEj                              # board short link (thailand-now-25-26)
-      publicity_llm:
-        model: dsh          # /events/publicize; the call routes through app/zai.py (ZAI_API_KEY + z.ai Anthropic endpoint)
-      gem_path: app/gems/event-publicity.md                     # read fresh each /events/publicize call
-      notebooklm_notebook_id: ""                                # R6: DEEP RESEARCH notebook (created + cached on first use)
-      archive_gem_path: app/gems/event-archive-qa.md            # Stage 2: source-only Q&A gem
-      archive_folder_id: 1RTW44D-Ygjf-GQC8Wj_s6tX0elhNx2vI   # 'Thailand NOW 2025-26' folder, owner thailandnow.info; n.rojanasuvan granted writer 2026-08-30 (was: 'TN Content' 1MVYNNOaev_0P972YbwM01XGGLWPBP1vJ)
-      # --- STORY SCOUT (news pitch discovery + make-a-pitch) ---
-      scout_llm:
-        model: dsh          # /scout/pitch; routes through app/zai.py (same gateway/combo as publicity_llm)
-      scout_gem_path: app/gems/story-scout-pitch.md
-      scout_rerank_gem_path: app/gems/story-scout-rerank.md
-      scout_image_digest_gem_path: app/gems/story-scout-image-digest.md
-      # --- SEO HEALTH (read-only link/image/orphan report) ---
-      # (the seo_* opts moved to the thailandnow module block 2026-09-26 — this
-      # codeatlas block was never read by _opts(); left as history)
-      wordpress_url: https://www.thailandnow.in.th   # override of WORDPRESS_URL; user/password stay in ~/n8n/.secrets.env
-      seo_media_cache_ttl_s: 86400                     # DEAD — see thailandnow module
-      seo_external_concurrency: 8                       # DEAD — see thailandnow module
-      seo_external_timeout_s: 10                        # DEAD — see thailandnow module
-      # due_weekdays: datetime.weekday() convention (0=Mon..6=Sun) — auto-computed due
-      # dates for writer desks (Naz: Paul due Mon/Wed/Fri, Teerin due Thu). tian is NOT
-      # given due_weekdays — its dates come from real scouted events via _date_rule.
-      desks:
-        - {id: paul,   kind: article, drive_folder_id: 1w8ESeKzvW-Er36qjMjgfLU7fMwa8KSu6, trello_list_name: "To draft (Paul)",   doc_name: "[{yyyymm}] [CAT] #{nn}",               card_name: "Article | {mon} #{nn}", count: 12, labels: ["Quota", "Happening NOW"], due_weekdays: [0, 2, 4]}
-        - {id: teerin, kind: blog,    drive_folder_id: 1jUTZ5qchpViAioBWfUpIdu5PQCwdSWSq, trello_list_name: "To draft (Teerin)", doc_name: "[{yyyymm}] [CAT] Working Title #{nn}", card_name: "Blog | #{nn}",            count: 5, labels: ["Quota", "Happening NOW"], due_weekdays: [3]}
-        - {id: tian,   kind: event,   drive_folder_id: 1_gJui6atpHTjaZWnkBNG6BwEgiZ2ZtUm, trello_list_name: "To draft (TIAN)",   doc_name: "[{yyyymm}] Empty Event Document #{nn}", card_name: "Event | Empty #{nn}",     count: 1, labels: ["Quota", "Events NOW"]}
   - id: calendar
     title: CALENDAR
     kind: panel          # working calendar + prompt launcher (app/calendar_tasks.py)

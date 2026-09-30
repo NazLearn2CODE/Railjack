@@ -547,10 +547,10 @@ async def test_real_fixtures_on_disk() -> None:
     assert payont.phase in {"concept", "pre-production", "production", "alpha", "beta", "gold", "live-ops"}
     assert payont.protocol.index is True
     assert payont.protocol.gates is True
-    assert len(payont.milestones) == 7
+    assert len(payont.milestones) >= 7   # fixture advances as Naz gates phases
     m_checked = sum(1 for m in payont.milestones if m.checked)
-    assert payont.pct == round((m_checked / 7) * 100)
-    assert payont.pct_basis == f"milestones ({m_checked}/7)"
+    assert payont.pct == round((m_checked / len(payont.milestones)) * 100)
+    assert payont.pct_basis == f"milestones ({m_checked}/{len(payont.milestones)})"
     assert payont.last_commit is not None
     assert "b370795" in payont.last_commit.hash or len(payont.last_commit.hash) >= 7
     # Blockers churn with project reality (Engine-undecided resolved when
