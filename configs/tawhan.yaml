@@ -25,7 +25,7 @@ modules:
     title: COMFYUI
     kind: panel
     panel: comfyui
-    health: { type: http, url: "http://127.0.0.1:8188/system_stats" }
+    health: { type: http, url: "http://100.100.135.95:8188/system_stats" }   # tailnet-first bind — loopback probe read "down" while serving fine
     manage:
       type: command
       start: ["bash", "/home/naz6395/.claude/skills/comfyui-media/scripts/comfy.sh", "start"]
