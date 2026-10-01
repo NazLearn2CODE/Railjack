@@ -110,6 +110,10 @@ async def main() -> None:
     ap.add_argument("--delay", type=float, default=1.0)
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--max-items", type=int, default=0, help="0 = no cap (testing)")
+    ap.add_argument("--from-csv", type=str, default="",
+                    help="Ahrefs export CSV (URL column) — migrate only those files")
+    ap.add_argument("--cleanup-kept", action="store_true",
+                    help="re-verify previously kept (unverified) attachments and delete when clean")
     args = ap.parse_args()
     limit = int(args.limit_mb * 1_000_000)
 
@@ -181,6 +185,33 @@ async def main() -> None:
         f"{sum(1 for p in plan if p['klass'] == 'featured')} featured, "
         f"{sum(1 for p in plan if p['klass'] == 'variant-used')} variant-used, "
         f"{sum(1 for p in plan if p['klass'] == 'unused')} unused)")
+
+    if args.cleanup_kept:
+        kept_ids = {int(k) for k in state.get("skipped", {})}
+        plan = [p for p in plan if p["id"] in kept_ids]
+        log(f"cleanup-kept: re-verifying {len(plan)} previously kept attachments")
+
+    if args.from_csv:
+        import urllib.parse as _up
+        import csv as _csv
+        wanted = []
+        for row in _csv.DictReader(open(args.from_csv, encoding="utf-8")):
+            u = _up.unquote((row.get("URL") or "").strip())
+            if u:
+                wanted.append(u)
+        base_map = {}
+        for aid, urls in url_owner.items():
+            for u in urls:
+                if u:
+                    base_map[u.rsplit("/", 1)[-1]] = aid
+                    base_map[_up.unquote(u).rsplit("/", 1)[-1]] = aid
+        keep_ids = {base_map[_up.unquote(u).rsplit("/", 1)[-1]]
+                    for u in wanted if _up.unquote(u).rsplit("/", 1)[-1] in base_map}
+        unmatched = len(wanted) - len({_up.unquote(u).rsplit("/", 1)[-1] for u in wanted
+                                       if _up.unquote(u).rsplit("/", 1)[-1] in base_map})
+        plan = [p for p in plan if p["id"] in keep_ids]
+        log(f"csv filter: {len(keep_ids)}/{len(wanted)} ahrefs files matched to library "
+            f"({unmatched} unmatched — already deleted or off-site)")
 
     if args.dry_run:
         json.dump(plan, open(REPORT_FILE.with_name(".media_migrate_plan.json"), "w"), default=str)
@@ -255,13 +286,21 @@ async def main() -> None:
                     swap["featured"] += 1
                     await asyncio.sleep(args.delay)
 
-            # verify nothing references the old urls anymore
+            # verify nothing references the old urls anymore — re-fetch the
+            # affected records FRESH (the pre-run snapshot predates the swaps)
             leftover = 0
-            for rid in swap and item["records"] or []:
-                rec = next((x for x in recs if x["id"] == rid), None)
-                if rec is None:
+            for rid in set(item["records"] + item["featured_records"]):
+                if rid in item["featured_records"] and rid not in item["records"]:
+                    continue  # featured swap verified via featured_media update below
+                try:
+                    rb = await tn._wp_resolve_rest_base(rid)
+                    rec = await tn._wp("GET", f"/{rb}/{rid}", {"context": "edit",
+                                                               "_fields": "id,content"})
+                except Exception:
+                    leftover += 1  # can't verify → keep old attachment, never break a page
                     continue
-                html = (rec.get("content") or {}).get("rendered", "") or ""
+                html = ((rec.get("content") or {}).get("raw")
+                        or (rec.get("content") or {}).get("rendered") or "")
                 leftover += sum(1 for u in old_urls if u and u in html)
 
             if leftover == 0:
@@ -273,6 +312,7 @@ async def main() -> None:
                 log(f"  ! {leftover} reference(s) still point at old file — old attachment KEPT")
                 state["skipped"][key] = f"{leftover} leftover references"
 
+            state.get("skipped", {}).pop(key, None)  # retried and done — clear the skip
             state["migrated"][key] = {
                 "new_id": new_id, "new_url": new_url, "label": label,
                 "old_size_mb": round(size / 1048576, 1), "klass": item["klass"],
