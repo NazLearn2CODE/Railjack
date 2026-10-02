@@ -48,13 +48,17 @@ GRANT_DAY = 18  # UTC day the monthly credit lands (Sep 18 observed)
 def _credit_window(now: datetime) -> tuple[datetime, datetime]:
     """(window_start, next_reset) for the 18th→18th UTC credit cycle."""
     if now.day >= GRANT_DAY:
+        # inside this cycle: window opened on the 18th, resets NEXT month
         start = now.replace(day=GRANT_DAY, hour=0, minute=0, second=0, microsecond=0)
         year, month = (now.year + 1, 1) if now.month == 12 else (now.year, now.month + 1)
     else:
+        # before the 18th: window opened LAST month, resets THIS month's 18th
         year, month = (now.year - 1, 12) if now.month == 1 else (now.year, now.month - 1)
         start = now.replace(year=year, month=month, day=GRANT_DAY,
                             hour=0, minute=0, second=0, microsecond=0)
-        year, month = (now.year + 1, 1) if now.month == 12 else (now.year, now.month + 1)
+        reset = now.replace(year=now.year, month=now.month, day=GRANT_DAY,
+                            hour=0, minute=0, second=0, microsecond=0)
+        return start, reset
     reset = now.replace(year=year, month=month, day=GRANT_DAY,
                         hour=0, minute=0, second=0, microsecond=0)
     return start, reset
