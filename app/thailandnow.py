@@ -4764,7 +4764,10 @@ async def _flow_seo_health(job: "TnJob", scope: str = "full") -> None:
                 "title": title,
                 "items": [{"src": x, "suggested": _seo_suggest_alt(x, title)} for x in srcs],
             })
-        media_all = await _wp_list_all("/media", "id,source_url,alt_text,title,mime_type")
+        try:
+            media_all = await _wp_list_all("/media", "id,source_url,alt_text,title,mime_type")
+        except (HTTPException, ValueError):
+            media_all = []  # best-effort — the alt report degrades, the scan survives
         missing_media = []
         for m in media_all or []:
             if not str(m.get("mime_type") or "").startswith("image/"):

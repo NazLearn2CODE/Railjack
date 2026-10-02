@@ -699,6 +699,8 @@ def test_flow_scope_images_no_probes(monkeypatch):
     probe_hits = {"n": 0}
 
     def handler(request: httpx.Request) -> httpx.Response:
+        if "/wp-json/" in str(request.url):
+            return httpx.Response(200, json=[])  # WP REST reads — not probes
         probe_hits["n"] += 1
         return httpx.Response(200, text="<p>x</p>")
 
@@ -722,6 +724,7 @@ def test_flow_scope_images_no_probes(monkeypatch):
     assert res["oversized_images"][0]["klass"] == "full-used"
     assert probe_hits["n"] == 0  # REST only — no probing at all
     assert "broken_external_links" not in res
+    assert res["missing_alt"]["records"][0]["items"][0]["suggested"].startswith("Heavy")
 
 
 def test_flow_scope_links_no_sitemap_section(monkeypatch):
