@@ -1,9 +1,11 @@
 """Tests for the Ahrefs import + issue backlog (Phase 1) and the alt-text
 suggester/apply flow (Phase 2). Backlog file is redirected to tmp; WP faked."""
 
+import base64
 import json
 import pathlib
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
@@ -54,7 +56,7 @@ def test_import_reopens_fixed(client):
     bl = client.get("/api/thailandnow/seo/backlog").json()
     key = None
     # find the key via the raw backlog state
-    import pathlib
+    import tempfile, pathlib
     state = json.loads(pathlib.Path(thailandnow.SEO_BACKLOG_FILE).read_text())
     for k, v in state["issues"].items():
         v["status"] = "fixed"
