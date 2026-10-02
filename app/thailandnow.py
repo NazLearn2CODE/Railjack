@@ -5982,8 +5982,7 @@ async def seo_import(req: SeoImportReq):
 async def seo_backlog_get():
     """Backlog grouped for the panel: open issues by type + history tail."""
     backlog = _seo_backlog_load()
-    issues = [{"key": k, **i} for k, i in backlog.get("issues", {}).items()
-              if i.get("status") == "open"]
+    issues = [i for i in backlog.get("issues", {}).values() if i.get("status") == "open"]
     issues.sort(key=lambda i: -(i.get("inlinks") or 0))
     by_type: Counter = Counter(i["type"] for i in issues)
     return {"issues": issues, "total_open": len(issues), "by_type": dict(by_type),
@@ -6352,53 +6351,6 @@ async def seo_delete_media_bulk(req: SeoDeleteMediaBulkReq):
     return {"results": results, "total": len(req.ids), "deleted": deleted,
             "failed": failed, "successful": deleted,
             "error_sample": _seo_bulk_error_sample(results)}
-
-
-class SeoAltItem(BaseModel):
-    media_id: int | None = None
-    record_id: int | None = None
-    src: str = ""
-    alt: str = ""
-
-
-class SeoAltApplyReq(BaseModel):
-    items: list[SeoAltItem]
-
-
-@router.post("/api/thailandnow/seo/alt/apply")
-async def seo_alt_apply(req: SeoAltApplyReq):
-    """Apply alt text: media alt_text update (media_id) or content <img> alt
-    rewrite (record_id + src). Paced (seo_bulk_delay_s); per-item results +
-    distinct-error sample."""
-    delay = max(0.0, float(_opts().get("seo_bulk_delay_s", 1.0)))
-    results = []
-    for i, item in enumerate(req.items):
-        if i and delay:
-            await asyncio.sleep(delay)
-        try:
-            if item.media_id:
-                await _wp("POST", f"/media/{item.media_id}", json_body={"alt_text": item.alt})
-                results.append({"ok": True, "media_id": item.media_id, "alt": item.alt})
-            elif item.record_id and item.src:
-                rb = await _wp_resolve_rest_base(item.record_id)
-                rec = await _wp("GET", f"/{rb}/{item.record_id}", {"context": "edit"})
-                raw = (rec.get("content") or {}).get("raw", "")
-                new_html, n = _seo_set_img_alt(raw, item.src, item.alt)
-                if n == 0:
-                    results.append({"ok": True, "record_id": item.record_id,
-                                    "matches": 0, "noop": True})
-                    continue
-                await _wp("POST", f"/{rb}/{item.record_id}", json_body={"content": new_html})
-                results.append({"ok": True, "record_id": item.record_id, "matches": n})
-            else:
-                results.append({"ok": False, "error": "item needs media_id or record_id+src",
-                                "index": i})
-        except Exception as e:
-            results.append({"ok": False, "error": str(e)[:160], "index": i})
-    applied = len([r for r in results if r.get("ok")])
-    failed = len(results) - applied
-    return {"results": results, "total": len(req.items), "applied": applied,
-            "failed": failed, "error_sample": _seo_bulk_error_sample(results)}
 
 
 class SeoRetargetSuggestReq(BaseModel):
