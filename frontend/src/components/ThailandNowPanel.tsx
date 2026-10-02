@@ -424,8 +424,9 @@ function trimFixed(
   return { ...r, broken_internal_links, broken_internal_images, broken_external_links };
 }
 
-function HealthList({ title, count, accent, hint, action, children }: {
+function HealthList({ title, count, accent, hint, action, children, alwaysShowBody }: {
   title: string; count: number; accent: string; hint?: string; action?: ReactNode; children: ReactNode;
+  alwaysShowBody?: boolean;
 }) {
   return (
     <div className="border border-edge bg-void p-2">
@@ -434,7 +435,7 @@ function HealthList({ title, count, accent, hint, action, children }: {
         {action}
       </div>
       {hint && <div className="mono text-xs" style={{ color: "var(--color-muted)" }}>{hint}</div>}
-      {count > 0 && <div className="scroll-y mt-1">{children}</div>}
+      {(count > 0 || alwaysShowBody) && <div className="scroll-y mt-1">{children}</div>}
     </div>
   );
 }
@@ -727,7 +728,7 @@ function ImportBacklogSection() {
   };
 
   return (
-    <HealthList title="AHREFS IMPORT / BACKLOG" count={bl?.total_open ?? 0} accent="var(--color-signal)"
+    <HealthList title="AHREFS IMPORT / BACKLOG" count={bl?.total_open ?? 0} accent="var(--color-signal)" alwaysShowBody
       hint="Paste an Ahrefs Site Audit issue export (CSV) — rows become a tracked backlog: open / fixed / dismissed, with an import trend.">
       <div className="flex flex-col gap-1">
         <textarea className="mono text-xs" rows={3} placeholder="paste Ahrefs CSV export here…"
@@ -801,8 +802,13 @@ function MissingAltSection({ data }: { data: { records: MissingAltRecord[]; medi
   const mediaRows = data.media.map((m) => ({ key: `m-${m.id}`, media_id: m.id, suggested: m.suggested, filename: m.filename }));
 
   return (
-    <HealthList title="MISSING ALT TEXT" count={recordRows.length + mediaRows.length} accent="var(--color-hazard)"
+    <HealthList title="MISSING ALT TEXT" count={recordRows.length + mediaRows.length} accent="var(--color-hazard)" alwaysShowBody
       hint="images with no alt attribute. Suggested alt is filename-derived — edit inline, APPLY writes WordPress immediately.">
+      {recordRows.length === 0 && mediaRows.length === 0 && (
+        <div className="mono text-xs" style={{ color: "var(--color-muted)" }}>
+          no missing-alt data in this report — run the IMAGES scan to populate (REST-only, ~1 min).
+        </div>
+      )}
       {recordRows.length > 0 && (
         <div className="mt-1">
           <div className="mono text-xs" style={{ color: "var(--color-signal)" }}>IN ARTICLE CONTENT ({recordRows.length})</div>
