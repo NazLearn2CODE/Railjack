@@ -674,42 +674,11 @@ function ImportBacklogSection() {
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
   const [bl, setBl] = useState<BacklogData | null>(null);
-  const [fileResults, setFileResults] = useState<string[]>([]);
 
   const loadBacklog = useCallback(async () => {
     try { setBl(await fetchJSON<BacklogData>("/api/thailandnow/seo/backlog")); } catch { /* first run */ }
   }, []);
   useEffect(() => { void loadBacklog(); }, [loadBacklog]);
-
-  const importOne = async (fname: string, text: string): Promise<string> => {
-    // report type inferred from the Ahrefs filename:
-    // thailandnow_28-sep-2026_<report-slug>_<timestamp>.csv → "<report-slug>"
-    const slug = fname.replace(/\.csv$/i, "").split("_")
-      .slice(2).filter((t) => !/^\d{4}-/.test(t) && !/^\d{2}-\d{2}-\d{2}/.test(t))
-      .join("_") || "image_file_size";
-    const r = await post<{ rows: number; new: number; updated: number; reopened_fixed: number; total_open: number }>(
-      "/api/thailandnow/seo/import", { report_type: slug, csv_text: text });
-    if (!r.ok || !r.data) return `${fname}: FAILED — ${r.error || "unknown"}`;
-    return `${fname}: ${r.data.rows} rows · ${r.data.new} new · ${r.data.total_open} open`;
-  };
-
-  const doImportFiles = async (files: File[]) => {
-    if (!files.length) return;
-    setBusy(true);
-    const lines: string[] = [];
-    for (const f of files) {
-      try {
-        const text = await f.text();
-        lines.push(await importOne(f.name, text));
-      } catch (e) {
-        lines.push(`${f.name}: FAILED — ${String(e).slice(0, 80)}`);
-      }
-      void loadBacklog();
-    }
-    setBusy(false);
-    setFileResults(lines);
-    void loadBacklog();
-  };
 
   const doImport = async () => {
     if (!csvText.trim()) return;
@@ -734,24 +703,14 @@ function ImportBacklogSection() {
         <textarea className="mono text-xs" rows={3} placeholder="paste Ahrefs CSV export here…"
           value={csvText} onChange={(e) => setCsvText(e.target.value)} />
         <div className="flex items-center gap-2">
-          <button className="btn btn--compact" disabled={busy || !csvText.trim()} onClick={() => void doImport()}>IMPORT PASTED CSV</button>
+          <button className="btn btn--compact" disabled={busy || !csvText.trim()} onClick={() => void doImport()}>IMPORT CSV</button>
           <label className="btn btn--compact" style={{ cursor: "pointer" }}>
-            BROWSE AHREFS CSV FILES
-            <input type="file" accept=".csv,text/csv" multiple style={{ display: "none" }}
-              onChange={(e) => { const files = Array.from(e.target.files ?? []); e.target.value = ""; if (files.length) void doImportFiles(files); }} />
+            OPEN .CSV FILE
+            <input type="file" accept=".csv,text/csv" style={{ display: "none" }}
+              onChange={(e) => { const f = e.target.files?.[0]; if (!f) return; f.text().then((t) => { setCsvText(t); void doImport(); }); }} />
           </label>
-          {busy && <span className="mono text-xs" style={{ color: "var(--color-hazard)" }}>importing…</span>}
+          {msg && <span className="mono text-xs" style={{ color: "var(--color-signal)" }}>{msg}</span>}
         </div>
-        {msg && <div className="mono text-xs" style={{ color: "var(--color-signal)" }}>{msg}</div>}
-        {fileResults.length > 0 && (
-          <div className="mono text-xs flex flex-col gap-0.5" style={{ color: "var(--color-muted)" }}>
-            {fileResults.map((line, i) => (
-              <div key={i} style={{ color: line.includes("FAILED") ? "var(--color-critical)" : "var(--color-muted)" }}>
-                {line}
-              </div>
-            ))}
-          </div>
-        )}
         {bl && bl.history.length > 0 && (
           <div className="mono text-xs" style={{ color: "var(--color-muted)" }}>
             trend: {bl.history.slice(-6).map((h) => `${h.at.slice(5, 16)} · ${h.total_open} open`).join("  |  ")}
