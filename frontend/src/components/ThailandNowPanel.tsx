@@ -192,6 +192,7 @@ interface HealthReport {
   oversized_images?: OversizedImage[];
   sitemap?: SitemapHygiene;
   scan_notes?: string[];
+  missing_alt?: { records: MissingAltRecord[]; media: MissingAltMediaItem[] };
   external_checked?: number; at: string;
 }
 
@@ -216,6 +217,19 @@ interface SitemapHygiene {
   manual: { url: string; status?: number; reason: string }[];
   unlinked?: { count: number; urls: string[] };
 }
+
+interface BacklogIssue {
+  key: string; type: string; url: string; status: string; filename?: string;
+  size_bytes?: number; inlinks?: number; seen_count?: number; regressed?: boolean;
+  first_seen?: string; last_seen?: string;
+}
+interface BacklogData {
+  issues: BacklogIssue[]; total_open: number; by_type: Record<string, number>;
+  history: { at: string; total_open: number; by_type: Record<string, number> }[];
+}
+interface MissingAltImg { src: string; suggested: string }
+interface MissingAltRecord { from_id?: number; from_link: string; title: string; items: MissingAltImg[] }
+interface MissingAltMediaItem { id?: number; filename: string; suggested: string }
 
 /** 1.2 MB / 480 KB formatting for oversized-image rows. */
 function fmtBytes(n: number): string {
@@ -654,6 +668,142 @@ function BulkConfirm({
   );
 }
 
+function ImportBacklogSection() {
+  const [csvText, setCsvText] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+  const [bl, setBl] = useState<BacklogData | null>(null);
+
+  const loadBacklog = useCallback(async () => {
+    try { setBl(await fetchJSON<BacklogData>("/api/thailandnow/seo/backlog")); } catch { /* first run */ }
+  }, []);
+  useEffect(() => { void loadBacklog(); }, [loadBacklog]);
+
+  const doImport = async () => {
+    if (!csvText.trim()) return;
+    setBusy(true); setMsg(null);
+    const r = await post<{ rows: number; new: number; updated: number; reopened_fixed: number; total_open: number }>(
+      "/api/thailandnow/seo/import", { report_type: "image_file_size", csv_text: csvText });
+    setBusy(false);
+    if (!r.ok || !r.data) { setMsg(`IMPORT failed: ${r.error || "unknown"}`); return; }
+    setMsg(`Imported ${r.data.rows} rows · ${r.data.new} new · ${r.data.updated} updated · ${r.data.reopened_fixed} reopened · ${r.data.total_open} open`);
+    setCsvText("");
+    void loadBacklog();
+  };
+  const dismiss = async (key: string) => {
+    await post("/api/thailandnow/seo/backlog/set-status", { key, status: "dismissed" });
+    void loadBacklog();
+  };
+
+  return (
+    <HealthList title="AHREFS IMPORT / BACKLOG" count={bl?.total_open ?? 0} accent="var(--color-signal)"
+      hint="Paste an Ahrefs Site Audit issue export (CSV) — rows become a tracked backlog: open / fixed / dismissed, with an import trend.">
+      <div className="flex flex-col gap-1">
+        <textarea className="mono text-xs" rows={3} placeholder="paste Ahrefs CSV export here…"
+          value={csvText} onChange={(e) => setCsvText(e.target.value)} />
+        <div className="flex items-center gap-2">
+          <button className="btn btn--compact" disabled={busy || !csvText.trim()} onClick={() => void doImport()}>IMPORT CSV</button>
+          <label className="btn btn--compact" style={{ cursor: "pointer" }}>
+            OPEN .CSV FILE
+            <input type="file" accept=".csv,text/csv" style={{ display: "none" }}
+              onChange={(e) => { const f = e.target.files?.[0]; if (!f) return; f.text().then((t) => { setCsvText(t); void doImport(); }); }} />
+          </label>
+          {msg && <span className="mono text-xs" style={{ color: "var(--color-signal)" }}>{msg}</span>}
+        </div>
+        {bl && bl.history.length > 0 && (
+          <div className="mono text-xs" style={{ color: "var(--color-muted)" }}>
+            trend: {bl.history.slice(-6).map((h) => `${h.at.slice(5, 16)} · ${h.total_open} open`).join("  |  ")}
+          </div>
+        )}
+        {(bl?.issues ?? []).map((i) => (
+          <div key={i.key} className="text-sm mt-1 flex items-center gap-2">
+            <span className="mono text-xs" style={{ color: "var(--color-muted)" }}>
+              {i.inlinks ?? 0} in · {((i.size_bytes ?? 0) / 1048576).toFixed(1)} MB
+            </span>
+            <a href={i.url} target="_blank" rel="noreferrer" style={{ color: "var(--color-phosphor)" }}>
+              {(i.filename || i.url).slice(0, 60)}
+            </a>
+            {i.regressed && <span className="mono text-xs" style={{ color: "var(--color-critical)" }}>[REGRESSED]</span>}
+            <button className="btn btn--compact" onClick={() => void dismiss(i.key)}>DISMISS</button>
+          </div>
+        ))}
+        {(bl?.issues.length ?? 0) > 50 && (
+          <div className="mono text-xs" style={{ color: "var(--color-muted)" }}>
+            …{(bl?.issues.length ?? 0) - 50} more open issues
+          </div>
+        )}
+      </div>
+    </HealthList>
+  );
+}
+
+function MissingAltSection({ data }: { data: { records: MissingAltRecord[]; media: MissingAltMediaItem[] } }) {
+  const [drafts, setDrafts] = useState<Record<string, string>>({});
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+  const draftKey = (k: string, suggested: string) => drafts[k] ?? suggested;
+
+  const applyItems = async (items: { record_id?: number; media_id?: number; src?: string; alt: string }[]) => {
+    if (!items.length) return;
+    setBusy(true); setMsg(null);
+    const res = await post<{ applied: number; total: number; failed: number; error_sample?: string[] }>(
+      "/api/thailandnow/seo/alt/apply", { items });
+    setBusy(false);
+    if (res.ok && res.data) {
+      setMsg(`Applied ${res.data.applied}/${res.data.total}` + (res.data.failed ? ` · ${res.data.failed} failed — ${res.data.error_sample?.join(" | ")}` : ""));
+    } else setMsg(`Error: ${res.error || "failed"}`);
+  };
+
+  const recordRows = data.records.flatMap((rec) =>
+    rec.items.map((i) => ({ key: `r-${rec.from_id}-${i.src}`, record_id: rec.from_id, src: i.src,
+                            suggested: i.suggested, title: rec.title, link: rec.from_link })));
+  const mediaRows = data.media.map((m) => ({ key: `m-${m.id}`, media_id: m.id, suggested: m.suggested, filename: m.filename }));
+
+  return (
+    <HealthList title="MISSING ALT TEXT" count={recordRows.length + mediaRows.length} accent="var(--color-hazard)"
+      hint="images with no alt attribute. Suggested alt is filename-derived — edit inline, APPLY writes WordPress immediately.">
+      {recordRows.length > 0 && (
+        <div className="mt-1">
+          <div className="mono text-xs" style={{ color: "var(--color-signal)" }}>IN ARTICLE CONTENT ({recordRows.length})</div>
+          {recordRows.map((row) => (
+            <div key={row.key} className="text-sm mt-1 flex flex-col gap-0.5">
+              <div>
+                <span style={{ color: "var(--color-phosphor-dim)" }}>{row.title || row.link}</span>
+                <span className="mono text-xs ml-2" style={{ color: "var(--color-muted)" }}>{row.src.split("/").pop()?.slice(0, 44)}</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <input className="mono text-xs flex-1" value={draftKey(row.key, row.suggested)}
+                  onChange={(e) => setDrafts((p) => ({ ...p, [row.key]: e.target.value }))} />
+                <button className="btn btn--compact" disabled={busy}
+                  onClick={() => void applyItems([{ record_id: row.record_id, src: row.src, alt: draftKey(row.key, row.suggested) }])}>
+                  APPLY
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+      {mediaRows.length > 0 && (
+        <div className="mt-2">
+          <div className="mono text-xs" style={{ color: "var(--color-signal)" }}>MEDIA LIBRARY ({mediaRows.length})</div>
+          {mediaRows.map((row) => (
+            <div key={row.key} className="text-sm mt-1 flex items-center gap-2">
+              <span className="mono text-xs" style={{ color: "var(--color-muted)" }}>{row.filename.slice(0, 44)}</span>
+              <input className="mono text-xs flex-1" value={draftKey(row.key, row.suggested)}
+                onChange={(e) => setDrafts((p) => ({ ...p, [row.key]: e.target.value }))} />
+              <button className="btn btn--compact" disabled={busy}
+                onClick={() => void applyItems([{ media_id: row.media_id, alt: draftKey(row.key, row.suggested) }])}>
+                APPLY
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+      {msg && <div className="mono text-xs mt-1" style={{ color: "var(--color-go)" }}>{msg}</div>}
+    </HealthList>
+  );
+}
+
 function HealthSubTab() {
   const { data: jobsData, refetch: refetchJobs } = usePolling<{ jobs: TnJob[] }>("/api/thailandnow/jobs", 2000);
   const [report, setReport] = usePersistentState<HealthReport | null>("tn.seo.health.report", null);
@@ -1087,6 +1237,8 @@ function HealthSubTab() {
           pulls posts+pages+media+sitemap via authed WP REST, HTTP-checks links + images + every sitemap URL — a few minutes
         </span>
       </div>
+
+      <ImportBacklogSection />
 
       {err && <div className="mono" style={{ color: "var(--color-critical)" }}>{err}</div>}
       {scanJob?.status === "error" && (
@@ -1718,6 +1870,8 @@ function HealthSubTab() {
             </HealthList>
             );
           })()}
+
+          <MissingAltSection data={r.missing_alt ?? { records: [], media: [] }} />
 
           {r.internal_manual_check && r.internal_manual_check.length > 0 && (
             <HealthList
