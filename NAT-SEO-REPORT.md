@@ -29,3 +29,19 @@ THAILAND NOW — SEO errors for nat (compiled 2026-10-02, Railjack scans)
 
 == MISSING ALT TEXT: 538 images (per Ahrefs) ==
   Suggest: alt text = what the image shows + place, one short sentence.
+== ADDendum (2026-10-02): BROKEN IMAGES — 2 pages need the WP editor ==
+(WP admin → edit → the broken images show as gray/placeholder blocks → click → Remove block. ~1 min each.)
+
+1. Thai SELECT releases MICHELIN-style restaurant guide
+   https://www.thailandnow.in.th/arts-culture/thai-select-releases-michelin-style-restaurant-guide/
+   Remove 3 dead images: thaiselect_RES03-scaled.jpg, thaiselect_RES09.png, thaiselect_RES13.png
+   (files are 404 — they were lost from the Media Library)
+
+2. Bo Sang Umbrella Festival 2026 (event)
+   https://www.thailandnow.in.th/event/bo-sang-umbrella-festival/
+   Remove 8 dead gallery images: bo-sang-umbrella-festival-02.jpg … -09.jpg
+   (same — files 404)
+
+Already fixed automatically (no action needed):
+✓ Bangkok takes top spot in Time Out's 2026 best cities — 1 dead image removed
+✓ 377 oversized images remediated (shrunk / deleted / archived) — library now has ZERO images over 1 MB
