@@ -8,7 +8,6 @@ import ComfyPanel from "./components/ComfyPanel";
 import NewsroomPanel from "./components/NewsroomPanel";
 import ThailandNowPanel from "./components/ThailandNowPanel";
 import CalendarPanel from "./components/CalendarPanel";
-import ProjectsPanel from "./components/ProjectsPanel";
 import CodeAtlasPanel from "./components/CodeAtlasPanel";
 
 // kind:"panel" modules render their panel component from this map.
@@ -17,7 +16,6 @@ const PANELS: Record<string, FC<{ module: ModuleConfig }>> = {
   newsroom: NewsroomPanel,
   thailandnow: ThailandNowPanel,
   calendar: CalendarPanel,
-  projects: ProjectsPanel,
   codeatlas: CodeAtlasPanel,
 };
 

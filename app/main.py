@@ -21,7 +21,6 @@ from .config import CONFIG, Module, reload_config
 from .health import router as health_router
 from .manage import router as manage_router
 from .newsroom import router as newsroom_router
-from .projects import router as projects_router
 from .radio_news import router as radio_news_router
 from .session_stats import router as session_router
 from .jev import router as jev_router
@@ -41,7 +40,6 @@ app.include_router(jev_router)
 app.include_router(terminal_router)
 app.include_router(thailandnow_router)
 app.include_router(calendar_router)
-app.include_router(projects_router)
 
 DASHBOARD_DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
 

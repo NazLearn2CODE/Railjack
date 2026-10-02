@@ -22,7 +22,7 @@ import signal
 import time
 import unicodedata
 import urllib.parse
-from collections import deque
+from collections import Counter, deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -4747,8 +4747,36 @@ async def _flow_seo_health(job: "TnJob", scope: str = "full") -> None:
                     o["klass"] = "variant-used"
                 else:
                     o["klass"] = "unused"
+        # MISSING ALT (Ahrefs: 540) — content <img> without alt + media entries
+        # with empty alt_text, each with a deterministic suggested alt
+        missing_records = []
+        all_records = posts + pages + events + other_cpts
+        for rec in all_records:
+            html = (rec.get("content") or {}).get("rendered", "") or ""
+            if not html:
+                continue
+            srcs = _seo_imgs_missing_alt(html)
+            if not srcs:
+                continue
+            title = (rec.get("title") or {}).get("rendered", "")
+            missing_records.append({
+                "from_id": rec.get("id"), "from_link": rec.get("link", ""),
+                "title": title,
+                "items": [{"src": x, "suggested": _seo_suggest_alt(x, title)} for x in srcs],
+            })
+        media_all = await _wp_list_all("/media", "id,source_url,alt_text,title,mime_type")
+        missing_media = []
+        for m in media_all or []:
+            if not str(m.get("mime_type") or "").startswith("image/"):
+                continue
+            if (m.get("alt_text") or "").strip():
+                continue
+            u = m.get("source_url") or ""
+            missing_media.append({"id": m.get("id"), "filename": u.rsplit("/", 1)[-1],
+                                  "suggested": _seo_suggest_alt(u, (m.get("title") or {}).get("rendered", ""))})
         job.progress = 95
         job.result = {"scope": "images", "oversized_images": oversized,
+                      "missing_alt": {"records": missing_records, "media": missing_media},
                       "post_count": len(posts), "page_count": len(pages),
                       "event_count": len(events), "other_cpt_count": len(other_cpts),
                       "scan_notes": scan_notes, "at": at}
@@ -5675,6 +5703,73 @@ async def _seo_chrome_inbound(extra_paths: set[str], site_host: str) -> tuple[se
     return linked, fetched, attempted
 
 
+_IMG_TAG_RE = re.compile(r"<img\b[^>]*>", re.I)
+
+
+_ATTR_CACHE: dict[tuple[str, str], str] = {}
+
+
+def _seo_attr(tag: str, name: str) -> str:
+    """Pure: attribute value from a tag string ('' when absent), quotes stripped."""
+    m = re.search(rf'\b{name}\s*=\s*("([^"]*)"|\'([^\']*)\'|([^\s>]+))', tag, re.I)
+    if not m:
+        return ""
+    return next((g for g in m.groups()[1:] if g is not None), "").strip()
+
+
+def _seo_imgs_missing_alt(html: str) -> list[str]:
+    """Pure: srcs of <img> tags with a missing or empty alt attribute (Ahrefs'
+    missing-alt lane). Decorative markers (alt=\"\") count as missing — a human
+    confirms before any write."""
+    out = []
+    for tag in _IMG_TAG_RE.findall(html or ""):
+        src = _seo_attr(tag, "src")
+        if src and not _seo_attr(tag, "alt"):
+            out.append(src)
+    return out
+
+
+def _seo_suggest_alt(src: str, record_title: str = "") -> str:
+    """Pure, deterministic alt-text suggestion: filename stem → words (numeric
+    size/hash suffixes dropped, Thai kept), Title-cased; record title appended
+    as context when it adds something. No LLM — the human clicking APPLY is
+    the judge (JEV gates semantic writes; this suggestion is code-derived)."""
+    import urllib.parse as _up
+    stem = _up.unquote((src or "").rsplit("/", 1)[-1]).rsplit(".", 1)[0]
+    stem = re.sub(r"-\d{2,4}x\d{2,4}$", "", stem)
+    stem = re.sub(r"-scaled$", "", stem)
+    stem = re.sub(r"-e\d{10,}$", "", stem)
+    words = [w for w in re.findall(r"[a-z0-9\u0e00-\u0e7f]+", stem.lower()) if len(w) > 1]
+    txt = " ".join(w.capitalize() if w.isascii() else w for w in words)
+    title = (record_title or "").strip()
+    if title and title.lower() not in txt.lower():
+        txt = f"{txt} — {title}" if txt else title
+    return txt or "Image"
+
+
+def _seo_set_img_alt(html: str, src: str, alt: str) -> tuple[str, int]:
+    """Pure: set (or insert) the alt attribute on <img> tags whose src matches.
+    Returns (new_html, count)."""
+    if not html or not src:
+        return html, 0
+    count, pos, chunks = 0, 0, []
+    for tag in _IMG_TAG_RE.finditer(html):
+        tag_text = tag.group(0)
+        if _seo_attr(tag_text, "src") != src and _seo_norm_url(_seo_attr(tag_text, "src")) != _seo_norm_url(src):
+            continue
+        count += 1
+        am = re.search(r'\balt\s*=\s*("[^"]*"|\'[^\']*\'|[^\s>]+)', tag_text, re.I)
+        if am:
+            new_tag = tag_text[:am.start()] + f'alt="{alt}"' + tag_text[am.end():]
+        else:
+            new_tag = tag_text[:-1].rstrip() + f' alt="{alt}">' if tag_text.endswith(">") else tag_text + f' alt="{alt}"'
+        chunks.append(html[pos:tag.start(0)])
+        chunks.append(new_tag)
+        pos = tag.end(0)
+    chunks.append(html[pos:])
+    return ("".join(chunks), count) if count else (html, 0)
+
+
 _A_HREF_RE = re.compile(r"<a\b[^>]*?\bhref\s*=\s*(\"[^\"]*\"|'[^']*'|[^>\s]+)", re.IGNORECASE)
 _IMG_SRC_RE = re.compile(r"<img\b[^>]*?\bsrc\s*=\s*(\"[^\"]*\"|'[^']*'|[^>\s]+)", re.IGNORECASE)
 
@@ -5794,6 +5889,123 @@ class SeoInsertReq(BaseModel):
     host_id: int
     phrase: str
     href: str
+
+
+# --- Ahrefs import + issue backlog (Phase 1: reports become worklists) -------
+
+SEO_BACKLOG_FILE = Path.home() / ".config" / "railjack" / "seo_backlog.json"
+
+
+def _seo_backlog_load() -> dict:
+    """Issue backlog: {issues: {key: issue}, history: [{at, total_open, by_type}]}."""
+    try:
+        return json.loads(SEO_BACKLOG_FILE.read_text())
+    except Exception:
+        return {"issues": {}, "history": []}
+
+
+def _seo_backlog_save(b: dict) -> None:
+    SEO_BACKLOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    SEO_BACKLOG_FILE.write_text(json.dumps(b, indent=1, ensure_ascii=False))
+
+
+class SeoImportReq(BaseModel):
+    report_type: str = "image_file_size"  # ahrefs issue export kind
+    csv_text: str                         # raw Ahrefs CSV export content
+    filename: str = ""
+
+
+@router.post("/api/thailandnow/seo/import")
+async def seo_import(req: SeoImportReq):
+    """Import an Ahrefs Site Audit issue export (CSV text) into the backlog.
+    Rows normalize to issues keyed by (type, url); re-imports update last_seen /
+    seen_count and REOPEN issues that regressed. Returns per-type counts."""
+    import csv as _csv
+    import hashlib
+    import io as _io
+
+    at = datetime.now().isoformat(timespec="seconds")
+    rtype = (req.report_type or "image_file_size").strip()
+    backlog = _seo_backlog_load()
+    issues = backlog.setdefault("issues", {})
+
+    rows = list(_csv.DictReader(_io.StringIO(req.csv_text)))
+    if not rows:
+        raise HTTPException(400, "no CSV rows parsed — check the export format")
+
+    seen_now: set[str] = set()
+    by_type: Counter = Counter()
+    for row in rows:
+        url = (row.get("URL") or row.get("url") or "").strip()
+        if not url:
+            continue
+        try:
+            size = int((row.get("Size (bytes)") or row.get("Size") or 0))
+        except (TypeError, ValueError):
+            size = 0
+        try:
+            inlinks = int(row.get("No. of IMG inlinks") or row.get("Inlinks") or 0)
+        except (TypeError, ValueError):
+            inlinks = 0
+        key = hashlib.sha1(f"{rtype}:{url}".encode()).hexdigest()[:16]
+        issue = issues.get(key)
+        if issue is None:
+            issues[key] = {"type": rtype, "url": url, "size_bytes": size, "inlinks": inlinks,
+                           "status": "open", "first_seen": at, "last_seen": at,
+                           "seen_count": 1, "filename": url.rsplit("/", 1)[-1]}
+            by_type["new"] += 1
+        else:
+            issue["last_seen"] = at
+            issue["seen_count"] = issue.get("seen_count", 1) + 1
+            issue["size_bytes"] = size or issue.get("size_bytes", 0)
+            if issue.get("status") == "fixed":
+                issue["status"] = "open"
+                issue["regressed"] = True
+            by_type["updated"] += 1
+        seen_now.add(key)
+
+    reopened = sum(1 for i in issues.values() if i.get("regressed"))
+    open_issues = [i for i in issues.values() if i.get("status") == "open"]
+    open_by_type = Counter(i["type"] for i in open_issues)
+    history = backlog.setdefault("history", [])
+    history.append({"at": at, "total_open": len(open_issues),
+                    "by_type": dict(open_by_type),
+                    "import_rows": len(rows), "report_type": rtype})
+    backlog["history"] = history[-52:]
+    _seo_backlog_save(backlog)
+    return {"report_type": rtype, "rows": len(rows), "new": by_type.get("new", 0),
+            "updated": by_type.get("updated", 0), "reopened_fixed": reopened,
+            "total_open": len(open_issues), "open_by_type": dict(open_by_type)}
+
+
+@router.get("/api/thailandnow/seo/backlog")
+async def seo_backlog_get():
+    """Backlog grouped for the panel: open issues by type + history tail."""
+    backlog = _seo_backlog_load()
+    issues = [i for i in backlog.get("issues", {}).values() if i.get("status") == "open"]
+    issues.sort(key=lambda i: -(i.get("inlinks") or 0))
+    by_type: Counter = Counter(i["type"] for i in issues)
+    return {"issues": issues, "total_open": len(issues), "by_type": dict(by_type),
+            "history": backlog.get("history", [])[-26:]}
+
+
+class SeoBacklogStatusReq(BaseModel):
+    key: str
+    status: str  # open | fixed | dismissed
+
+
+@router.post("/api/thailandnow/seo/backlog/set-status")
+async def seo_backlog_set_status(req: SeoBacklogStatusReq):
+    """Manual status override (dismiss / mark fixed)."""
+    if req.status not in ("open", "fixed", "dismissed"):
+        raise HTTPException(400, "status must be open | fixed | dismissed")
+    backlog = _seo_backlog_load()
+    issue = backlog.get("issues", {}).get(req.key)
+    if issue is None:
+        raise HTTPException(404, "no such backlog issue")
+    issue["status"] = req.status
+    _seo_backlog_save(backlog)
+    return {"ok": True, "key": req.key, "status": req.status}
 
 
 class SeoScanReq(BaseModel):
