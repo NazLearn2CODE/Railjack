@@ -50,3 +50,12 @@ CODEATLAS/
 .uv-cache/
 .media-archive-2026-09-28/
 .media-archive-migrate/
+
+# SEO lane scratch dumps (working data — never track)
+/.ahrefs_*.json
+/.linkall_*.json
+/.links_*.json
+/.images_*.json
+/.backup_manifest.json
+/.broken_fixes.json
+/.bulk_*.json
