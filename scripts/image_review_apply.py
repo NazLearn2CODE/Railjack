@@ -22,6 +22,8 @@ import time
 import httpx
 from PIL import Image
 
+from image_review_queue import wp_list_all
+
 SECRETS = os.path.expanduser("~/n8n/.secrets.env")
 LEDGER = ".image_review_queue.json"
 BACKUPS = ".image_review_backups"
@@ -199,18 +201,30 @@ def main():
         print(f"snapshot: {snap_path}")
         for p in plan:
             it, base = p["item"], p["item"]["base"]
-            # copy metadata from the original attachment
-            orig_att = wp_get(c, f"/media/{it['attachment_id']}")
+            # copy metadata from the original attachment; size-variant files are
+            # not separate attachments — fall back to the parent image's record
+            orig_att = None
+            parent_stem = re.sub(r"-\d+x\d+$", "", stem_of(base)).lower()
+            if it.get("attachment_id"):
+                orig_att = wp_get(c, f"/media/{it['attachment_id']}")
+            else:
+                media = wp_list_all(c, "/media", "id,source_url")
+                m = next((x for x in media
+                          if re.sub(r"\.[a-z]+$", "", (x.get("source_url") or "").rsplit("/", 1)[-1]).lower() == parent_stem), None)
+                if m:
+                    orig_att = wp_get(c, f"/media/{m['id']}")
+            meta = (orig_att or {})
+            fallback_title = parent_stem.replace("-", " ")
             # upload JPEG as NEW attachment
             fname = stem_of(base) + ".jpg"
             r = c.post(
                 "/media",
                 files={"file": (fname, p["jpeg"], "image/jpeg")},
                 data={
-                    "title": (orig_att or {}).get("title", {}).get("raw", base),
-                    "caption": (orig_att or {}).get("caption", {}).get("raw", ""),
-                    "description": (orig_att or {}).get("description", {}).get("raw", ""),
-                    "alt_text": (orig_att or {}).get("alt_text", ""),
+                    "title": meta.get("title", {}).get("raw") or fallback_title,
+                    "caption": meta.get("caption", {}).get("raw", ""),
+                    "description": meta.get("description", {}).get("raw", ""),
+                    "alt_text": meta.get("alt_text", ""),
                     "post": str(post_id),
                 },
             )
@@ -226,11 +240,26 @@ def main():
         # single content write
         r = c.put(f"/{rest_base}/{post_id}", json={"content": new_raw})
         r.raise_for_status()
-        # verify: re-read, confirm swaps landed
+        # verify: re-read; every referenced upload URL must resolve 200 and no
+        # old-pattern refs may remain (WP may rename files on upload — check
+        # URLs, not expected names)
         _, check = get_post_raw(c, post_id, rest_base)
-        ok = all(stem_of(p["item"]["base"]) + ".jpg" in check for p in plan)
-        leftovers = [p["item"]["base"] for p in plan if old_url_pattern(p["item"]["base"]).search(check)]
-        print(f"content written. swap verified: {ok}; leftover old refs: {leftovers or 'none'}")
+        leftovers = [p["item"]["base"] for p in plan
+                     if old_url_pattern(p["item"]["base"]).search(check)]
+        urls = sorted(set(re.findall(
+            r"https://[^\s\"'\\<>)]*/uploads/[^\s\"'\\<>)]+\.(?:jpg|jpeg|png|webp)", check)))
+        bad = []
+        for u in urls:
+            try:
+                h = c.head(u)
+                if h.status_code != 200:
+                    bad.append((u.rsplit("/", 1)[-1], h.status_code))
+            except Exception as e:
+                bad.append((u.rsplit("/", 1)[-1], str(e)[:40]))
+            time.sleep(0.2)
+        ok = not bad and not leftovers
+        print(f"content written. every referenced image resolves 200: {not bad}"
+              f"{'; BAD: ' + str(bad) if bad else ''}; leftover old refs: {leftovers or 'none'}")
         # ledger update
         for p in plan:
             p["item"]["status"] = "applied" if ok and not leftovers else "applied-unverified"
