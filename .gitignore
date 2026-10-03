@@ -63,3 +63,5 @@ CODEATLAS/
 /.image_review_queue.json
 /image-review-queue.md
 .image_review_backups/
+/.damage_report.json
+/.stitch/

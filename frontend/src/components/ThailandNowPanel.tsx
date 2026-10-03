@@ -1010,10 +1010,19 @@ function HealthSubTab() {
   }, [refetchJobs]);
 
   // on a seo-health job flipping to done, fetch the report once
-  const prevDone = useRef<Set<string>>(new Set());
+  const prevDone = useRef<Set<string> | null>(null);
   useEffect(() => {
     const doneIds = new Set(jobs.filter((j) => j.status === "done").map((j) => j.id));
-    const newly = jobs.filter((j) => doneIds.has(j.id) && !prevDone.current.has(j.id));
+    // first snapshot: adopt already-done jobs without fetching — a stale report
+    // (e.g. a scoped sitemap run) rendered by the old HealthReport shape crashed
+    // the whole tab (Naz's blank page, 2026-10-02)
+    if (prevDone.current === null) {
+      prevDone.current = doneIds;
+      return;
+    }
+    const prev = prevDone.current;
+    if (prev === null) return; // unreachable — first snapshot handled above
+    const newly = jobs.filter((j) => doneIds.has(j.id) && !prev.has(j.id));
     prevDone.current = doneIds;
     for (const j of newly) {
       if (j.kind !== "seo-health") continue;
@@ -2520,7 +2529,9 @@ function EventsTab() {
   const prevDone = useRef<Set<string>>(new Set());
   useEffect(() => {
     const doneIds = new Set(jobs.filter((j) => j.status === "done").map((j) => j.id));
-    const newly = jobs.filter((j) => doneIds.has(j.id) && !prevDone.current.has(j.id));
+    const prev = prevDone.current;
+    if (prev === null) return; // unreachable — first snapshot handled above
+    const newly = jobs.filter((j) => doneIds.has(j.id) && !prev.has(j.id));
     prevDone.current = doneIds;
     for (const j of newly) {
       if (j.kind !== "deep-search") continue;
