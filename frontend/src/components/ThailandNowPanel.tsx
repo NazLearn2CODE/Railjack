@@ -330,6 +330,7 @@ function ReportsSubTab() {
   const [pagePlans, setPagePlans] = useState<Record<number, PlanRow[]>>({});
   const [pageResults, setPageResults] = useState<Record<number, string>>({});
   const [sessionBusy, setSessionBusy] = useState(false);
+  const [dragActive, setDragActive] = useState(false);
   const { data: jobsData } = usePolling<{ jobs: TnJob[] }>("/api/thailandnow/jobs", 2000);
   const enrichJob = [...(jobsData?.jobs ?? [])].reverse().find((j) => j.kind === "seo-image-enrich") ?? null;
   const enrichRunning = !!enrichJob && (enrichJob.status === "queued" || enrichJob.status === "running");
@@ -408,25 +409,47 @@ function ReportsSubTab() {
   const openByType = backlog?.open_by_type ?? {};
   return (
     <div className="flex flex-col gap-3">
-      {/* import */}
-      <div className="flex items-center gap-2 flex-wrap">
-        <span className="label">IMPORT</span>
-        <input
-          type="file" accept=".csv" multiple
-          onChange={(e) => setFiles(Array.from(e.target.files ?? []))}
-          className="mono text-xs" style={{ color: "var(--color-muted)" }}
-        />
-        <button className={`btn btn--md ${importing ? "" : files.length ? "btn--signal" : ""}`}
-          disabled={importing || !files.length} onClick={() => void runImport()}>
-          {importing ? "IMPORTING…" : `IMPORT${files.length ? ` (${files.length})` : ""}`}
-        </button>
-        <span className="mono text-xs" style={{ color: "var(--color-muted)" }}>
-          Ahrefs Site Audit CSV exports — issue type auto-detected from the filename
-        </span>
+      {/* import — the drop zone IS the affordance: big, dashed, glowing, clickable */}
+      <div>
+        <div className="label mb-1">IMPORT — AHREFS SITE AUDIT EXPORTS</div>
+        <label
+          onDragOver={(e) => { e.preventDefault(); setDragActive(true); }}
+          onDragLeave={() => setDragActive(false)}
+          onDrop={(e) => {
+            e.preventDefault();
+            setDragActive(false);
+            setFiles(Array.from(e.dataTransfer.files ?? []).filter((f) => f.name.endsWith(".csv")));
+          }}
+          className={`block border-2 border-dashed p-5 text-center cursor-pointer transition-all duration-200 ${
+            dragActive ? "border-[color:var(--color-signal)]" : "border-[color:var(--color-edge)] hover:border-[color:var(--color-signal)]"
+          }`}
+          style={{
+            background: dragActive ? "color-mix(in srgb, var(--color-signal) 8%, var(--color-panel))" : "var(--color-panel)",
+            boxShadow: dragActive ? "0 0 22px color-mix(in srgb, var(--color-signal) 25%, transparent)" : undefined,
+          }}
+        >
+          <input type="file" accept=".csv" multiple className="hidden"
+            onChange={(e) => setFiles(Array.from(e.target.files ?? []))} />
+          <div className="display text-sm tracking-widest"
+            style={{ color: dragActive ? "var(--color-signal)" : "var(--color-phosphor-dim)" }}>
+            DROP AHREFS CSV EXPORTS HERE — OR CLICK TO BROWSE
+          </div>
+          <div className="mono text-xs mt-1" style={{ color: "var(--color-muted)" }}>
+            {files.length
+              ? `${files.length} file(s) ready: ${files.map((f) => f.name).join(" · ")}`
+              : "issue type is auto-detected from the export filename"}
+          </div>
+        </label>
+        {files.length > 0 && (
+          <button className={`btn btn--md mt-2 ${importing ? "" : "btn--signal"}`}
+            disabled={importing} onClick={() => void runImport()}>
+            {importing ? "IMPORTING…" : `IMPORT (${files.length})`}
+          </button>
+        )}
+        {importLines.map((l) => (
+          <div key={l} className="mono text-xs mt-1" style={{ color: "var(--color-muted)" }}>{l}</div>
+        ))}
       </div>
-      {importLines.map((l) => (
-        <div key={l} className="mono text-xs" style={{ color: "var(--color-muted)" }}>{l}</div>
-      ))}
 
       {/* backlog */}
       <div>
@@ -445,8 +468,11 @@ function ReportsSubTab() {
                 <td className="py-0.5 pr-2" style={{ color: "var(--color-muted)" }}>
                   seen {i.seen_count ?? 1}× · {i.last_seen?.slice(0, 10) ?? "?"}
                 </td>
-                <td className="py-0.5 pr-2" style={{ color: i.status === "open" ? "var(--color-critical)" : "var(--color-go)" }}>
-                  {i.status}{i.regressed ? " ↺regressed" : ""}
+                <td className="py-0.5 pr-2 whitespace-nowrap">
+                  <span className={`pip ${i.status === "open" ? "pip--crit" : i.status === "fixed" ? "pip--go" : "pip--on"}`} />
+                  <span className="ml-1" style={{ color: i.status === "open" ? "var(--color-critical)" : i.status === "fixed" ? "var(--color-go)" : "var(--color-muted)" }}>
+                    {i.status}{i.regressed ? " ↺regressed" : ""}
+                  </span>
                 </td>
                 <td className="py-0.5 text-right">
                   <select
