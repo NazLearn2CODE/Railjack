@@ -81,6 +81,7 @@ def _read_ledger_lines() -> tuple[list[dict], list[str]]:
     except OSError:
         pass
 
+    mirror_cache = Path.home() / ".cache" / "railjack" / "jev-mirror.jsonl"
     for url in [u.strip() for u in os.environ.get("JEV_LEDGER_URLS", "").split(",") if u.strip()]:
         try:
             r = httpx.get(url, timeout=4.0)
@@ -91,7 +92,30 @@ def _read_ledger_lines() -> tuple[list[dict], list[str]]:
                 except json.JSONDecodeError:
                     continue
             sources.append(url)
+            # last-good snapshot: a down mirror must not erase the metered
+            # spend it contributed (Naz 2026-10-02: gauge jumped when orokin
+            # went offline — metered credit vanished from the sum)
+            try:
+                mirror_cache.parent.mkdir(parents=True, exist_ok=True)
+                mirror_cache.write_text(r.text)
+            except OSError:
+                pass
         except Exception:
+            # mirror down → fall back to the last-good snapshot so the meter
+            # keeps counting that machine's usage; marked degraded in sources
+            if "mirror" not in sources and mirror_cache.exists():
+                try:
+                    cached = 0
+                    for raw in mirror_cache.read_text().splitlines():
+                        try:
+                            lines.append(json.loads(raw))
+                            cached += 1
+                        except json.JSONDecodeError:
+                            continue
+                    if cached:
+                        sources.append(f"{url} (cached, {cached} lines)")
+                except OSError:
+                    pass
             continue  # a down mirror never blocks the lane
 
     return lines, sources
