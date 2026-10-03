@@ -65,8 +65,9 @@ def wp_get(c, path, params=None):
     raise RuntimeError(f"retries exhausted: GET {path}")
 
 
-def to_jpeg(data: bytes, start_q: int = 85) -> tuple[bytes, int]:
-    """PNG bytes -> JPEG bytes ≤1MB, same dimensions, quality stepped down."""
+def to_jpeg(data: bytes, start_q: int = 85, max_dim: int = 1280) -> tuple[bytes, int]:
+    """Image bytes -> JPEG bytes ≤1MB, quality ladder + downscale to max_dim.
+    Oversized JPEG sources shrink by resize (re-encoding alone barely helps)."""
     img = Image.open(io.BytesIO(data))
     if img.mode in ("RGBA", "P", "LA"):
         bg = Image.new("RGB", img.size, (255, 255, 255))
@@ -75,6 +76,10 @@ def to_jpeg(data: bytes, start_q: int = 85) -> tuple[bytes, int]:
         img = bg
     else:
         img = img.convert("RGB")
+    w, h = img.size
+    if max(w, h) > max_dim:
+        scale = max_dim / max(w, h)
+        img = img.resize((round(w * scale), round(h * scale)), Image.LANCZOS)
     ladder = [start_q] + [q for q in QUALITY_LADDER if q < start_q]
     for q in ladder:
         buf = io.BytesIO()
@@ -90,9 +95,12 @@ def stem_of(base: str) -> str:
 
 
 def old_url_pattern(base: str):
-    """URLs on the site ending in the base filename, with or without -WxH, .png."""
+    """URLs on the site ending in the base filename, any size suffix, any ext."""
     esc = re.escape(stem_of(base))
-    return re.compile(rf"https?://[^\s\"'<>)]*{esc}(?:-\d+x\d+)?\.png", re.I)
+    return re.compile(
+        rf"https?://[^\s\"'<>)]*{esc}(?:-\d+x\d+|-scaled(?:-e\d+)?)?\.(?:png|jpe?g|webp)",
+        re.I,
+    )
 
 
 def get_post_raw(c, post_id, rest_base):
@@ -174,8 +182,14 @@ def main():
             img_resp.raise_for_status()
             with open(orig_path, "wb") as fh:
                 fh.write(img_resp.content)
-            # infographics are text-heavy — start higher so labels stay crisp
-            start_q = 90 if "infographic" in base or "chart" in base or "diagram" in base else 85
+            # infographics are text-heavy — start high so labels stay crisp;
+            # already-JPEG sources re-encode poorly — start lower (photos only)
+            if "infographic" in base or "chart" in base or "diagram" in base:
+                start_q = 90
+            elif re.search(r"\.jpe?g$", base, re.I):
+                start_q = 75
+            else:
+                start_q = 85
             data, q = to_jpeg(img_resp.content, start_q)
             with open(jpg_path, "wb") as fh:
                 fh.write(data)
@@ -244,8 +258,10 @@ def main():
         # old-pattern refs may remain (WP may rename files on upload — check
         # URLs, not expected names)
         _, check = get_post_raw(c, post_id, rest_base)
-        leftovers = [p["item"]["base"] for p in plan
-                     if old_url_pattern(p["item"]["base"]).search(check)]
+        new_urls = {p.get("new_url") for p in plan}
+        leftovers = sorted({u for p in plan
+                            for u in old_url_pattern(p["item"]["base"]).findall(check)
+                            if u not in new_urls})
         urls = sorted(set(re.findall(
             r"https://[^\s\"'\\<>)]*/uploads/[^\s\"'\\<>)]+\.(?:jpg|jpeg|png|webp)", check)))
         bad = []
