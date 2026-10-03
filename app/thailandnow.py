@@ -39,6 +39,7 @@ from pydantic import BaseModel, Field
 from .config import CONFIG
 from .notebooklm import CLI, _cached_notebooks, _run_cli
 from .zai import zai_message
+from . import seo_reports
 
 router = APIRouter()
 
@@ -8484,6 +8485,86 @@ async def publish_event_to_wp(payload: dict = Body(default={})):
             "ai_b": seo_data["ai_b"],
         },
     }
+
+
+# --- SEO report triage: generic report import -> backlog -> handler registry --
+# Reports in, worklists out. Any Ahrefs Site Audit CSV lands in the backlog
+# (issue type derived from the export filename); issue types with a registered
+# handler get enrich/plan/apply/revert sessions. app/seo_reports.py holds the
+# logic; this block is thin HTTP. Rails: no deletes, snapshot before write.
+
+class SeoReportImportReq(BaseModel):
+    csv_text: str
+    filename: str = ""
+    report_type: str = ""  # optional override; derived from filename when empty
+
+
+class SeoReportStatusReq(BaseModel):
+    key: str
+    status: str  # open | fixed | dismissed
+
+
+class SeoReportPageReq(BaseModel):
+    post_id: int
+
+
+@router.post("/api/thailandnow/seo/reports/import")
+async def seo_reports_import(req: SeoReportImportReq):
+    try:
+        return seo_reports.import_report(req.csv_text, req.filename, req.report_type or None)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@router.get("/api/thailandnow/seo/reports/backlog")
+async def seo_reports_backlog():
+    return seo_reports.backlog_view()
+
+
+@router.post("/api/thailandnow/seo/reports/set-status")
+async def seo_reports_set_status(req: SeoReportStatusReq):
+    try:
+        return seo_reports.set_status(req.key, req.status)
+    except KeyError as e:
+        raise HTTPException(404, str(e))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@router.get("/api/thailandnow/seo/reports/handlers")
+async def seo_reports_handlers():
+    return seo_reports.handler_view()
+
+
+@router.post("/api/thailandnow/seo/reports/image-size/enrich")
+async def seo_reports_image_enrich():
+    return await seo_reports.enrich_session()
+
+
+@router.get("/api/thailandnow/seo/reports/image-size/session")
+async def seo_reports_image_session():
+    return seo_reports.session_view()
+
+
+@router.post("/api/thailandnow/seo/reports/image-size/plan")
+async def seo_reports_image_plan(req: SeoReportPageReq):
+    return await seo_reports.plan_page(req.post_id)
+
+
+@router.post("/api/thailandnow/seo/reports/image-size/apply")
+async def seo_reports_image_apply(req: SeoReportPageReq):
+    try:
+        return await seo_reports.apply_page(req.post_id)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@router.post("/api/thailandnow/seo/reports/image-size/revert")
+async def seo_reports_image_revert(req: SeoReportPageReq):
+    try:
+        return await seo_reports.revert_page(req.post_id)
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e))
 
 
 if __name__ == "__main__":

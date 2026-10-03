@@ -294,21 +294,232 @@ function usePersistentState<T>(key: string, initial: T) {
   return [state, setState] as const;
 }
 
-// --- SEO sub-module (HEALTH: read-only link/image/orphan report) ----------------
-// Phase 1 = detect-only. Mode-toggle idiom (cf. EventsTab SCOUT/DEEP); HEALTH is
-// the first SEO sub-tab. Async scan rides /api/thailandnow/jobs (kind=seo-health)
-// exactly like EVENTS DEEP: SCAN → poll → CANCEL → on done fetch /seo/report/{id}.
+// --- SEO sub-module (HEALTH + REPORTS) -----------------------------------------
+// HEALTH: read-only link/image/orphan report (rides /api/thailandnow/jobs).
+// REPORTS: generic crawler-report triage — browse Ahrefs CSV exports into a
+// deduping issue backlog, then run a handler session (v1: image-size =
+// shrink-copy + repoint; no deletes) per page with plan → apply → revert.
+
+interface ReportIssue {
+  key: string; type: string; url: string; status: string;
+  size_bytes?: number; inlinks?: number; first_seen?: string; last_seen?: string;
+  seen_count?: number; filename?: string; regressed?: boolean;
+}
+interface ReportBacklog {
+  issues: ReportIssue[]; total_open: number;
+  open_by_type: Record<string, number>;
+  history: { at: string; report_type: string; rows: number; total_open: number }[];
+}
+interface ReportImportResult {
+  report_type: string; handler: string | null; label: string;
+  rows: number; new: number; updated: number; total_open: number;
+}
+interface ReportSessionPage {
+  post_id: number; link: string; title: string; done: number;
+  pending: { base: string; size_mb?: number }[];
+}
+interface PlanRow { base: string; refs: number; new_kb: number; quality: number | string }
+
+function ReportsSubTab() {
+  const [files, setFiles] = useState<File[]>([]);
+  const [importing, setImporting] = useState(false);
+  const [importLines, setImportLines] = useState<string[]>([]);
+  const [backlog, setBacklog] = useState<ReportBacklog | null>(null);
+  const [session, setSession] = useState<{ created_at: string | null; pages: ReportSessionPage[] } | null>(null);
+  const [busyPage, setBusyPage] = useState<number | null>(null);
+  const [pagePlans, setPagePlans] = useState<Record<number, PlanRow[]>>({});
+  const [pageResults, setPageResults] = useState<Record<number, string>>({});
+  const [sessionBusy, setSessionBusy] = useState(false);
+
+  const refreshBacklog = async () => {
+    const r = await fetch("/api/thailandnow/seo/reports/backlog");
+    if (r.ok) setBacklog((await r.json()) as ReportBacklog);
+  };
+  const refreshSession = async () => {
+    const r = await fetch("/api/thailandnow/seo/reports/image-size/session");
+    if (r.ok) setSession((await r.json()) as { created_at: string | null; pages: ReportSessionPage[] });
+  };
+  useEffect(() => { void refreshBacklog(); void refreshSession(); }, []);
+
+  const runImport = async () => {
+    if (!files.length) return;
+    setImporting(true);
+    const lines: string[] = [];
+    for (const f of files) {
+      const text = await f.text();
+      const r = await post<ReportImportResult>("/api/thailandnow/seo/reports/import",
+        { csv_text: text, filename: f.name });
+      lines.push(r.ok && r.data
+        ? `${f.name}: ${r.data.label} — ${r.data.new} new / ${r.data.updated} updated / ${r.data.total_open} open`
+        : `${f.name}: ERROR ${r.error}`);
+    }
+    setImportLines(lines);
+    setFiles([]);
+    setImporting(false);
+    void refreshBacklog();
+  };
+
+  const setStatus = async (key: string, status: string) => {
+    await post("/api/thailandnow/seo/reports/set-status", { key, status });
+    void refreshBacklog();
+  };
+
+  const buildSession = async () => {
+    setSessionBusy(true);
+    const r = await post<{ counts: Record<string, number> }>(
+      "/api/thailandnow/seo/reports/image-size/enrich", {});
+    setSessionBusy(false);
+    setPageResults((p) => ({ ...p, [-1]: r.ok && r.data
+      ? `session built — ${Object.entries(r.data.counts).map(([k, v]) => `${k}: ${v}`).join(", ")}`
+      : `ERROR ${r.error}` }));
+    void refreshSession();
+    void refreshBacklog();
+  };
+
+  const pageAction = async (action: "plan" | "apply" | "revert", postId: number) => {
+    setBusyPage(postId);
+    const r = await post<{ plan?: PlanRow[]; status?: string; leftovers?: string[]; applied?: { base: string; new_kb?: number }[]; reverted?: boolean; note?: string }>(
+      `/api/thailandnow/seo/reports/image-size/${action}`, { post_id: postId });
+    if (action === "plan" && r.ok && r.data?.plan) {
+      setPagePlans((p) => ({ ...p, [postId]: r.data!.plan! }));
+    } else if (action === "apply") {
+      setPageResults((p) => ({ ...p, [postId]: r.ok
+        ? `${r.data?.status}: ${(r.data?.applied ?? []).map((a) => a.base).join(", ") || r.data?.note}`
+        : `ERROR ${r.error}` }));
+      void refreshSession();
+      void refreshBacklog();
+    } else if (action === "revert") {
+      setPageResults((p) => ({ ...p, [postId]: r.ok ? "reverted to snapshot" : `ERROR ${r.error}` }));
+      void refreshSession();
+    }
+    setBusyPage(null);
+  };
+
+  const openByType = backlog?.open_by_type ?? {};
+  return (
+    <div className="flex flex-col gap-3">
+      {/* import */}
+      <div className="flex items-center gap-2 flex-wrap">
+        <span className="label">IMPORT</span>
+        <input
+          type="file" accept=".csv" multiple
+          onChange={(e) => setFiles(Array.from(e.target.files ?? []))}
+          className="mono text-xs" style={{ color: "var(--color-muted)" }}
+        />
+        <button className={`btn btn--md ${importing ? "" : files.length ? "btn--signal" : ""}`}
+          disabled={importing || !files.length} onClick={() => void runImport()}>
+          {importing ? "IMPORTING…" : `IMPORT${files.length ? ` (${files.length})` : ""}`}
+        </button>
+        <span className="mono text-xs" style={{ color: "var(--color-muted)" }}>
+          Ahrefs Site Audit CSV exports — issue type auto-detected from the filename
+        </span>
+      </div>
+      {importLines.map((l) => (
+        <div key={l} className="mono text-xs" style={{ color: "var(--color-muted)" }}>{l}</div>
+      ))}
+
+      {/* backlog */}
+      <div>
+        <div className="label">
+          BACKLOG {backlog ? `(${backlog.total_open} open)` : ""}
+          {Object.entries(openByType).map(([t, n]) => ` · ${t}: ${n}`).join("")}
+        </div>
+        <table className="w-full mono text-xs">
+          <tbody>
+            {(backlog?.issues ?? []).map((i) => (
+              <tr key={i.key} style={{ borderTop: "1px solid var(--color-muted)" }}>
+                <td className="py-0.5 pr-2">{i.filename || i.url.split("/").pop()}</td>
+                <td className="py-0.5 pr-2" style={{ color: "var(--color-muted)" }}>
+                  {i.size_bytes ? `${(i.size_bytes / 1e6).toFixed(2)} MB` : "—"}
+                </td>
+                <td className="py-0.5 pr-2" style={{ color: "var(--color-muted)" }}>
+                  seen {i.seen_count ?? 1}× · {i.last_seen?.slice(0, 10) ?? "?"}
+                </td>
+                <td className="py-0.5 pr-2" style={{ color: i.status === "open" ? "var(--color-critical)" : "var(--color-go)" }}>
+                  {i.status}{i.regressed ? " ↺regressed" : ""}
+                </td>
+                <td className="py-0.5 text-right">
+                  <select
+                    className="mono text-xs" value={i.status}
+                    onChange={(e) => void setStatus(i.key, e.target.value)}
+                    style={{ background: "transparent", color: "var(--color-muted)" }}
+                  >
+                    {["open", "fixed", "dismissed"].map((s) => <option key={s}>{s}</option>)}
+                  </select>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {/* image-size handler session */}
+      <div>
+        <div className="flex items-center gap-2">
+          <span className="label">IMAGE-SIZE HANDLER</span>
+          <button className={`btn btn--md ${sessionBusy ? "" : "btn--signal"}`}
+            disabled={sessionBusy} onClick={() => void buildSession()}>
+            {sessionBusy ? "BUILDING…" : "BUILD FIX SESSION"}
+          </button>
+          {session?.created_at && (
+            <span className="mono text-xs" style={{ color: "var(--color-muted)" }}>
+              session {session.created_at}
+            </span>
+          )}
+        </div>
+        {pageResults[-1] && (
+          <div className="mono text-xs" style={{ color: "var(--color-go)" }}>{pageResults[-1]}</div>
+        )}
+        {(session?.pages ?? []).map((p) => (
+          <div key={p.post_id} className="mono text-xs mt-1"
+            style={{ borderTop: "1px solid var(--color-muted)", paddingTop: 4 }}>
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="font-bold">{p.title || p.link}</span>
+              <span style={{ color: "var(--color-muted)" }}>
+                {p.pending.length} pending · {p.done} applied
+              </span>
+              <button className="btn btn--md" disabled={busyPage === p.post_id || !p.pending.length}
+                onClick={() => void pageAction("plan", p.post_id)}>PLAN</button>
+              <button className="btn btn--md btn--crit" disabled={busyPage === p.post_id || !p.pending.length}
+                onClick={() => void pageAction("apply", p.post_id)}>APPLY</button>
+              <button className="btn btn--md" disabled={busyPage === p.post_id}
+                onClick={() => void pageAction("revert", p.post_id)}>REVERT</button>
+              {p.link && <a className="mono text-xs" href={p.link} target="_blank" rel="noreferrer"
+                style={{ color: "var(--color-muted)" }}>open page ↗</a>}
+            </div>
+            {(pagePlans[p.post_id] ?? []).map((r) => (
+              <div key={r.base} style={{ color: "var(--color-muted)" }}>
+                · {r.base}: {r.refs} ref(s) → {r.new_kb} KB (q{r.quality})
+              </div>
+            ))}
+            {pageResults[p.post_id] && (
+              <div style={{ color: "var(--color-go)" }}>{pageResults[p.post_id]}</div>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
 
 function SeoTab() {
+  const [mode, setMode] = usePersistentState<"health" | "reports">("tn.seo.mode", "health");
   return (
     <>
       <div className="flex items-center gap-2 mb-2">
-        <span className="label">HEALTH</span>
+        {(["health", "reports"] as const).map((m) => (
+          <button key={m} className={`btn btn--md ${mode === m ? "btn--signal" : ""}`}
+            onClick={() => setMode(m)}>
+            {m === "health" ? "HEALTH" : "REPORTS"}
+          </button>
+        ))}
         <span className="mono" style={{ color: "var(--color-muted)" }}>
-          link/image/orphan report &amp; 1-click fixes
+          {mode === "health"
+            ? "link/image/orphan report & 1-click fixes"
+            : "crawler reports → backlog → guided image fixes"}
         </span>
       </div>
-      <HealthSubTab />
+      {mode === "health" ? <HealthSubTab /> : <ReportsSubTab />}
     </>
   );
 }
