@@ -294,11 +294,11 @@ function usePersistentState<T>(key: string, initial: T) {
   return [state, setState] as const;
 }
 
-// --- SEO sub-module (HEALTH + REPORTS) -----------------------------------------
-// HEALTH: read-only link/image/orphan report (rides /api/thailandnow/jobs).
-// REPORTS: generic crawler-report triage — browse Ahrefs CSV exports into a
-// deduping issue backlog, then run a handler session (v1: image-size =
-// shrink-copy + repoint; no deletes) per page with plan → apply → revert.
+// --- SEO sub-module: AHREFS GUIDE ---------------------------------------------
+// The Ahrefs workflow as a four-step rally: LOGIN -> CRAWL -> FEED -> WORK.
+// The old HEALTH scan UI and the operations buttons are retired for now
+// (backend endpoints stay); report triage logic lives in the backend
+// (/api/thailandnow/seo/reports/*) and fix sessions run with H.
 
 interface ReportIssue {
   key: string; type: string; url: string; status: string;
@@ -314,45 +314,34 @@ interface ReportImportResult {
   report_type: string; handler: string | null; label: string;
   rows: number; new: number; updated: number; total_open: number;
 }
-interface ReportSessionPage {
-  post_id: number; link: string; title: string; done: number;
-  pending: { base: string; size_mb?: number }[];
-}
-interface PlanRow { base: string; refs: number; new_kb: number; quality: number | string }
 
-function ReportsSubTab() {
+function AhrefsStep({ n, title, children }: { n: number; title: string; children: ReactNode }) {
+  return (
+    <div className="hud hud--bracket p-3 flex gap-3">
+      <div className="display font-bold" style={{
+        fontSize: 24, minWidth: 36, textAlign: "center", color: "var(--color-signal)",
+        textShadow: "0 0 12px color-mix(in srgb, var(--color-signal) 50%, transparent)",
+      }}>{n}</div>
+      <div className="flex-1 min-w-0">
+        <div className="label mb-1">{title}</div>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function AhrefsGuide() {
   const [files, setFiles] = useState<File[]>([]);
   const [importing, setImporting] = useState(false);
   const [importLines, setImportLines] = useState<string[]>([]);
   const [backlog, setBacklog] = useState<ReportBacklog | null>(null);
-  const [session, setSession] = useState<{ created_at: string | null; pages: ReportSessionPage[] } | null>(null);
-  const [busyPage, setBusyPage] = useState<number | null>(null);
-  const [pagePlans, setPagePlans] = useState<Record<number, PlanRow[]>>({});
-  const [pageResults, setPageResults] = useState<Record<number, string>>({});
-  const [sessionBusy, setSessionBusy] = useState(false);
   const [dragActive, setDragActive] = useState(false);
-  const { data: jobsData } = usePolling<{ jobs: TnJob[] }>("/api/thailandnow/jobs", 2000);
-  const enrichJob = [...(jobsData?.jobs ?? [])].reverse().find((j) => j.kind === "seo-image-enrich") ?? null;
-  const enrichRunning = !!enrichJob && (enrichJob.status === "queued" || enrichJob.status === "running");
-  const lastEnrichDone = useRef<string | null>(null);
 
   const refreshBacklog = async () => {
     const r = await fetch("/api/thailandnow/seo/reports/backlog");
     if (r.ok) setBacklog((await r.json()) as ReportBacklog);
   };
-  const refreshSession = async () => {
-    const r = await fetch("/api/thailandnow/seo/reports/image-size/session");
-    if (r.ok) setSession((await r.json()) as { created_at: string | null; pages: ReportSessionPage[] });
-  };
-  useEffect(() => { void refreshBacklog(); void refreshSession(); }, []);
-  useEffect(() => {
-    // enrich takes minutes (429 backoffs) — refresh the moment its job lands
-    if (enrichJob?.status === "done" && lastEnrichDone.current !== enrichJob.id) {
-      lastEnrichDone.current = enrichJob.id;
-      void refreshSession();
-      void refreshBacklog();
-    }
-  }, [enrichJob?.status, enrichJob?.id]);
+  useEffect(() => { void refreshBacklog(); }, []);
 
   const runImport = async () => {
     if (!files.length) return;
@@ -372,200 +361,137 @@ function ReportsSubTab() {
     void refreshBacklog();
   };
 
-  const setStatus = async (key: string, status: string) => {
-    await post("/api/thailandnow/seo/reports/set-status", { key, status });
-    void refreshBacklog();
-  };
+  const issues = backlog?.issues ?? [];
+  const fixedCount = issues.filter((i) => i.status === "fixed").length;
+  const dismissedCount = issues.filter((i) => i.status === "dismissed").length;
+  const lastImport = backlog?.history?.length
+    ? backlog.history[backlog.history.length - 1]
+    : null;
 
-  const buildSession = async () => {
-    setSessionBusy(true);
-    const r = await post<{ id: string }>("/api/thailandnow/seo/reports/image-size/enrich-job", {});
-    if (!r.ok) {
-      setPageResults((p) => ({ ...p, [-1]: `ERROR ${r.error}` }));
-      setSessionBusy(false);
-    }
-    // job status (running → done) rides the jobs poll; refresh happens on done
-  };
-
-  const pageAction = async (action: "plan" | "apply" | "revert", postId: number) => {
-    setBusyPage(postId);
-    const r = await post<{ plan?: PlanRow[]; status?: string; leftovers?: string[]; applied?: { base: string; new_kb?: number }[]; reverted?: boolean; note?: string }>(
-      `/api/thailandnow/seo/reports/image-size/${action}`, { post_id: postId });
-    if (action === "plan" && r.ok && r.data?.plan) {
-      setPagePlans((p) => ({ ...p, [postId]: r.data!.plan! }));
-    } else if (action === "apply") {
-      setPageResults((p) => ({ ...p, [postId]: r.ok
-        ? `${r.data?.status}: ${(r.data?.applied ?? []).map((a) => a.base).join(", ") || r.data?.note}`
-        : `ERROR ${r.error}` }));
-      void refreshSession();
-      void refreshBacklog();
-    } else if (action === "revert") {
-      setPageResults((p) => ({ ...p, [postId]: r.ok ? "reverted to snapshot" : `ERROR ${r.error}` }));
-      void refreshSession();
-    }
-    setBusyPage(null);
-  };
-
-  const openByType = backlog?.open_by_type ?? {};
   return (
     <div className="flex flex-col gap-3">
-      {/* import — the drop zone IS the affordance: big, dashed, glowing, clickable */}
-      <div>
-        <div className="label mb-1">IMPORT — AHREFS SITE AUDIT EXPORTS</div>
-        <label
-          onDragOver={(e) => { e.preventDefault(); setDragActive(true); }}
-          onDragLeave={() => setDragActive(false)}
-          onDrop={(e) => {
-            e.preventDefault();
-            setDragActive(false);
-            setFiles(Array.from(e.dataTransfer.files ?? []).filter((f) => f.name.endsWith(".csv")));
-          }}
-          className={`block border-2 border-dashed p-5 text-center cursor-pointer transition-all duration-200 ${
-            dragActive ? "border-[color:var(--color-signal)]" : "border-[color:var(--color-edge)] hover:border-[color:var(--color-signal)]"
-          }`}
-          style={{
-            background: dragActive ? "color-mix(in srgb, var(--color-signal) 8%, var(--color-panel))" : "var(--color-panel)",
-            boxShadow: dragActive ? "0 0 22px color-mix(in srgb, var(--color-signal) 25%, transparent)" : undefined,
-          }}
-        >
-          <input type="file" accept=".csv" multiple className="hidden"
-            onChange={(e) => setFiles(Array.from(e.target.files ?? []))} />
-          <div className="display text-sm tracking-widest"
-            style={{ color: dragActive ? "var(--color-signal)" : "var(--color-phosphor-dim)" }}>
-            DROP AHREFS CSV EXPORTS HERE — OR CLICK TO BROWSE
-          </div>
-          <div className="mono text-xs mt-1" style={{ color: "var(--color-muted)" }}>
-            {files.length
-              ? `${files.length} file(s) ready: ${files.map((f) => f.name).join(" · ")}`
-              : "issue type is auto-detected from the export filename"}
-          </div>
-        </label>
-        {files.length > 0 && (
-          <button className={`btn btn--md mt-2 ${importing ? "" : "btn--signal"}`}
-            disabled={importing} onClick={() => void runImport()}>
-            {importing ? "IMPORTING…" : `IMPORT (${files.length})`}
-          </button>
-        )}
-        {importLines.map((l) => (
-          <div key={l} className="mono text-xs mt-1" style={{ color: "var(--color-muted)" }}>{l}</div>
-        ))}
+      <div className="flex items-center gap-2">
+        <span className="pip pip--signal" />
+        <span className="mono text-xs" style={{ color: "var(--color-muted)" }}>
+          crawler reports in — fixes out
+        </span>
       </div>
 
-      {/* backlog */}
-      <div>
-        <div className="label">
-          BACKLOG {backlog ? `(${backlog.total_open} open)` : ""}
-          {Object.entries(openByType).map(([t, n]) => ` · ${t}: ${n}`).join("")}
+      <AhrefsStep n={1} title="LOGIN — WORK NAGA OR THAILAND NOW GOOGLE">
+        <div className="mono text-xs" style={{ color: "var(--color-muted)" }}>
+          Log in at <span style={{ color: "var(--color-phosphor)" }}>app.ahrefs.com</span> with
+          the Work Naga account or the Thailand NOW Google account. Ben manages the seats.
         </div>
-        <table className="w-full mono text-xs">
-          <tbody>
-            {(backlog?.issues ?? []).map((i) => (
-              <tr key={i.key} style={{ borderTop: "1px solid var(--color-muted)" }}>
-                <td className="py-0.5 pr-2">{i.filename || i.url.split("/").pop()}</td>
-                <td className="py-0.5 pr-2" style={{ color: "var(--color-muted)" }}>
-                  {i.size_bytes ? `${(i.size_bytes / 1e6).toFixed(2)} MB` : "—"}
-                </td>
-                <td className="py-0.5 pr-2" style={{ color: "var(--color-muted)" }}>
-                  seen {i.seen_count ?? 1}× · {i.last_seen?.slice(0, 10) ?? "?"}
-                </td>
-                <td className="py-0.5 pr-2 whitespace-nowrap">
-                  <span className={`pip ${i.status === "open" ? "pip--crit" : i.status === "fixed" ? "pip--go" : "pip--on"}`} />
-                  <span className="ml-1" style={{ color: i.status === "open" ? "var(--color-critical)" : i.status === "fixed" ? "var(--color-go)" : "var(--color-muted)" }}>
-                    {i.status}{i.regressed ? " ↺regressed" : ""}
-                  </span>
-                </td>
-                <td className="py-0.5 text-right">
-                  <select
-                    className="mono text-xs" value={i.status}
-                    onChange={(e) => void setStatus(i.key, e.target.value)}
-                    style={{ background: "transparent", color: "var(--color-muted)" }}
-                  >
-                    {["open", "fixed", "dismissed"].map((s) => <option key={s}>{s}</option>)}
-                  </select>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+        <a className="btn btn--md mt-2" href="https://app.ahrefs.com/" target="_blank" rel="noreferrer">
+          OPEN AHREFS ↗
+        </a>
+      </AhrefsStep>
 
-      {/* image-size handler session */}
-      <div>
-        <div className="flex items-center gap-2">
-          <span className="label">IMAGE-SIZE HANDLER</span>
-          <button className={`btn btn--md ${enrichRunning || sessionBusy ? "" : "btn--signal"}`}
-            disabled={enrichRunning || sessionBusy} onClick={() => void buildSession()}>
-            {enrichRunning ? "SCANNING…" : sessionBusy ? "STARTING…" : "BUILD FIX SESSION"}
-          </button>
-          {session?.created_at && (
-            <span className="mono text-xs" style={{ color: "var(--color-muted)" }}>
-              session {session.created_at}
-            </span>
-          )}
+      <AhrefsStep n={2} title="CRAWL — RUN IT, OR WAIT FOR BEN">
+        <div className="mono text-xs flex flex-col gap-1">
+          <div>
+            <span style={{ color: "var(--color-signal)" }}>RUN NOW:</span>{" "}
+            Ahrefs → Site Audit → target thailandnow.in.th → start crawl. Full crawl takes a while.
+          </div>
+          <div>
+            <span style={{ color: "var(--color-signal)" }}>OR WAIT:</span>{" "}
+            Ben&apos;s scheduled crawl covers the site — just use his freshest export.
+          </div>
+          <div style={{ color: "var(--color-hazard)" }}>
+            ⚠ Sucuri allowlist for AhrefsBot still pending with Ben — until then, crawls crawl slow.
+          </div>
         </div>
-        {enrichRunning && (
-          <div className="mono text-xs" style={{ color: "var(--color-muted)" }}>
-            {(enrichJob?.logs ?? []).slice(-1)[0] ?? "scan queued — media library + content sweep takes a few minutes"}
-          </div>
-        )}
-        {enrichJob?.status === "error" && (
-          <div className="mono text-xs" style={{ color: "var(--color-critical)" }}>
-            enrich failed: {enrichJob.error}
-          </div>
-        )}
-        {pageResults[-1] && (
-          <div className="mono text-xs" style={{ color: "var(--color-go)" }}>{pageResults[-1]}</div>
-        )}
-        {(session?.pages ?? []).map((p) => (
-          <div key={p.post_id} className="mono text-xs mt-1"
-            style={{ borderTop: "1px solid var(--color-muted)", paddingTop: 4 }}>
-            <div className="flex items-center gap-2 flex-wrap">
-              <span className="font-bold">{p.title || p.link}</span>
-              <span style={{ color: "var(--color-muted)" }}>
-                {p.pending.length} pending · {p.done} applied
-              </span>
-              <button className="btn btn--md" disabled={busyPage === p.post_id || !p.pending.length}
-                onClick={() => void pageAction("plan", p.post_id)}>PLAN</button>
-              <button className="btn btn--md btn--crit" disabled={busyPage === p.post_id || !p.pending.length}
-                onClick={() => void pageAction("apply", p.post_id)}>APPLY</button>
-              <button className="btn btn--md" disabled={busyPage === p.post_id}
-                onClick={() => void pageAction("revert", p.post_id)}>REVERT</button>
-              {p.link && <a className="mono text-xs" href={p.link} target="_blank" rel="noreferrer"
-                style={{ color: "var(--color-muted)" }}>open page ↗</a>}
+      </AhrefsStep>
+
+      <AhrefsStep n={3} title="FEED THE REPORT TO H">
+        <div className="mb-2">
+          <div className="label mb-1" style={{ color: "var(--color-muted)" }}>IMPORT — AHREFS SITE AUDIT EXPORTS</div>
+          <label
+            onDragOver={(e) => { e.preventDefault(); setDragActive(true); }}
+            onDragLeave={() => setDragActive(false)}
+            onDrop={(e) => {
+              e.preventDefault();
+              setDragActive(false);
+              setFiles(Array.from(e.dataTransfer.files ?? []).filter((f) => f.name.endsWith(".csv")));
+            }}
+            className={`block border-2 border-dashed p-5 text-center cursor-pointer transition-all duration-200 ${
+              dragActive ? "border-[color:var(--color-signal)]" : "border-[color:var(--color-edge)] hover:border-[color:var(--color-signal)]"
+            }`}
+            style={{
+              background: dragActive ? "color-mix(in srgb, var(--color-signal) 8%, var(--color-panel))" : "var(--color-panel)",
+              boxShadow: dragActive ? "0 0 22px color-mix(in srgb, var(--color-signal) 25%, transparent)" : undefined,
+            }}
+          >
+            <input type="file" accept=".csv" multiple className="hidden"
+              onChange={(e) => setFiles(Array.from(e.target.files ?? []))} />
+            <div className="display text-sm tracking-widest"
+              style={{ color: dragActive ? "var(--color-signal)" : "var(--color-phosphor-dim)" }}>
+              DROP THE REPORT CSV HERE — OR CLICK TO BROWSE
             </div>
-            {(pagePlans[p.post_id] ?? []).map((r) => (
-              <div key={r.base} style={{ color: "var(--color-muted)" }}>
-                · {r.base}: {r.refs} ref(s) → {r.new_kb} KB (q{r.quality})
-              </div>
-            ))}
-            {pageResults[p.post_id] && (
-              <div style={{ color: "var(--color-go)" }}>{pageResults[p.post_id]}</div>
-            )}
+            <div className="mono text-xs mt-1" style={{ color: "var(--color-muted)" }}>
+              {files.length
+                ? `${files.length} file(s) ready: ${files.map((f) => f.name).join(" · ")}`
+                : "issue type is auto-detected from the export filename"}
+            </div>
+          </label>
+          {files.length > 0 && (
+            <button className={`btn btn--md mt-2 ${importing ? "" : "btn--signal"}`}
+              disabled={importing} onClick={() => void runImport()}>
+              {importing ? "IMPORTING…" : `IMPORT (${files.length})`}
+            </button>
+          )}
+          {importLines.map((l) => (
+            <div key={l} className="mono text-xs mt-1" style={{ color: "var(--color-muted)" }}>{l}</div>
+          ))}
+        </div>
+        {lastImport && (
+          <div className="mono text-xs" style={{ color: "var(--color-muted)" }}>
+            last import: {lastImport.report_type} · {lastImport.rows} rows · {lastImport.at?.slice(0, 16).replace("T", " ")}
           </div>
-        ))}
-      </div>
+        )}
+      </AhrefsStep>
+
+      <AhrefsStep n={4} title="WORK IT — WITH H">
+        <div className="flex items-center gap-2 flex-wrap mb-2">
+          <span className="mono text-xs px-2 py-0.5" style={{ border: "1px solid var(--color-critical)", color: "var(--color-critical)" }}>
+            open: {backlog?.total_open ?? 0}
+          </span>
+          <span className="mono text-xs px-2 py-0.5" style={{ border: "1px solid var(--color-go)", color: "var(--color-go)" }}>
+            fixed: {fixedCount}
+          </span>
+          <span className="mono text-xs px-2 py-0.5" style={{ border: "1px solid var(--color-muted)", color: "var(--color-muted)" }}>
+            dismissed: {dismissedCount}
+          </span>
+          {Object.entries(openByType(backlog)).map(([t, n]) => (
+            <span key={t} className="mono text-xs" style={{ color: "var(--color-muted)" }}>{t}: {n}</span>
+          ))}
+        </div>
+        <div className="mono text-xs" style={{ color: "var(--color-go)" }}>
+          issues land in the backlog; triage and fix sessions run with H — image-size handler is live, more coming.
+        </div>
+      </AhrefsStep>
     </div>
   );
 }
 
+function openByType(backlog: ReportBacklog | null): Record<string, number> {
+  const c: Record<string, number> = {};
+  for (const i of backlog?.issues ?? []) {
+    if (i.status === "open") c[i.type] = (c[i.type] ?? 0) + 1;
+  }
+  return c;
+}
+
 function SeoTab() {
-  const [mode, setMode] = usePersistentState<"health" | "reports">("tn.seo.mode", "health");
   return (
     <>
       <div className="flex items-center gap-2 mb-2">
-        {(["health", "reports"] as const).map((m) => (
-          <button key={m} className={`btn btn--md ${mode === m ? "btn--signal" : ""}`}
-            onClick={() => setMode(m)}>
-            {m === "health" ? "HEALTH" : "REPORTS"}
-          </button>
-        ))}
-        <span className="mono" style={{ color: "var(--color-muted)" }}>
-          {mode === "health"
-            ? "link/image/orphan report & 1-click fixes"
-            : "crawler reports → backlog → guided image fixes"}
+        <span className="label">AHREFS GUIDE</span>
+        <span className="mono text-xs" style={{ color: "var(--color-muted)" }}>
+          the rally: login → crawl → feed → fix
         </span>
       </div>
-      {mode === "health" ? <HealthSubTab /> : <ReportsSubTab />}
+      <AhrefsGuide />
     </>
   );
 }
@@ -912,7 +838,7 @@ function BulkConfirm({
   );
 }
 
-function HealthSubTab() {
+export function HealthSubTab() {
   const { data: jobsData, refetch: refetchJobs } = usePolling<{ jobs: TnJob[] }>("/api/thailandnow/jobs", 2000);
   const [report, setReport] = usePersistentState<HealthReport | null>("tn.seo.health.report", null);
   const [err, setErr] = useState<string | null>(null);
