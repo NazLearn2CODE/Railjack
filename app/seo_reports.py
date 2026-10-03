@@ -9,6 +9,7 @@ WP access is lazy (`thailandnow._wp` / `._wp_list_all` resolved at call time)
 so tests monkeypatch the app module exactly like the existing SEO tests do.
 """
 
+import asyncio
 import hashlib
 import httpx
 import io
@@ -218,6 +219,17 @@ def _session_save(s: dict) -> None:
     SESSION_FILE.write_text(json.dumps(s, indent=1, ensure_ascii=False))
 
 
+async def _retry(fn, attempts: int = 3, base: float = 5.0):
+    """Site calls die mid-transfer (Sucuri curl-56s seen live) — back off and go again."""
+    for i in range(attempts):
+        try:
+            return await fn()
+        except Exception:
+            if i == attempts - 1:
+                raise
+            await asyncio.sleep(base * (2 ** i))
+
+
 async def enrich_session() -> dict:
     """Build a fix session from OPEN backlog issues of the image-size type:
     classify each flagged image via the media library + content scan.
@@ -232,7 +244,7 @@ async def enrich_session() -> dict:
     if not urls:
         return {"session": None, "message": "no open image-size issues in the backlog"}
 
-    media = await tn._wp_list_all("/media", "id,source_url,media_details,post")
+    media = await _retry(lambda: tn._wp_list_all("/media", "id,source_url,media_details,post"))
     by_stem = {}
     for m in media:
         u = (m.get("source_url") or "").rsplit("/", 1)[-1].lower()
@@ -240,7 +252,8 @@ async def enrich_session() -> dict:
 
     posts = []
     for rb in ("posts", "pages", "event"):
-        posts.extend(await tn._wp_list_all(f"/{rb}", "id,link,title,content,featured_media"))
+        posts.extend(await _retry(lambda rb=rb: tn._wp_list_all(
+            f"/{rb}", "id,link,title,content,featured_media")))
 
     items = []
     for url in urls:
@@ -383,7 +396,7 @@ async def apply_page(post_id: int) -> dict:
     BACKUPS_DIR.mkdir(parents=True, exist_ok=True)
     snap.write_text(raw, encoding="utf-8")
 
-    media = await tn._wp_list_all("/media", "id,source_url,media_details")
+    media = await _retry(lambda: tn._wp_list_all("/media", "id,source_url,media_details"))
     by_stem = {}
     for m in media:
         u = (m.get("source_url") or "").rsplit("/", 1)[-1].lower()

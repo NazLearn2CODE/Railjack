@@ -8543,22 +8543,19 @@ async def seo_reports_image_enrich():
 
 def _flow_image_enrich(job: TnJob):
     """Enrich runs minutes (media-library pagination + 429 backoffs), so the
-    panel drives it as a job — same shape as seo-health, not a sync request."""
+    panel drives it as a job — same shape as seo-health, not a sync request.
+    NOTE: no try/except here — _tn_run_job owns done/error/cancelled."""
 
     async def flow():
         job.status = "running"
         job.progress = 5
         job.logs.append("scanning media library + content for open image-size issues")
-        try:
-            res = await seo_reports.enrich_session()
-            job.progress = 100
-            items = (res.get("session") or {}).get("items", [])
-            c = Counter(i["status"] for i in items)
-            job.logs.append("session built: " + (", ".join(f"{k} {v}" for k, v in c.items()) or "no items"))
-            job.status = "done"
-        except Exception as e:
-            job.status = "error"
-            job.error = str(e)[:300]
+        res = await seo_reports.enrich_session()
+        job.progress = 100
+        items = (res.get("session") or {}).get("items", [])
+        c = Counter(i["status"] for i in items)
+        job.logs.append("session built: " + (", ".join(f"{k} {v}" for k, v in c.items()) or "no items"))
+        job.logs.append("open the page rows to PLAN → APPLY per batch")
 
     return flow()
 
