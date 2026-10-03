@@ -71,6 +71,7 @@ def _fake_wp(state):
     """async _wp replacement dispatching on (method, path)."""
 
     async def fake_wp(method, path, params=None, json_body=None):
+        page = (params or {}).get("page", 1)
         if method == "GET" and re.match(rf"/posts/{POST_ID}$", path):
             return {"id": POST_ID, "link": "https://x/",
                     "content": {"raw": state.get("raw", POST_RAW),
@@ -81,8 +82,12 @@ def _fake_wp(state):
             state["put_calls"] = state.get("put_calls", []) + [json_body]
             state["raw"] = json_body["content"]
             return {"id": POST_ID}
-        if method == "GET" and path.startswith("/media"):
-            return MEDIA[0]
+        if method == "GET" and path == "/media":
+            return MEDIA if page == 1 else []
+        if method == "GET" and path == "/posts":
+            return POSTS if page == 1 else []
+        if method == "GET" and path in ("/pages", "/event"):
+            return []
         raise AssertionError(f"unexpected _wp call: {method} {path}")
 
     return fake_wp

@@ -302,40 +302,111 @@ async def enrich_session() -> dict:
     if not urls:
         return {"session": None, "message": "no open image-size issues in the backlog"}
 
-    media = await _retry(lambda: wp_list_all_paced(tn, "/media", "id,source_url,media_details,post", "media"))
-    by_stem = {}
-    for m in media:
-        u = (m.get("source_url") or "").rsplit("/", 1)[-1].lower()
-        by_stem.setdefault(base_name(u), m)
-
-    posts = []
-    for rb in ("posts", "pages", "event"):
-        posts.extend(await _retry(lambda rb=rb: wp_list_all_paced(
-            tn, f"/{rb}", "id,link,title,content,featured_media", f"cpt-{rb}")))
-
-    items = []
+    # STREAMING match: page-by-page through media and content, keeping only
+    # hits. Accumulating the whole library + all rendered posts held hundreds
+    # of MB during WAF connection-kill storms and crashed the hub twice —
+    # ~25 target stems need KBs, not the library.
+    targets = {}
     for url in urls:
         name = url.rsplit("/", 1)[-1]
-        stem = stem_of(name).lower()
-        m = by_stem.get(base_name(name)) or next(
-            (x for x in media if stem_of((x.get("source_url") or "").rsplit("/", 1)[-1]).lower() == stem), None)
+        targets[stem_of(name).lower()] = {"url": url, "name": name, "media": None}
+
+    order = list(targets)
+
+    def _keep(m):
+        u = (m.get("source_url") or "")
+        return targets.get(stem_of(u.rsplit("/", 1)[-1]).lower())
+
+    async def media_page(batch):
+        for m in batch:
+            t = _keep(m)
+            if t and t["media"] is None:
+                t["media"] = m
+
+    embeds_by_post: dict[int, list[int]] = {}
+    featured_by_post: dict[int, list[int]] = {}
+
+    async def content_page(batch):
+        for p in batch:
+            pid = p.get("id")
+            rendered = ((p.get("content") or {}).get("rendered") or "").lower()
+            if not rendered:
+                continue
+            for idx, stem in enumerate(order):
+                if stem in rendered:
+                    embeds_by_post.setdefault(pid, []).append(idx)
+                t_media = targets[stem]["media"]
+                if t_media and p.get("featured_media") == t_media.get("id"):
+                    featured_by_post.setdefault(pid, []).append(idx)
+
+    post_index: dict[int, dict] = {}
+
+    async def collect_page(batch):
+        for p in batch:
+            if p.get("id") in embeds_by_post or p.get("id") in featured_by_post:
+                post_index[p["id"]] = p
+
+    async def sweep(endpoint, fields, key, on_batch):
+        """Paced + checkpointed + per-page retry; resumes where it died."""
+        cp = _cp_load()
+        page = max(1, int(cp.get(key, 1)))
+        misses = 0
+        while page <= 200:
+            try:
+                batch = await tn._wp("GET", endpoint,
+                                     {"per_page": 100, "page": page, "_fields": fields})
+            except Exception as e:
+                if "invalid_page" in str(e):
+                    break
+                misses += 1
+                cp[key] = page
+                _cp_save(cp)
+                if misses >= 3:
+                    raise
+                await asyncio.sleep(20 * misses)  # WAF cooling window
+                continue
+            misses = 0
+            if not batch:
+                break
+            await on_batch(batch)
+            cp[key] = page
+            _cp_save(cp)
+            page += 1
+            await asyncio.sleep(0.7)  # ping… pong…
+        cp.pop(key, None)
+        _cp_save(cp)
+
+    await sweep("/media", "id,source_url,media_details,post", "media", media_page)
+    for rb in ("posts", "pages", "event"):
+        await sweep(f"/{rb}", "id,link,title,content,featured_media", f"cpt-{rb}", content_page)
+    # third pass: fetch full records only for posts that reference targets
+    for rb in ("posts", "pages", "event"):
+        await sweep(f"/{rb}", "id,link,title,content,featured_media", f"collect-{rb}", collect_page)
+
+    items = []
+    for stem in order:
+        t = targets[stem]
+        m = t["media"]
         det = (m or {}).get("media_details") or {}
         size_mb = round((det.get("filesize") or 0) / 1e6, 2)
+        idx = order.index(stem)
         embeds, featured_in = [], []
-        for p in posts:
-            rendered = ((p.get("content") or {}).get("rendered") or "").lower()
-            if stem in rendered:  # stem match: catches -1024x682 / -scaled / caps
-                embeds.append({"id": p["id"], "link": p["link"],
+        for pid, idxs in embeds_by_post.items():
+            if idx in idxs:
+                p = post_index.get(pid) or {}
+                embeds.append({"id": pid, "link": p.get("link", ""),
                                "title": ((p.get("title") or {}).get("rendered") or "")[:80]})
-            if m and p.get("featured_media") == m.get("id"):
-                featured_in.append({"id": p["id"], "link": p["link"]})
+        for pid, idxs in featured_by_post.items():
+            if idx in idxs:
+                p = post_index.get(pid) or {}
+                featured_in.append({"id": pid, "link": p.get("link", "")})
         if embeds:
             action, status = "repoint", "pending"
         elif featured_in:
             action, status = "skip-featured", "skip-featured"
         else:
             action, status = "unknown-location", "divi-hidden"
-        items.append({"image": url, "base": name, "stem": stem,
+        items.append({"image": t["url"], "base": t["name"], "stem": stem,
                       "attachment_id": (m or {}).get("id"),
                       "size_bytes": det.get("filesize") or 0,
                       "size_mb": size_mb,
