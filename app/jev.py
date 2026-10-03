@@ -43,6 +43,11 @@ LOCAL_LEDGER = Path.home() / ".hermes" / "jev_usage.jsonl"
 REFILL_USD = 5.00
 PRICE_PER_MTOK = 0.042
 GRANT_DAY = 18  # UTC day the monthly credit lands (Sep 18 observed)
+# Balance anchor (Naz 2026-10-02): the ledger sum can never reproduce the true
+# TypeSafe balance (pre-mirror history is invisible to every ledger we read).
+# When an anchor exists, the gauge trusts ITS balance and counts only
+# post-anchor ledger lines — machine-local spend delta on top of truth.
+ANCHOR_PATH = Path.home() / ".config" / "railjack" / "jev-anchor.json"
 
 
 def _credit_window(now: datetime) -> tuple[datetime, datetime]:
@@ -130,6 +135,16 @@ async def jev() -> dict:
     tokens_in = tokens_out = 0
     last_dt: datetime | None = None
     lines, sources = _read_ledger_lines()
+    anchor = None
+    anchor_ts = None
+    try:
+        raw_anchor = json.loads(ANCHOR_PATH.read_text())
+        anchor = float(raw_anchor["balance_usd"])
+        anchor_ts = datetime.fromisoformat(raw_anchor["ts"])
+        if anchor_ts.tzinfo is None:
+            anchor_ts = anchor_ts.replace(tzinfo=timezone.utc)
+    except Exception:
+        anchor, anchor_ts = None, None
     for e in lines:
         ts = str(e.get("ts", ""))
         try:
@@ -138,6 +153,8 @@ async def jev() -> dict:
             continue
         if stamp < window_start:
             continue
+        if anchor_ts is not None and stamp < anchor_ts:
+            continue  # pre-anchor history is inside the anchor balance
         calls += 1
         tokens_in += e.get("in") or 0
         tokens_out += e.get("out") or 0
@@ -149,9 +166,18 @@ async def jev() -> dict:
 
     spend_usd = round(tokens_in / 1_000_000 * PRICE_PER_MTOK, 4)
 
+    if anchor is not None:
+        # anchored to the TypeSafe dashboard balance — machine spend since the
+        # anchor is the only delta the ledger can honestly add
+        remaining = max(0.0, anchor - spend_usd)
+    else:
+        remaining = REFILL_USD - spend_usd
+
     return {
         "spend_usd": spend_usd,
-        "remaining_usd": round(REFILL_USD - spend_usd, 4),
+        "remaining_usd": round(remaining, 4),
+        "anchored": anchor is not None,
+        "anchor_balance_usd": anchor,
         "refill_usd": REFILL_USD,
         "window_start": window_start.strftime("%Y-%m-%dT00:00:00Z"),
         "reset_at": reset_at.strftime("%Y-%m-%dT00:00:00Z"),
