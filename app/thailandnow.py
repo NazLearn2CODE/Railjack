@@ -8553,8 +8553,11 @@ def _flow_image_enrich(job: TnJob):
         res = await seo_reports.enrich_session()
         job.progress = 100
         items = (res.get("session") or {}).get("items", [])
+        if not items:
+            job.logs.append(res.get("message") or "no open image-size issues — nothing to fix")
+            return
         c = Counter(i["status"] for i in items)
-        job.logs.append("session built: " + (", ".join(f"{k} {v}" for k, v in c.items()) or "no items"))
+        job.logs.append("session built: " + (", ".join(f"{k} {v}" for k, v in c.items())))
         job.logs.append("open the page rows to PLAN → APPLY per batch")
 
     return flow()
