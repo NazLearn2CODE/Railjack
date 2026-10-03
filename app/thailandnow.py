@@ -8541,6 +8541,36 @@ async def seo_reports_image_enrich():
     return await seo_reports.enrich_session()
 
 
+def _flow_image_enrich(job: TnJob):
+    """Enrich runs minutes (media-library pagination + 429 backoffs), so the
+    panel drives it as a job — same shape as seo-health, not a sync request."""
+
+    async def flow():
+        job.status = "running"
+        job.progress = 5
+        job.logs.append("scanning media library + content for open image-size issues")
+        try:
+            res = await seo_reports.enrich_session()
+            job.progress = 100
+            items = (res.get("session") or {}).get("items", [])
+            c = Counter(i["status"] for i in items)
+            job.logs.append("session built: " + (", ".join(f"{k} {v}" for k, v in c.items()) or "no items"))
+            job.status = "done"
+        except Exception as e:
+            job.status = "error"
+            job.error = str(e)[:300]
+
+    return flow()
+
+
+@router.post("/api/thailandnow/seo/reports/image-size/enrich-job")
+async def seo_reports_image_enrich_job():
+    if any(j.kind == "seo-image-enrich" and j.status in _TN_RUNNING for j in _TN_JOBS.values()):
+        raise HTTPException(409, "an enrich session is already running")
+    return _tn_spawn("seo-image-enrich", "image-size fix session (enrich + classify)",
+                     _flow_image_enrich)
+
+
 @router.get("/api/thailandnow/seo/reports/image-size/session")
 async def seo_reports_image_session():
     return seo_reports.session_view()

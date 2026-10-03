@@ -330,6 +330,10 @@ function ReportsSubTab() {
   const [pagePlans, setPagePlans] = useState<Record<number, PlanRow[]>>({});
   const [pageResults, setPageResults] = useState<Record<number, string>>({});
   const [sessionBusy, setSessionBusy] = useState(false);
+  const { data: jobsData } = usePolling<{ jobs: TnJob[] }>("/api/thailandnow/jobs", 2000);
+  const enrichJob = [...(jobsData?.jobs ?? [])].reverse().find((j) => j.kind === "seo-image-enrich") ?? null;
+  const enrichRunning = !!enrichJob && (enrichJob.status === "queued" || enrichJob.status === "running");
+  const lastEnrichDone = useRef<string | null>(null);
 
   const refreshBacklog = async () => {
     const r = await fetch("/api/thailandnow/seo/reports/backlog");
@@ -340,6 +344,14 @@ function ReportsSubTab() {
     if (r.ok) setSession((await r.json()) as { created_at: string | null; pages: ReportSessionPage[] });
   };
   useEffect(() => { void refreshBacklog(); void refreshSession(); }, []);
+  useEffect(() => {
+    // enrich takes minutes (429 backoffs) — refresh the moment its job lands
+    if (enrichJob?.status === "done" && lastEnrichDone.current !== enrichJob.id) {
+      lastEnrichDone.current = enrichJob.id;
+      void refreshSession();
+      void refreshBacklog();
+    }
+  }, [enrichJob?.status, enrichJob?.id]);
 
   const runImport = async () => {
     if (!files.length) return;
@@ -366,14 +378,12 @@ function ReportsSubTab() {
 
   const buildSession = async () => {
     setSessionBusy(true);
-    const r = await post<{ counts: Record<string, number> }>(
-      "/api/thailandnow/seo/reports/image-size/enrich", {});
-    setSessionBusy(false);
-    setPageResults((p) => ({ ...p, [-1]: r.ok && r.data
-      ? `session built — ${Object.entries(r.data.counts).map(([k, v]) => `${k}: ${v}`).join(", ")}`
-      : `ERROR ${r.error}` }));
-    void refreshSession();
-    void refreshBacklog();
+    const r = await post<{ id: string }>("/api/thailandnow/seo/reports/image-size/enrich-job", {});
+    if (!r.ok) {
+      setPageResults((p) => ({ ...p, [-1]: `ERROR ${r.error}` }));
+      setSessionBusy(false);
+    }
+    // job status (running → done) rides the jobs poll; refresh happens on done
   };
 
   const pageAction = async (action: "plan" | "apply" | "revert", postId: number) => {
@@ -457,9 +467,9 @@ function ReportsSubTab() {
       <div>
         <div className="flex items-center gap-2">
           <span className="label">IMAGE-SIZE HANDLER</span>
-          <button className={`btn btn--md ${sessionBusy ? "" : "btn--signal"}`}
-            disabled={sessionBusy} onClick={() => void buildSession()}>
-            {sessionBusy ? "BUILDING…" : "BUILD FIX SESSION"}
+          <button className={`btn btn--md ${enrichRunning || sessionBusy ? "" : "btn--signal"}`}
+            disabled={enrichRunning || sessionBusy} onClick={() => void buildSession()}>
+            {enrichRunning ? "SCANNING…" : sessionBusy ? "STARTING…" : "BUILD FIX SESSION"}
           </button>
           {session?.created_at && (
             <span className="mono text-xs" style={{ color: "var(--color-muted)" }}>
@@ -467,6 +477,16 @@ function ReportsSubTab() {
             </span>
           )}
         </div>
+        {enrichRunning && (
+          <div className="mono text-xs" style={{ color: "var(--color-muted)" }}>
+            {(enrichJob?.logs ?? []).slice(-1)[0] ?? "scan queued — media library + content sweep takes a few minutes"}
+          </div>
+        )}
+        {enrichJob?.status === "error" && (
+          <div className="mono text-xs" style={{ color: "var(--color-critical)" }}>
+            enrich failed: {enrichJob.error}
+          </div>
+        )}
         {pageResults[-1] && (
           <div className="mono text-xs" style={{ color: "var(--color-go)" }}>{pageResults[-1]}</div>
         )}
