@@ -41,6 +41,7 @@ AHREFS_ISSUE_ALIASES = {
     "missing-alt": ("alt-text", "Images missing alt text"),
     "broken-internal-link": ("broken-link", "Broken internal link"),
     "4xx-page": ("broken-link", "Broken page (4xx)"),
+    "404-page": ("broken-link", "Broken page (404)"),
 }
 
 HANDLERS = {
