@@ -151,8 +151,9 @@ def backlog_view() -> dict:
     backlog = _load()
     issues = [{"key": k, **i} for k, i in backlog.get("issues", {}).items()]
     issues.sort(key=lambda i: (i.get("status") != "open", -(i.get("size_bytes") or 0)))
+    open_n = sum(1 for i in issues if i.get("status") == "open")
     by_type: Counter = Counter(i["type"] for i in issues if i.get("status") == "open")
-    return {"issues": issues, "total_open": len(issues), "open_by_type": dict(by_type),
+    return {"issues": issues, "total_open": open_n, "open_by_type": dict(by_type),
             "history": backlog.get("history", [])[-26:]}
 
 
