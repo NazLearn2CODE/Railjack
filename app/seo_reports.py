@@ -93,6 +93,26 @@ def _save(b: dict) -> None:
     BACKLOG_FILE.write_text(json.dumps(b, indent=1, ensure_ascii=False))
 
 
+def categorize_url(url: str) -> str:
+    """URL-shape taxonomy — the sort JEV advises over. Erected 2026-10-03."""
+    from urllib.parse import urlsplit
+    path = urlsplit(url).path
+    q = urlsplit(url).query
+    if q or "/page/" in path:
+        return "parameter/pagination"
+    if "/wp-content/" in path or path.endswith((".xml", ".jpg", ".png", ".webp")):
+        return "media/system"
+    if "/tag/" in path or "/category/" in path:
+        return "tag/archive"
+    if path.startswith("/event/"):
+        return "event page"
+    if re.match(r"^/[a-z-]+/[^/]+/$", path):
+        return "article"
+    if path in ("", "/"):
+        return "homepage"
+    return "other"
+
+
 def import_report(csv_text: str, filename: str, explicit_type: str | None = None) -> dict:
     """Normalize Ahrefs CSV rows into the backlog. Issues key on (type, url);
     re-imports refresh last_seen and REOPEN 'fixed' issues that regressed."""
@@ -125,11 +145,13 @@ def import_report(csv_text: str, filename: str, explicit_type: str | None = None
         if issue is None:
             issues[key] = {"type": rtype, "url": url, "size_bytes": size, "inlinks": inlinks,
                            "status": "open", "first_seen": at, "last_seen": at,
-                           "seen_count": 1, "filename": url.rsplit("/", 1)[-1]}
+                           "seen_count": 1, "filename": url.rsplit("/", 1)[-1],
+                           "category": categorize_url(url)}
             counts["new"] += 1
         else:
             issue["last_seen"] = at
             issue["seen_count"] = issue.get("seen_count", 1) + 1
+            issue["category"] = categorize_url(url)
             issue["size_bytes"] = size or issue.get("size_bytes", 0)
             if issue.get("status") == "fixed":
                 issue["status"] = "open"
