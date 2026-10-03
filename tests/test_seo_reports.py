@@ -5,7 +5,6 @@ image downloads + uploads via httpx.MockTransport. Nothing touches the real
 site; backlog/session/backups live in tmp_path.
 """
 
-import json
 import re
 
 import httpx
@@ -21,6 +20,7 @@ def _isolated_paths(monkeypatch, tmp_path):
     monkeypatch.setattr(seo_reports, "BACKLOG_FILE", tmp_path / "backlog.json")
     monkeypatch.setattr(seo_reports, "SESSION_FILE", tmp_path / "session.json")
     monkeypatch.setattr(seo_reports, "BACKUPS_DIR", tmp_path / "backups")
+    monkeypatch.setattr(seo_reports, "CHECKPOINT_FILE", tmp_path / "checkpoint.json")
 
 
 @pytest.fixture
@@ -96,11 +96,19 @@ async def _fake_list_all(endpoint, fields):
     return []
 
 
+async def _fake_paced(tn, endpoint, fields, key, **kw):
+    if endpoint == "/media":
+        return MEDIA
+    if endpoint == "/posts":
+        return POSTS
+    return []
+
+
 @pytest.fixture
 def _fakes(monkeypatch):
     state = {}
     monkeypatch.setattr(thailandnow, "_wp", _fake_wp(state))
-    monkeypatch.setattr(thailandnow, "_wp_list_all", _fake_list_all)
+    monkeypatch.setattr(seo_reports, "wp_list_all_paced", _fake_paced)
     return state
 
 
@@ -210,3 +218,30 @@ def test_revert_restores_snapshot(client, _fakes, monkeypatch):
     r = client.post("/api/thailandnow/seo/reports/image-size/revert", json={"post_id": POST_ID}).json()
     assert r["reverted"] is True
     assert IMAGE_URL.rsplit(".", 1)[0] + "-682x1024.png" in _fakes["raw"]  # original ref back
+
+
+def test_paced_pagination_resumes_from_checkpoint(monkeypatch, tmp_path):
+    """Ping-pong pagination: a WAF swing on page 2 costs one page, not the match —
+    the checkpoint remembers where we died and the retry re-serves from there."""
+    import asyncio
+    monkeypatch.setattr(seo_reports, "CHECKPOINT_FILE", tmp_path / "cp.json")
+    calls = {"n": 0}
+
+    class FakeTN:
+        async def _wp(self, method, path, params=None, json_body=None):
+            calls["n"] += 1
+            page = params["page"]
+            if page == 2 and calls["n"] == 2:
+                raise RuntimeError("curl: (56) Connection closed abruptly")
+            if page == 1:
+                return [{"id": 1}]
+            if page == 2:
+                return [{"id": 2}]
+            return []  # done
+
+    out = asyncio.run(seo_reports.wp_list_all_paced(
+        FakeTN(), "/media", "id", "media", page_sleep=0))
+    assert [x["id"] for x in out] == [1, 2]
+    assert calls["n"] == 4  # p1, p2-fail, p2-retry, p3(end)
+    cp = seo_reports._cp_load()
+    assert cp.get("media") is None  # completed sweep clears the checkpoint

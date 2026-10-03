@@ -22,6 +22,7 @@ from pathlib import Path
 BACKLOG_FILE = Path.home() / ".config" / "railjack" / "seo_backlog.json"
 SESSION_FILE = Path.home() / ".config" / "railjack" / "seo_image_session.json"
 BACKUPS_DIR = Path.home() / ".config" / "railjack" / "seo_backups"
+CHECKPOINT_FILE = Path.home() / ".config" / "railjack" / "seo_scan_checkpoint.json"
 
 # ---------------------------------------------------------------------------
 # report-type detection
@@ -230,6 +231,62 @@ async def _retry(fn, attempts: int = 3, base: float = 5.0):
             await asyncio.sleep(base * (2 ** i))
 
 
+# --- ping-pong pagination -----------------------------------------------------
+# Long sustained sweeps teach the WAF to retaliate (429 storms, curl-56/28
+# connection kills — both seen live 2026-10-03). So: pace the rally (a polite
+# gap between pages — nothing to retaliate against), checkpoint every page
+# (mitigation costs one page, not the match), and if the WAF swings anyway,
+# step back, then re-serve from the checkpoint (re-engage, never restart).
+
+
+
+def _cp_load() -> dict:
+    try:
+        return json.loads(CHECKPOINT_FILE.read_text())
+    except Exception:
+        return {}
+
+
+def _cp_save(cp: dict) -> None:
+    CHECKPOINT_FILE.parent.mkdir(parents=True, exist_ok=True)
+    CHECKPOINT_FILE.write_text(json.dumps(cp))
+
+
+async def wp_list_all_paced(tn, endpoint: str, fields: str, key: str,
+                            page_sleep: float = 0.7, max_pages: int = 200) -> list[dict]:
+    """Page through a WP collection ping-pong style: paced, checkpointed,
+    per-page retry, resume-from-checkpoint across attempts."""
+    cp = _cp_load()
+    page = max(1, int(cp.get(key, 1)))
+    out: list[dict] = []
+    misses = 0
+    while page <= max_pages:
+        try:
+            batch = await tn._wp("GET", endpoint,
+                                 {"per_page": 100, "page": page, "_fields": fields})
+        except Exception as e:
+            if "invalid_page" in str(e):
+                break  # past the last page — collection complete
+            misses += 1
+            cp[key] = page
+            _cp_save(cp)
+            if misses >= 3:
+                raise  # outer _retry resumes from this checkpoint
+            await asyncio.sleep(20 * misses)  # let the WAF cool off
+            continue
+        misses = 0
+        if not batch:
+            break
+        out.extend(batch)
+        cp[key] = page
+        _cp_save(cp)
+        page += 1
+        await asyncio.sleep(page_sleep)  # ping… pong…
+    cp.pop(key, None)  # sweep complete — nothing to resume
+    _cp_save(cp)
+    return out
+
+
 async def enrich_session() -> dict:
     """Build a fix session from OPEN backlog issues of the image-size type:
     classify each flagged image via the media library + content scan.
@@ -244,7 +301,7 @@ async def enrich_session() -> dict:
     if not urls:
         return {"session": None, "message": "no open image-size issues in the backlog"}
 
-    media = await _retry(lambda: tn._wp_list_all("/media", "id,source_url,media_details,post"))
+    media = await _retry(lambda: wp_list_all_paced(tn, "/media", "id,source_url,media_details,post", "media"))
     by_stem = {}
     for m in media:
         u = (m.get("source_url") or "").rsplit("/", 1)[-1].lower()
@@ -252,8 +309,8 @@ async def enrich_session() -> dict:
 
     posts = []
     for rb in ("posts", "pages", "event"):
-        posts.extend(await _retry(lambda rb=rb: tn._wp_list_all(
-            f"/{rb}", "id,link,title,content,featured_media")))
+        posts.extend(await _retry(lambda rb=rb: wp_list_all_paced(
+            tn, f"/{rb}", "id,link,title,content,featured_media", f"cpt-{rb}")))
 
     items = []
     for url in urls:
@@ -396,7 +453,8 @@ async def apply_page(post_id: int) -> dict:
     BACKUPS_DIR.mkdir(parents=True, exist_ok=True)
     snap.write_text(raw, encoding="utf-8")
 
-    media = await _retry(lambda: tn._wp_list_all("/media", "id,source_url,media_details"))
+    media = await _retry(lambda: wp_list_all_paced(
+        tn, "/media", "id,source_url,media_details", "apply-media"))
     by_stem = {}
     for m in media:
         u = (m.get("source_url") or "").rsplit("/", 1)[-1].lower()
