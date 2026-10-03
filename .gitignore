@@ -60,3 +60,6 @@ CODEATLAS/
 /.broken_fixes.json
 /.bulk_*.json
 .seopanel.png
+/.image_review_queue.json
+/image-review-queue.md
+.image_review_backups/
