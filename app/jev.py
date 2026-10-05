@@ -30,6 +30,7 @@ Secrets: the meter ledger holds token counts only — no keys, safe to serve.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from datetime import datetime, timezone
@@ -134,7 +135,11 @@ async def jev() -> dict:
     calls = 0
     tokens_in = tokens_out = 0
     last_dt: datetime | None = None
-    lines, sources = _read_ledger_lines()
+    # to_thread: the ledger read does sync httpx.get per mirror (4s timeout
+    # each). Inline, a dead mirror (orokin offline) froze the EVENT LOOP for
+    # that whole timeout on every /api/session poll — every concurrent route
+    # (NEWSROOM queue, catalog) stalled with it (2026-10-05).
+    lines, sources = await asyncio.to_thread(_read_ledger_lines)
     anchor = None
     anchor_ts = None
     try:
