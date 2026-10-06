@@ -16,7 +16,7 @@ flushes them and the next run re-judges on the new model (jev_gates v5).
 
 from __future__ import annotations
 
-from .jev_gates import (
+from app.platform.jev_gates import (
     CACHE_TTL_S,  # noqa: F401 — re-exported for tests / callers
     flush_cache,
 )
@@ -46,7 +46,7 @@ def gate_bulk_picks(orphan_title: str, orphan_link: str,
     if not picked:
         return {}, {"skipped": "no picks to gate"}
     try:
-        from .jev_gates import cache_read, cache_write, metered_questions
+        from app.platform.jev_gates import cache_read, cache_write, metered_questions
 
         key = "seo-bulk:" + orphan_link + ":" + ",".join(
             f"{p['host_id']}:{p['phrase']}" for p in picked)
@@ -94,7 +94,7 @@ def verdict_insert(phrase: str, orphan_title: str, host_title: str,
     """Advisory JEV verdict for a MANUAL insert (preview-insert). Never
     raises; ``{"verdict": "ok"|"weak"|"skipped", "prob": x, "model": m}``."""
     try:
-        from .jev_gates import cache_read, cache_write, metered_questions
+        from app.platform.jev_gates import cache_read, cache_write, metered_questions
 
         key = f"seo-insert:{orphan_link_key(orphan_title, phrase, host_title)}"
         answers, old_model = cache_read(key)
@@ -126,7 +126,7 @@ def verdict_retarget(old_to: str, from_title: str, new_link: str, new_title: str
     Token overlap can recommend a plausible-looking wrong page — Jev is the judge.
     Never raises; ``{"verdict": "ok"|"weak"|"skipped", "prob": x, "model": m}``."""
     try:
-        from .jev_gates import cache_read, cache_write, metered_questions
+        from app.platform.jev_gates import cache_read, cache_write, metered_questions
 
         key = f"seo-retarget:{orphan_link_key(old_to, new_link, from_title)}"
         answers, old_model = cache_read(key)

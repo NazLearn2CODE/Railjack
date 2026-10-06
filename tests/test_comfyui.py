@@ -9,8 +9,8 @@ import asyncio
 import pytest
 from fastapi import HTTPException
 
-from app import comfyui
-from app.comfyui import Job
+from app.media import comfyui
+from app.media.comfyui import Job
 
 
 # ---------------------------------------------------------------- fit math
@@ -275,7 +275,7 @@ def test_download_404_unknown_entry(comfy_opts, monkeypatch):
 
 
 def test_expand_503_without_key(monkeypatch):
-    monkeypatch.setattr("app.zai._resolve_key", lambda: None)
+    monkeypatch.setattr("app.platform.zai._resolve_key", lambda: None)
     with pytest.raises(HTTPException) as ex:
         asyncio.run(comfyui.expand(comfyui.ExpandBody(idea="cat")))
     assert ex.value.status_code == 503

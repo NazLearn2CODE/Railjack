@@ -1,6 +1,6 @@
 """RECORDING DOCS — extraction + title transform tests (no network)."""
 
-from app import recording_docs as rd
+from app.newsroom import recording_docs as rd
 
 
 def _para(text, style="NORMAL_TEXT", bold=False):

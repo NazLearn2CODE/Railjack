@@ -13,19 +13,19 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 
-from .catalog import router as catalog_router
-from .codeatlas import router as codeatlas_router
-from .calendar_tasks import router as calendar_router
-from .comfyui import router as comfyui_router
-from .config import CONFIG, Module, reload_config
-from .health import router as health_router
-from .manage import router as manage_router
-from .newsroom import router as newsroom_router
-from .radio_news import router as radio_news_router
-from .session_stats import router as session_router
-from .jev import router as jev_router
-from .terminal_input import router as terminal_router
-from .thailandnow import router as thailandnow_router
+from app.platform.catalog import router as catalog_router
+from app.platform.codeatlas import router as codeatlas_router
+from app.platform.calendar_tasks import router as calendar_router
+from app.media.comfyui import router as comfyui_router
+from app.platform.config import CONFIG, Module, reload_config
+from app.platform.health import router as health_router
+from app.platform.manage import router as manage_router
+from app.newsroom.newsroom import router as newsroom_router
+from app.media.radio_news import router as radio_news_router
+from app.platform.session_stats import router as session_router
+from app.platform.jev import router as jev_router
+from app.platform.terminal_input import router as terminal_router
+from app.thailand_now.scout import router as thailandnow_router
 
 app = FastAPI(title="Railjack")
 app.include_router(health_router)

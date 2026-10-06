@@ -28,9 +28,9 @@ from pathlib import Path
 from fastapi import APIRouter, Body, HTTPException
 from fastapi.responses import FileResponse
 
-from . import zai
-from .name_check import _HONORIFICS, check_rewritten, load_registry
-from .style_check import check_style
+from app.platform import zai
+from app.newsroom.name_check import _HONORIFICS, check_rewritten, load_registry
+from app.newsroom.style_check import check_style
 
 router = APIRouter()
 
@@ -39,11 +39,11 @@ QUEUE = SCRIPTS / "queue.py"
 APPEND = SCRIPTS / "nl_append.py"
 RADIO = SCRIPTS / "radio.py"
 NEWSLINE = SCRIPTS / "newsline.py"
-NEWSLINE_REPORTS = Path(__file__).parent / "newsline_reports.py" if (Path(__file__).parent / "newsline_reports.py").exists() else SCRIPTS / "newsline_reports.py"
+NEWSLINE_REPORTS = Path(__file__).parent.parent / "thailand_now" / "reports.py" if (Path(__file__).parent.parent / "thailand_now" / "reports.py").exists() else SCRIPTS / "newsline_reports.py"
 # The Rules Gem drives REWRITE (news-producer prompt → two-layer broadcast
 # script). ~/Gems is the office canonical copy; home has no ~/Gems, so the
 # vault-synced gem is the source here — _gem_text falls through to it.
-BEN_GEM = Path(__file__).parent / "gems" / "radio-news-rewrite.md"
+BEN_GEM = Path(__file__).parent.parent / "gems" / "radio-news-rewrite.md"
 SEO_GEM = Path.home() / "Cephalon" / "10-knowledge" / "ai-workflow" / "gemini-gem-thailandnow-seo.md"
 # Run via the system interpreter, not the scripts' shebang: the skill's deps live
 # with the system python3, not Railjack's venv (the skill-library repo commits exec
@@ -677,7 +677,7 @@ async def api_newsline_docgen_generate(body: dict = Body(...)):
 # Rides app/zai.py (the OmniRoute gateway, NOT z.ai direct), so the pass keeps
 # working past a z.ai quota wall. Editorial hard rule (2026-08-27): every Thai
 # name in the body rides inside the overlay — **English Name [ชื่อไทย]** — and
-# app.name_check enforces it post-hoc (search-before-name happens in the IDE
+# app.newsroom.name_check enforces it post-hoc (search-before-name happens in the IDE
 # lane; the metered lane confirms from knowledge or romanizes RTGS-style).
 
 
@@ -705,7 +705,7 @@ def _strip_fabricated_thai(body: str, source: str) -> str:
     # Tidy: empty parens from multi-word Thai stripped separately, then orphaned
     # brackets — but SPARE bracket groups that contain Thai: the 2026-08-27
     # overlay format is **English Name [ชื่อไทย]** and the brackets are load-
-    # bearing (app.name_check reads them as the only legal Thai zone).
+    # bearing (app.newsroom.name_check reads them as the only legal Thai zone).
     body = re.sub(r'\(\s*\)', '', body)
     body = re.sub(
         r'\[([^\[\]()]+)\]',
@@ -971,7 +971,7 @@ async def api_infographic_suggest(body: dict = Body(...)):
     # flagged so Naz eyeballs them first. One metered call; degrades silently.
     jev: dict = {"ok": True, "disputed": [], "jev_model": None}
     try:
-        from .jev_gates import cache_read, cache_write, metered_questions
+        from app.platform.jev_gates import cache_read, cache_write, metered_questions
         numbered = "\n\n".join(
             "[%d] %s" % (i, p) for i, p in enumerate(
                 [p for p in re.split(r"\n\s*\n", text) if p.strip()], start=1))
@@ -999,7 +999,7 @@ async def api_infographic_suggest(body: dict = Body(...)):
                 answers, model = metered_questions(
                     "NEWSROOM infographic director corroboration (TV news script)", qs)
                 if model and old_model and model != old_model:
-                    from .jev_gates import flush_cache
+                    from app.platform.jev_gates import flush_cache
                     flush_cache()
                 cache_write(key, answers, model)
         if answers:
@@ -1056,7 +1056,7 @@ def _safe_jevgates(canonical: str, style_flags: list[dict] | None = None) -> dic
     triage) — advisory, metered, content-hash cached (Naz 2026-09-22;
     triage + application 2026-09-23). Degrades to skipped."""
     try:
-        from .jev_gates import load_registry_map, run_gates
+        from app.platform.jev_gates import load_registry_map, run_gates
 
         return run_gates(canonical, registry=load_registry_map(), style_flags=style_flags)
     except Exception as exc:  # pragma: no cover — gates are tested pure
@@ -1078,7 +1078,7 @@ def _jev_pass(canonical: str) -> tuple[str, dict]:
     Returns (applied_text, report). NEVER raises and never invents Thai —
     registry Thai only; any failure degrades to the untouched text."""
     try:
-        from .jev_gates import apply_gates
+        from app.platform.jev_gates import apply_gates
 
         flags = [w for w in _safe_stylecheck(canonical).get("warnings", []) if w.get("name")]
         report = _safe_jevgates(canonical, style_flags=flags)
@@ -1111,7 +1111,7 @@ def _render_overlays(text: str) -> str:
     """Render Thai-name overlays to aired form: **English (ชื่อไทย)**.
 
     Square brackets are the PIPELINE format — the machine-readable zone that
-    app.name_check treats as the only legal Thai and the strip guard spares.
+    app.newsroom.name_check treats as the only legal Thai and the strip guard spares.
     They were never meant for the anchor's eyes: every script this hub serves
     (rewrite, CONVERT → Script box → preview → Docs → radio) renders them as
     parentheses. Checks always run on the canonical bracket form BEFORE this;
@@ -1637,7 +1637,7 @@ def _jev_classify_moods(text: str) -> tuple[list[str], str | None]:
     if not text:
         return None, None
     try:
-        from .jev_gates import cache_read, cache_write, metered_questions
+        from app.platform.jev_gates import cache_read, cache_write, metered_questions
 
         key = "mood:" + text
         answers, old_model = cache_read(key)
@@ -1658,7 +1658,7 @@ def _jev_classify_moods(text: str) -> tuple[list[str], str | None]:
                 "NEWSROOM infographic mood-match: script tone → art style, palette, "
                 "and animation motion buckets.", questions)
             if model and old_model and model != old_model:
-                from .jev_gates import flush_cache
+                from app.platform.jev_gates import flush_cache
                 flush_cache()
             cache_write(key, answers, model)
         scored = []

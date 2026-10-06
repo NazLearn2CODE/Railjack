@@ -8,7 +8,7 @@ import pytest
 from datetime import datetime
 from fastapi import HTTPException
 
-from app.thailandnow import analyze_card, events_to_publish
+from app.thailand_now.scout import analyze_card, events_to_publish
 
 
 @pytest.fixture(autouse=True)
@@ -23,12 +23,12 @@ def _stub_sheets_ops(monkeypatch):
     async def mock_find_row(*args, **kwargs):
         return None
 
-    monkeypatch.setattr("app.thailandnow._sheet_update_cell", mock_noop)
-    monkeypatch.setattr("app.thailandnow._sheet_update_range", mock_noop)
-    monkeypatch.setattr("app.thailandnow._sheet_append_rows", mock_noop)
-    monkeypatch.setattr("app.thailandnow._sheet_read_all", mock_read_all)
-    monkeypatch.setattr("app.thailandnow._ensure_pipeline_tab", mock_noop)
-    monkeypatch.setattr("app.thailandnow._pipeline_find_row", mock_find_row)
+    monkeypatch.setattr("app.thailand_now.scout._sheet_update_cell", mock_noop)
+    monkeypatch.setattr("app.thailand_now.scout._sheet_update_range", mock_noop)
+    monkeypatch.setattr("app.thailand_now.scout._sheet_append_rows", mock_noop)
+    monkeypatch.setattr("app.thailand_now.scout._sheet_read_all", mock_read_all)
+    monkeypatch.setattr("app.thailand_now.scout._ensure_pipeline_tab", mock_noop)
+    monkeypatch.setattr("app.thailand_now.scout._pipeline_find_row", mock_find_row)
 
 
 @pytest.mark.anyio
@@ -42,7 +42,7 @@ async def test_events_to_publish_happy_path(monkeypatch):
             {"id": "card_102", "name": "Event | AUG #03"},
         ]
 
-    monkeypatch.setattr("app.thailandnow._trello", mock_trello)
+    monkeypatch.setattr("app.thailand_now.scout._trello", mock_trello)
 
     res = await events_to_publish()
     assert res == {
@@ -88,10 +88,10 @@ async def test_analyze_card_happy_path_attachment(monkeypatch):
         }
         return seo, "gemini-3.6-flash (agy)"
 
-    monkeypatch.setattr("app.thailandnow._trello", mock_trello)
-    monkeypatch.setattr("app.thailandnow._google_token", mock_google_token)
-    monkeypatch.setattr("app.thailandnow._drive_read_doc", mock_drive_read_doc)
-    monkeypatch.setattr("app.thailandnow._generate_event_seo", mock_generate_event_seo)
+    monkeypatch.setattr("app.thailand_now.scout._trello", mock_trello)
+    monkeypatch.setattr("app.thailand_now.scout._google_token", mock_google_token)
+    monkeypatch.setattr("app.thailand_now.scout._drive_read_doc", mock_drive_read_doc)
+    monkeypatch.setattr("app.thailand_now.scout._generate_event_seo", mock_generate_event_seo)
 
     res = await analyze_card({"card_id": "card_101"})
 
@@ -130,10 +130,10 @@ async def test_analyze_card_happy_path_desc_fallback(monkeypatch):
         assert title == "AUG #03"
         return {"keyphrases": [], "metas": [], "hashtags": "", "ai_a": "", "ai_b": []}, "glm-5"
 
-    monkeypatch.setattr("app.thailandnow._trello", mock_trello)
-    monkeypatch.setattr("app.thailandnow._google_token", mock_google_token)
-    monkeypatch.setattr("app.thailandnow._drive_read_doc", mock_drive_read_doc)
-    monkeypatch.setattr("app.thailandnow._generate_event_seo", mock_generate_event_seo)
+    monkeypatch.setattr("app.thailand_now.scout._trello", mock_trello)
+    monkeypatch.setattr("app.thailand_now.scout._google_token", mock_google_token)
+    monkeypatch.setattr("app.thailand_now.scout._drive_read_doc", mock_drive_read_doc)
+    monkeypatch.setattr("app.thailand_now.scout._generate_event_seo", mock_generate_event_seo)
 
     res = await analyze_card({"card_id": "card_102"})
     assert res["title"] == "AUG #03"
@@ -157,7 +157,7 @@ async def test_analyze_card_no_doc_found_404(monkeypatch):
             return [{"name": "Image", "url": "https://example.com/pic.jpg"}]
         return {}
 
-    monkeypatch.setattr("app.thailandnow._trello", mock_trello)
+    monkeypatch.setattr("app.thailand_now.scout._trello", mock_trello)
 
     with pytest.raises(HTTPException) as exc_info:
         await analyze_card({"card_id": "card_103"})
@@ -204,14 +204,14 @@ async def test_publish_event_from_card_happy_path(monkeypatch):
             return {"id": 8888, "link": "https://www.thailandnow.in.th/event/aug-02"}
         return {}
 
-    from app.thailandnow import publish_event_from_card
+    from app.thailand_now.scout import publish_event_from_card
 
-    monkeypatch.setattr("app.thailandnow._trello", mock_trello)
-    monkeypatch.setattr("app.thailandnow._google_token", mock_google_token)
-    monkeypatch.setattr("app.thailandnow._drive_read_doc", mock_drive_read_doc)
-    monkeypatch.setattr("app.thailandnow._drive_read_doc_html", mock_drive_read_doc_html)
-    monkeypatch.setattr("app.thailandnow._generate_event_seo", mock_generate_event_seo)
-    monkeypatch.setattr("app.thailandnow._wp", mock_wp)
+    monkeypatch.setattr("app.thailand_now.scout._trello", mock_trello)
+    monkeypatch.setattr("app.thailand_now.scout._google_token", mock_google_token)
+    monkeypatch.setattr("app.thailand_now.scout._drive_read_doc", mock_drive_read_doc)
+    monkeypatch.setattr("app.thailand_now.scout._drive_read_doc_html", mock_drive_read_doc_html)
+    monkeypatch.setattr("app.thailand_now.scout._generate_event_seo", mock_generate_event_seo)
+    monkeypatch.setattr("app.thailand_now.scout._wp", mock_wp)
 
     res = await publish_event_from_card({"card_id": "card_201"})
 
@@ -235,14 +235,14 @@ async def test_publish_event_from_card_happy_path(monkeypatch):
 
 @pytest.mark.anyio
 async def test_publish_event_from_card_missing_card_id():
-    from app.thailandnow import publish_event_from_card
+    from app.thailand_now.scout import publish_event_from_card
     with pytest.raises(HTTPException) as exc_info:
         await publish_event_from_card({})
     assert exc_info.value.status_code == 400
 
 
 def test_extract_doc_title_heading_and_no_heading():
-    from app.thailandnow import _extract_doc_title
+    from app.thailand_now.scout import _extract_doc_title
 
     # With h1 or h2 heading
     assert _extract_doc_title("<h1>Event Headline</h1><p>Body</p>", "Facebook\nBody") == "Event Headline"
@@ -254,7 +254,7 @@ def test_extract_doc_title_heading_and_no_heading():
 
 
 def test_convert_text_to_gutenberg_social_label():
-    from app.thailandnow import _convert_text_to_gutenberg
+    from app.thailand_now.scout import _convert_text_to_gutenberg
 
     text = """Facebook
 
@@ -270,7 +270,7 @@ Pak Bara Beach, La-ngu District, Satun"""
 
 @pytest.mark.anyio
 async def test_publish_event_from_card_text_fallback(monkeypatch):
-    from app.thailandnow import publish_event_from_card
+    from app.thailand_now.scout import publish_event_from_card
 
     curr_year = datetime.now().year
 
@@ -314,12 +314,12 @@ async def test_publish_event_from_card_text_fallback(monkeypatch):
             return {"id": 9999, "link": "https://www.thailandnow.in.th/event/squid"}
         return {}
 
-    monkeypatch.setattr("app.thailandnow._trello", mock_trello)
-    monkeypatch.setattr("app.thailandnow._google_token", mock_google_token)
-    monkeypatch.setattr("app.thailandnow._drive_read_doc", mock_drive_read_doc)
-    monkeypatch.setattr("app.thailandnow._drive_read_doc_html", mock_drive_read_doc_html)
-    monkeypatch.setattr("app.thailandnow._generate_event_seo", mock_generate_event_seo)
-    monkeypatch.setattr("app.thailandnow._wp", mock_wp)
+    monkeypatch.setattr("app.thailand_now.scout._trello", mock_trello)
+    monkeypatch.setattr("app.thailand_now.scout._google_token", mock_google_token)
+    monkeypatch.setattr("app.thailand_now.scout._drive_read_doc", mock_drive_read_doc)
+    monkeypatch.setattr("app.thailand_now.scout._drive_read_doc_html", mock_drive_read_doc_html)
+    monkeypatch.setattr("app.thailand_now.scout._generate_event_seo", mock_generate_event_seo)
+    monkeypatch.setattr("app.thailand_now.scout._wp", mock_wp)
 
     res = await publish_event_from_card({"card_id": "card_squid"})
     assert res["wp_id"] == 9999
@@ -333,7 +333,7 @@ async def test_publish_event_from_card_text_fallback(monkeypatch):
 @pytest.mark.anyio
 async def test_publish_event_from_card_year_from_due(monkeypatch):
     """(a) card due='2026-08-15T...' -> title ends with '2026'"""
-    from app.thailandnow import publish_event_from_card
+    from app.thailand_now.scout import publish_event_from_card
 
     async def mock_trello(method, path, params=None, body=None):
         if path == "/cards/card_due":
@@ -375,12 +375,12 @@ async def test_publish_event_from_card_year_from_due(monkeypatch):
             return {"id": 1001, "link": "https://www.thailandnow.in.th/event/pattaya-2026"}
         return {}
 
-    monkeypatch.setattr("app.thailandnow._trello", mock_trello)
-    monkeypatch.setattr("app.thailandnow._google_token", mock_google_token)
-    monkeypatch.setattr("app.thailandnow._drive_read_doc", mock_drive_read_doc)
-    monkeypatch.setattr("app.thailandnow._drive_read_doc_html", mock_drive_read_doc_html)
-    monkeypatch.setattr("app.thailandnow._generate_event_seo", mock_generate_event_seo)
-    monkeypatch.setattr("app.thailandnow._wp", mock_wp)
+    monkeypatch.setattr("app.thailand_now.scout._trello", mock_trello)
+    monkeypatch.setattr("app.thailand_now.scout._google_token", mock_google_token)
+    monkeypatch.setattr("app.thailand_now.scout._drive_read_doc", mock_drive_read_doc)
+    monkeypatch.setattr("app.thailand_now.scout._drive_read_doc_html", mock_drive_read_doc_html)
+    monkeypatch.setattr("app.thailand_now.scout._generate_event_seo", mock_generate_event_seo)
+    monkeypatch.setattr("app.thailand_now.scout._wp", mock_wp)
 
     res = await publish_event_from_card({"card_id": "card_due"})
     assert res["wp_id"] == 1001
@@ -391,7 +391,7 @@ async def test_publish_event_from_card_year_from_due(monkeypatch):
 @pytest.mark.anyio
 async def test_publish_event_from_card_year_fallback_current_year(monkeypatch):
     """(b) card due=None -> title ends with str(current year)"""
-    from app.thailandnow import publish_event_from_card
+    from app.thailand_now.scout import publish_event_from_card
 
     current_year = str(datetime.now().year)
 
@@ -435,12 +435,12 @@ async def test_publish_event_from_card_year_fallback_current_year(monkeypatch):
             return {"id": 1002, "link": "https://www.thailandnow.in.th/event/lantern"}
         return {}
 
-    monkeypatch.setattr("app.thailandnow._trello", mock_trello)
-    monkeypatch.setattr("app.thailandnow._google_token", mock_google_token)
-    monkeypatch.setattr("app.thailandnow._drive_read_doc", mock_drive_read_doc)
-    monkeypatch.setattr("app.thailandnow._drive_read_doc_html", mock_drive_read_doc_html)
-    monkeypatch.setattr("app.thailandnow._generate_event_seo", mock_generate_event_seo)
-    monkeypatch.setattr("app.thailandnow._wp", mock_wp)
+    monkeypatch.setattr("app.thailand_now.scout._trello", mock_trello)
+    monkeypatch.setattr("app.thailand_now.scout._google_token", mock_google_token)
+    monkeypatch.setattr("app.thailand_now.scout._drive_read_doc", mock_drive_read_doc)
+    monkeypatch.setattr("app.thailand_now.scout._drive_read_doc_html", mock_drive_read_doc_html)
+    monkeypatch.setattr("app.thailand_now.scout._generate_event_seo", mock_generate_event_seo)
+    monkeypatch.setattr("app.thailand_now.scout._wp", mock_wp)
 
     res = await publish_event_from_card({"card_id": "card_nodue"})
     assert res["wp_id"] == 1002
@@ -451,7 +451,7 @@ async def test_publish_event_from_card_year_fallback_current_year(monkeypatch):
 @pytest.mark.anyio
 async def test_publish_event_from_card_year_already_in_title_no_double_append(monkeypatch):
     """(c) a title already ending in a year (e.g. doc heading 'Foo 2026') -> unchanged (no double append)"""
-    from app.thailandnow import publish_event_from_card
+    from app.thailand_now.scout import publish_event_from_card
 
     async def mock_trello(method, path, params=None, body=None):
         if path == "/cards/card_with_year":
@@ -493,12 +493,12 @@ async def test_publish_event_from_card_year_already_in_title_no_double_append(mo
             return {"id": 1003, "link": "https://www.thailandnow.in.th/event/songkran-2026"}
         return {}
 
-    monkeypatch.setattr("app.thailandnow._trello", mock_trello)
-    monkeypatch.setattr("app.thailandnow._google_token", mock_google_token)
-    monkeypatch.setattr("app.thailandnow._drive_read_doc", mock_drive_read_doc)
-    monkeypatch.setattr("app.thailandnow._drive_read_doc_html", mock_drive_read_doc_html)
-    monkeypatch.setattr("app.thailandnow._generate_event_seo", mock_generate_event_seo)
-    monkeypatch.setattr("app.thailandnow._wp", mock_wp)
+    monkeypatch.setattr("app.thailand_now.scout._trello", mock_trello)
+    monkeypatch.setattr("app.thailand_now.scout._google_token", mock_google_token)
+    monkeypatch.setattr("app.thailand_now.scout._drive_read_doc", mock_drive_read_doc)
+    monkeypatch.setattr("app.thailand_now.scout._drive_read_doc_html", mock_drive_read_doc_html)
+    monkeypatch.setattr("app.thailand_now.scout._generate_event_seo", mock_generate_event_seo)
+    monkeypatch.setattr("app.thailand_now.scout._wp", mock_wp)
 
     res = await publish_event_from_card({"card_id": "card_with_year"})
     assert res["wp_id"] == 1003
@@ -507,7 +507,7 @@ async def test_publish_event_from_card_year_already_in_title_no_double_append(mo
 
 
 def test_parse_event_dates():
-    from app.thailandnow import _parse_event_dates
+    from app.thailand_now.scout import _parse_event_dates
 
     # 1. '7 - 9 August, 2026'
     assert _parse_event_dates("7 - 9 August, 2026") == ("2026-08-07", "2026-08-09")
@@ -524,7 +524,7 @@ def test_parse_event_dates():
 
 
 def test_extract_google_doc_data_and_build_gutenberg():
-    from app.thailandnow import _extract_google_doc_data, _build_gutenberg_from_doc_ast
+    from app.thailand_now.scout import _extract_google_doc_data, _build_gutenberg_from_doc_ast
 
     doc_ast = {
         "body": {
@@ -577,7 +577,7 @@ def test_extract_google_doc_data_and_build_gutenberg():
 
 def test_extract_google_doc_data_article_mode():
     """Articles skip location/date rows — content starts immediately after H1."""
-    from app.thailandnow import _extract_google_doc_data
+    from app.thailand_now.scout import _extract_google_doc_data
 
     doc_ast = {
         "body": {
@@ -608,7 +608,7 @@ def test_extract_google_doc_data_article_mode():
 
 def test_build_gutenberg_from_doc_ast_article_three_enters():
     """Articles get 3 empty-para spacers directly under each H2."""
-    from app.thailandnow import _extract_google_doc_data, _build_gutenberg_from_doc_ast
+    from app.thailand_now.scout import _extract_google_doc_data, _build_gutenberg_from_doc_ast
 
     doc_ast = {
         "body": {
@@ -658,7 +658,7 @@ def test_build_gutenberg_from_doc_ast_article_three_enters():
 
 @pytest.mark.anyio
 async def test_create_event_doc_hook_b_pipeline_logged(monkeypatch):
-    from app.thailandnow import create_event_doc, COVERED_OURS_SHEET
+    from app.thailand_now.scout import create_event_doc, COVERED_OURS_SHEET
 
     captured_appends = []
 
@@ -684,9 +684,9 @@ async def test_create_event_doc_hook_b_pipeline_logged(monkeypatch):
     async def mock_sheet_append_rows(sheet_id, tab, rows):
         captured_appends.append((sheet_id, tab, rows))
 
-    monkeypatch.setattr("app.thailandnow.provision", mock_provision)
-    monkeypatch.setattr("app.thailandnow._ensure_pipeline_tab", mock_ensure_pipeline)
-    monkeypatch.setattr("app.thailandnow._sheet_append_rows", mock_sheet_append_rows)
+    monkeypatch.setattr("app.thailand_now.scout.provision", mock_provision)
+    monkeypatch.setattr("app.thailand_now.scout._ensure_pipeline_tab", mock_ensure_pipeline)
+    monkeypatch.setattr("app.thailand_now.scout._sheet_append_rows", mock_sheet_append_rows)
 
     payload = {
         "event": {
@@ -714,7 +714,7 @@ async def test_create_event_doc_hook_b_pipeline_logged(monkeypatch):
 
 @pytest.mark.anyio
 async def test_publish_event_from_card_hook_a_flips_existing_row(monkeypatch):
-    from app.thailandnow import publish_event_from_card, COVERED_OURS_SHEET
+    from app.thailand_now.scout import publish_event_from_card, COVERED_OURS_SHEET
 
     async def mock_trello(method, path, params=None, body=None):
         if path == "/cards/card_flip":
@@ -754,14 +754,14 @@ async def test_publish_event_from_card_hook_a_flips_existing_row(monkeypatch):
     async def mock_sheet_update_cell(sheet_id, tab, row_number, col_letter, value):
         captured_updates.append((sheet_id, tab, row_number, col_letter, value))
 
-    monkeypatch.setattr("app.thailandnow._trello", mock_trello)
-    monkeypatch.setattr("app.thailandnow._google_token", mock_google_token)
-    monkeypatch.setattr("app.thailandnow._drive_read_doc", mock_drive_read_doc)
-    monkeypatch.setattr("app.thailandnow._drive_read_doc_html", mock_drive_read_doc_html)
-    monkeypatch.setattr("app.thailandnow._generate_event_seo", mock_generate_event_seo)
-    monkeypatch.setattr("app.thailandnow._wp", mock_wp)
-    monkeypatch.setattr("app.thailandnow._pipeline_find_row", mock_pipeline_find_row)
-    monkeypatch.setattr("app.thailandnow._sheet_update_cell", mock_sheet_update_cell)
+    monkeypatch.setattr("app.thailand_now.scout._trello", mock_trello)
+    monkeypatch.setattr("app.thailand_now.scout._google_token", mock_google_token)
+    monkeypatch.setattr("app.thailand_now.scout._drive_read_doc", mock_drive_read_doc)
+    monkeypatch.setattr("app.thailand_now.scout._drive_read_doc_html", mock_drive_read_doc_html)
+    monkeypatch.setattr("app.thailand_now.scout._generate_event_seo", mock_generate_event_seo)
+    monkeypatch.setattr("app.thailand_now.scout._wp", mock_wp)
+    monkeypatch.setattr("app.thailand_now.scout._pipeline_find_row", mock_pipeline_find_row)
+    monkeypatch.setattr("app.thailand_now.scout._sheet_update_cell", mock_sheet_update_cell)
 
     res = await publish_event_from_card({"card_id": "card_flip"})
     assert res["wp_id"] == 1234
@@ -777,7 +777,7 @@ async def test_publish_event_from_card_hook_a_flips_existing_row(monkeypatch):
 
 @pytest.mark.anyio
 async def test_covered_events_pipeline_precedence(monkeypatch):
-    from app.thailandnow import _covered_events, COVERED_OURS_SHEET, COVERED_COMPANY_SHEET
+    from app.thailand_now.scout import _covered_events, COVERED_OURS_SHEET, COVERED_COMPANY_SHEET
 
     async def mock_read_sheet_col(sheet_id, range_param, col=0, header_rows=1):
         if sheet_id == COVERED_OURS_SHEET:
@@ -795,8 +795,8 @@ async def test_covered_events_pipeline_precedence(monkeypatch):
             ]
         return []
 
-    monkeypatch.setattr("app.thailandnow._read_sheet_col", mock_read_sheet_col)
-    monkeypatch.setattr("app.thailandnow._sheet_read_all", mock_sheet_read_all)
+    monkeypatch.setattr("app.thailand_now.scout._read_sheet_col", mock_read_sheet_col)
+    monkeypatch.setattr("app.thailand_now.scout._sheet_read_all", mock_sheet_read_all)
 
     covered, errors = await _covered_events()
     assert errors == []
@@ -810,7 +810,7 @@ async def test_covered_events_pipeline_precedence(monkeypatch):
 
 @pytest.mark.anyio
 async def test_sync_events_registry(monkeypatch):
-    from app.thailandnow import sync_events_registry, COVERED_OURS_SHEET
+    from app.thailand_now.scout import sync_events_registry, COVERED_OURS_SHEET
 
     mock_wp_events = [
         {"id": 101, "date": "2026-08-01", "slug": "event-one", "link": "https://tn.th/e1", "title": "Event One"},
@@ -854,11 +854,11 @@ async def test_sync_events_registry(monkeypatch):
     async def mock_ensure_pipeline_tab():
         pass
 
-    monkeypatch.setattr("app.thailandnow._wp_pull_published_events", mock_wp_pull)
-    monkeypatch.setattr("app.thailandnow._sheet_read_all", mock_sheet_read_all)
-    monkeypatch.setattr("app.thailandnow._sheet_update_range", mock_sheet_update_range)
-    monkeypatch.setattr("app.thailandnow._sheet_update_cell", mock_sheet_update_cell)
-    monkeypatch.setattr("app.thailandnow._ensure_pipeline_tab", mock_ensure_pipeline_tab)
+    monkeypatch.setattr("app.thailand_now.scout._wp_pull_published_events", mock_wp_pull)
+    monkeypatch.setattr("app.thailand_now.scout._sheet_read_all", mock_sheet_read_all)
+    monkeypatch.setattr("app.thailand_now.scout._sheet_update_range", mock_sheet_update_range)
+    monkeypatch.setattr("app.thailand_now.scout._sheet_update_cell", mock_sheet_update_cell)
+    monkeypatch.setattr("app.thailand_now.scout._ensure_pipeline_tab", mock_ensure_pipeline_tab)
 
     res = await sync_events_registry()
 
@@ -891,7 +891,7 @@ async def test_sync_events_registry(monkeypatch):
 async def test_sync_events_registry_empty_pull_never_wipes(monkeypatch):
     """WP outage on page 1 → no events → the Published tab rewrite must be skipped
     entirely (a header-only rewrite would blank the registry)."""
-    from app.thailandnow import sync_events_registry
+    from app.thailand_now.scout import sync_events_registry
 
     async def mock_wp_pull():
         return []
@@ -904,9 +904,9 @@ async def test_sync_events_registry_empty_pull_never_wipes(monkeypatch):
     async def mock_ensure_pipeline_tab():
         called.append(("ensure",))
 
-    monkeypatch.setattr("app.thailandnow._wp_pull_published_events", mock_wp_pull)
-    monkeypatch.setattr("app.thailandnow._sheet_update_range", mock_sheet_update_range)
-    monkeypatch.setattr("app.thailandnow._ensure_pipeline_tab", mock_ensure_pipeline_tab)
+    monkeypatch.setattr("app.thailand_now.scout._wp_pull_published_events", mock_wp_pull)
+    monkeypatch.setattr("app.thailand_now.scout._sheet_update_range", mock_sheet_update_range)
+    monkeypatch.setattr("app.thailand_now.scout._ensure_pipeline_tab", mock_ensure_pipeline_tab)
 
     res = await sync_events_registry()
 
@@ -918,7 +918,7 @@ async def test_sync_events_registry_empty_pull_never_wipes(monkeypatch):
 
 @pytest.mark.anyio
 async def test_publish_event_from_card_hook_a_appends_new_row(monkeypatch):
-    from app.thailandnow import publish_event_from_card, COVERED_OURS_SHEET
+    from app.thailand_now.scout import publish_event_from_card, COVERED_OURS_SHEET
 
     async def mock_trello(method, path, params=None, body=None):
         if path == "/cards/card_new":
@@ -958,14 +958,14 @@ async def test_publish_event_from_card_hook_a_appends_new_row(monkeypatch):
     async def mock_sheet_append_rows(sheet_id, tab, rows):
         captured_appends.append((sheet_id, tab, rows))
 
-    monkeypatch.setattr("app.thailandnow._trello", mock_trello)
-    monkeypatch.setattr("app.thailandnow._google_token", mock_google_token)
-    monkeypatch.setattr("app.thailandnow._drive_read_doc", mock_drive_read_doc)
-    monkeypatch.setattr("app.thailandnow._drive_read_doc_html", mock_drive_read_doc_html)
-    monkeypatch.setattr("app.thailandnow._generate_event_seo", mock_generate_event_seo)
-    monkeypatch.setattr("app.thailandnow._wp", mock_wp)
-    monkeypatch.setattr("app.thailandnow._pipeline_find_row", mock_pipeline_find_row)
-    monkeypatch.setattr("app.thailandnow._sheet_append_rows", mock_sheet_append_rows)
+    monkeypatch.setattr("app.thailand_now.scout._trello", mock_trello)
+    monkeypatch.setattr("app.thailand_now.scout._google_token", mock_google_token)
+    monkeypatch.setattr("app.thailand_now.scout._drive_read_doc", mock_drive_read_doc)
+    monkeypatch.setattr("app.thailand_now.scout._drive_read_doc_html", mock_drive_read_doc_html)
+    monkeypatch.setattr("app.thailand_now.scout._generate_event_seo", mock_generate_event_seo)
+    monkeypatch.setattr("app.thailand_now.scout._wp", mock_wp)
+    monkeypatch.setattr("app.thailand_now.scout._pipeline_find_row", mock_pipeline_find_row)
+    monkeypatch.setattr("app.thailand_now.scout._sheet_append_rows", mock_sheet_append_rows)
 
     res = await publish_event_from_card({"card_id": "card_new"})
     assert res["wp_id"] == 5678
@@ -985,7 +985,7 @@ async def test_publish_event_from_card_hook_a_appends_new_row(monkeypatch):
 
 @pytest.mark.anyio
 async def test_publish_article_from_card_does_not_log_to_pipeline(monkeypatch):
-    from app.thailandnow import publish_event_from_card
+    from app.thailand_now.scout import publish_event_from_card
 
     async def mock_trello(method, path, params=None, body=None):
         if path == "/cards/card_art":
@@ -1026,14 +1026,14 @@ async def test_publish_article_from_card_does_not_log_to_pipeline(monkeypatch):
     async def mock_sheet_append_rows(sheet_id, tab, rows):
         captured_appends.append((sheet_id, tab, rows))
 
-    monkeypatch.setattr("app.thailandnow._trello", mock_trello)
-    monkeypatch.setattr("app.thailandnow._google_token", mock_google_token)
-    monkeypatch.setattr("app.thailandnow._drive_read_doc", mock_drive_read_doc)
-    monkeypatch.setattr("app.thailandnow._drive_read_doc_html", mock_drive_read_doc_html)
-    monkeypatch.setattr("app.thailandnow._generate_event_seo", mock_generate_event_seo)
-    monkeypatch.setattr("app.thailandnow._wp", mock_wp)
-    monkeypatch.setattr("app.thailandnow._sheet_update_cell", mock_sheet_update_cell)
-    monkeypatch.setattr("app.thailandnow._sheet_append_rows", mock_sheet_append_rows)
+    monkeypatch.setattr("app.thailand_now.scout._trello", mock_trello)
+    monkeypatch.setattr("app.thailand_now.scout._google_token", mock_google_token)
+    monkeypatch.setattr("app.thailand_now.scout._drive_read_doc", mock_drive_read_doc)
+    monkeypatch.setattr("app.thailand_now.scout._drive_read_doc_html", mock_drive_read_doc_html)
+    monkeypatch.setattr("app.thailand_now.scout._generate_event_seo", mock_generate_event_seo)
+    monkeypatch.setattr("app.thailand_now.scout._wp", mock_wp)
+    monkeypatch.setattr("app.thailand_now.scout._sheet_update_cell", mock_sheet_update_cell)
+    monkeypatch.setattr("app.thailand_now.scout._sheet_append_rows", mock_sheet_append_rows)
 
     res = await publish_event_from_card({"card_id": "card_art"})
     assert res["wp_id"] == 9012
@@ -1045,7 +1045,7 @@ async def test_publish_article_from_card_does_not_log_to_pipeline(monkeypatch):
 
 @pytest.mark.anyio
 async def test_create_event_doc_soft_fail_on_sheet_error(monkeypatch):
-    from app.thailandnow import create_event_doc
+    from app.thailand_now.scout import create_event_doc
 
     async def mock_provision(payload):
         return {
@@ -1066,8 +1066,8 @@ async def test_create_event_doc_soft_fail_on_sheet_error(monkeypatch):
     async def mock_ensure_pipeline_fail():
         raise RuntimeError("Google Sheets quota exceeded")
 
-    monkeypatch.setattr("app.thailandnow.provision", mock_provision)
-    monkeypatch.setattr("app.thailandnow._ensure_pipeline_tab", mock_ensure_pipeline_fail)
+    monkeypatch.setattr("app.thailand_now.scout.provision", mock_provision)
+    monkeypatch.setattr("app.thailand_now.scout._ensure_pipeline_tab", mock_ensure_pipeline_fail)
 
     payload = {
         "event": {
@@ -1084,7 +1084,7 @@ async def test_create_event_doc_soft_fail_on_sheet_error(monkeypatch):
 
 @pytest.mark.anyio
 async def test_publish_event_from_card_soft_fail_on_sheet_error(monkeypatch):
-    from app.thailandnow import publish_event_from_card
+    from app.thailand_now.scout import publish_event_from_card
 
     async def mock_trello(method, path, params=None, body=None):
         if path == "/cards/card_err":
@@ -1119,13 +1119,13 @@ async def test_publish_event_from_card_soft_fail_on_sheet_error(monkeypatch):
     async def mock_pipeline_find_row_err(slug):
         raise RuntimeError("Sheets 503 backend error")
 
-    monkeypatch.setattr("app.thailandnow._trello", mock_trello)
-    monkeypatch.setattr("app.thailandnow._google_token", mock_google_token)
-    monkeypatch.setattr("app.thailandnow._drive_read_doc", mock_drive_read_doc)
-    monkeypatch.setattr("app.thailandnow._drive_read_doc_html", mock_drive_read_doc_html)
-    monkeypatch.setattr("app.thailandnow._generate_event_seo", mock_generate_event_seo)
-    monkeypatch.setattr("app.thailandnow._wp", mock_wp)
-    monkeypatch.setattr("app.thailandnow._pipeline_find_row", mock_pipeline_find_row_err)
+    monkeypatch.setattr("app.thailand_now.scout._trello", mock_trello)
+    monkeypatch.setattr("app.thailand_now.scout._google_token", mock_google_token)
+    monkeypatch.setattr("app.thailand_now.scout._drive_read_doc", mock_drive_read_doc)
+    monkeypatch.setattr("app.thailand_now.scout._drive_read_doc_html", mock_drive_read_doc_html)
+    monkeypatch.setattr("app.thailand_now.scout._generate_event_seo", mock_generate_event_seo)
+    monkeypatch.setattr("app.thailand_now.scout._wp", mock_wp)
+    monkeypatch.setattr("app.thailand_now.scout._pipeline_find_row", mock_pipeline_find_row_err)
 
     res = await publish_event_from_card({"card_id": "card_err"})
     assert res["wp_id"] == 7777

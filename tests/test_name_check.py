@@ -1,4 +1,4 @@
-"""Thai-name fact-check (app.name_check) — the 2026-08-27 name rule.
+"""Thai-name fact-check (app.newsroom.name_check) — the 2026-08-27 name rule.
 
 Naz's spec: every Thai person/place name rides as **English Name [ชื่อไทย]**;
 bare Thai in the body is an error; bracketed names should be registry-verified
@@ -9,8 +9,8 @@ import asyncio
 import json
 from pathlib import Path
 
-from app import newsroom
-from app.name_check import check_rewritten
+from app.newsroom import newsroom
+from app.newsroom.name_check import check_rewritten
 
 _REG_NOTE = """---
 title: "Anutin Charnvirakul"

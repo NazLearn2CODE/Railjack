@@ -15,7 +15,7 @@ import time
 import pytest
 from fastapi import HTTPException
 
-from app import notebooklm
+from app.media import notebooklm
 
 
 # ---------------------------------------------------------------- fakes

@@ -23,10 +23,10 @@ import sys
 from pathlib import Path
 
 try:
-    from .newsline_reports import _api, extract_doc_id
+    from app.thailand_now.reports import _api, extract_doc_id
 except ImportError:  # executed as a script (routes shell out like NEWSLINE_REPORTS)
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-    from app.newsline_reports import _api, extract_doc_id
+    from app.thailand_now.reports import _api, extract_doc_id
 
 # Destination folder for recording docs (default standing docs parent folder)
 DEST_FOLDER = "0ABo_r15naExrUk9PVA"

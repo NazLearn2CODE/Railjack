@@ -48,8 +48,8 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-from .config import CONFIG
-from .zai import zai_message
+from app.platform.config import CONFIG
+from app.platform.zai import zai_message
 
 router = APIRouter()
 

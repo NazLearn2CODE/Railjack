@@ -2,7 +2,7 @@ import asyncio
 import json
 from datetime import datetime, timedelta, timezone
 
-from app import thailandnow
+from app.thailand_now import scout as thailandnow
 
 
 def test_looks_like_url():

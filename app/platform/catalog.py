@@ -27,7 +27,7 @@ from pathlib import Path
 
 from fastapi import APIRouter
 
-from .config import CONFIG
+from app.platform.config import CONFIG
 
 router = APIRouter()
 

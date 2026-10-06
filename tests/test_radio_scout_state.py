@@ -9,7 +9,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from app import newsroom
+from app.newsroom import newsroom
 
 
 @pytest.fixture

@@ -12,7 +12,8 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from app import newsroom, radio_news
+from app.newsroom import newsroom
+from app.media import radio_news
 
 
 def _client(monkeypatch, rc=0, out=b"{}", err=b""):
@@ -32,7 +33,7 @@ def _client(monkeypatch, rc=0, out=b"{}", err=b""):
 def test_strip_fabricated_thai():
     """Code guard: fabricated Thai (not in source) stripped across all observed
     formats; source-faithful Thai kept. Mirrors office Somatic 9befe5f."""
-    from app.newsroom import _strip_fabricated_thai, _THAI_RUN_RE
+    from app.newsroom.newsroom import _strip_fabricated_thai, _THAI_RUN_RE
 
     def has_thai(s: str) -> bool:
         return bool(_THAI_RUN_RE.search(s))
@@ -64,8 +65,8 @@ def test_rewrite_convert_missing_and_valid(tmp_path, monkeypatch):
     (Thai UTF-8 + **name**/~~date~~ markers preserved) on a valid one. Mirrors office
     test_rewrite_convert, but steers the module-level _REWRITE_HANDOFF constant (no Path patch)."""
     import asyncio
-    from app import newsroom
-    from app.newsroom import rewrite_convert
+    from app.newsroom import newsroom
+    from app.newsroom.newsroom import rewrite_convert
 
     miss = {"rewritten": "", "seo": "", "errors": ["no IDE handoff file — run 📋 IDE REWRITE first"]}
 
@@ -84,7 +85,7 @@ def test_rewrite_convert_missing_and_valid(tmp_path, monkeypatch):
     }), encoding="utf-8")
     monkeypatch.setattr(newsroom, "_REWRITE_HANDOFF", handoff)
     # JEV pass must be machine-independent in tests: no meter, no cache.
-    from app import jev_gates
+    from app.platform import jev_gates
     monkeypatch.setattr(jev_gates, "METER", tmp_path / "no-meter.py")
     monkeypatch.setattr(jev_gates, "CACHE_DIR", tmp_path / "cache")
     out = asyncio.run(rewrite_convert())                       # valid → verbatim relay
@@ -1735,7 +1736,7 @@ def test_annotate_infographics_never_touches_the_news():
     """The prose is copied verbatim and paragraph 1 is unannotatable — the two ways
     the LLM-reproduces-the-script version corrupted real scripts (block above the
     lede; lede deleted outright)."""
-    from app.newsroom import _annotate_infographics
+    from app.newsroom.newsroom import _annotate_infographics
 
     picks = [
         {"paragraph": 2, "headline": "Arrivals", "why": "w", "intake": "i",
@@ -1763,7 +1764,7 @@ def test_annotate_infographics_never_touches_the_news():
 
 def test_annotate_infographics_empty_picks_is_identity():
     """Zero qualifying paragraphs is a valid result — the script must come back unchanged."""
-    from app.newsroom import _annotate_infographics
+    from app.newsroom.newsroom import _annotate_infographics
     assert _annotate_infographics(_INFO_SCRIPT, []) == _INFO_SCRIPT
 
 
@@ -1774,6 +1775,7 @@ def _load_newsline_reports():
     import importlib.util
 
     for p in (
+        Path(__file__).parent.parent / "app" / "thailand_now" / "reports.py",
         Path(__file__).parent.parent / "app" / "newsline_reports.py",
         newsroom.SCRIPTS / "newsline_reports.py",
         Path.home() / ".claude" / "skills" / "newsroom" / "scripts" / "newsline_reports.py",
@@ -1949,7 +1951,7 @@ def test_nl_reports_preview_and_generate_routes(monkeypatch):
     assert r_prev.status_code == 200
     argv = calls[0]
     assert argv[0] == "python3"
-    assert argv[1].endswith("newsline_reports.py")
+    assert argv[1].endswith("reports.py")
     assert argv[2:8] == ["--period", "5", "--start", "2026-08-01", "--end", "2026-08-31"]
     assert "--dry-run" in argv
 
@@ -1973,7 +1975,7 @@ def test_nl_reports_preview_and_generate_routes(monkeypatch):
 
 
 def test_extract_doc_id():
-    from app import newsline_reports as nl_rep
+    from app.thailand_now import reports as nl_rep
 
     raw_id = "12vNoZ9DJxZysBkSC86uOu1V6J8mq6nwt-HtnrWV1Ru4"
     assert nl_rep.extract_doc_id(raw_id) == raw_id
@@ -1985,7 +1987,7 @@ def test_extract_doc_id():
 
 
 def test_extract_nl_rundown_from_doc_mocked():
-    from app import newsline_reports as nl_rep
+    from app.thailand_now import reports as nl_rep
 
     # Realistic mock of daily doc with tabs (Tab 3: NL RUNDOWN)
     mock_doc = {
@@ -2034,7 +2036,7 @@ def test_extract_nl_rundown_from_doc_mocked():
 
 
 def test_anchor_detection_and_strip():
-    from app import newsline_reports as nl_rep
+    from app.thailand_now import reports as nl_rep
 
     # 1. Header has anchor name
     doc_with_header_anchor = {
@@ -2122,7 +2124,7 @@ def test_anchor_detection_and_strip():
 
 def test_monthly_doc_parsing_and_formatting():
     from datetime import date
-    from app import newsline_reports as nl_rep
+    from app.thailand_now import reports as nl_rep
 
     sample_monthly_text = """
 NEWSLINE 03.AUGUST.2026 -- ANCHOR: 
@@ -2170,7 +2172,7 @@ NEWSLINE 05.AUGUST.2026
 
 def test_parse_monthly_doc_blocks_and_requests():
     from datetime import date
-    from app import newsline_reports as nl_rep
+    from app.thailand_now import reports as nl_rep
 
     mock_monthly_content = [
         {"startIndex": 1, "endIndex": 35, "paragraph": {"elements": [{"textRun": {"content": "NEWSLINE 03.AUGUST.2026 -- ANCHOR: \n"}}], "paragraphStyle": {"namedStyleType": "TITLE", "alignment": "CENTER"}}},
@@ -2236,7 +2238,7 @@ def test_parse_monthly_doc_blocks_and_requests():
 
 def test_day_block_keep_together_and_keep_with_next_mocked():
     """Assert keepLinesTogether on all cluster paragraphs and keepWithNext on header + headlines except last."""
-    from app import newsline_reports as nl_rep
+    from app.thailand_now import reports as nl_rep
 
     # 1. Multi-headline cluster (3 headlines)
     reqs_multi, _ = nl_rep.build_day_block_requests(
@@ -2309,7 +2311,7 @@ def test_day_block_keep_together_and_keep_with_next_mocked():
 
 
 def test_execute_rundown_fill_insert_and_replace_mocked(monkeypatch):
-    from app import newsline_reports as nl_rep
+    from app.thailand_now import reports as nl_rep
 
     # Mock daily doc 2026-08-04
     mock_daily_doc = {
@@ -2443,7 +2445,7 @@ def test_execute_rundown_fill_insert_and_replace_mocked(monkeypatch):
 
 def test_bulk_month_rundown_fill_logic_mocked(monkeypatch):
     from datetime import date
-    from app import newsline_reports as nl_rep
+    from app.thailand_now import reports as nl_rep
 
     # Test parse_month_year_params
     y, m = nl_rep.parse_month_year_params(yyyymm="202608")
@@ -2607,7 +2609,7 @@ def test_newsline_rundown_routes(monkeypatch):
 def test_period_date_range():
     import datetime
     import pytest
-    from app import newsline_reports as nl_rep
+    from app.thailand_now import reports as nl_rep
 
     # 4 verify cases for FY 2569
     # P1 (Oct 2568): 2025-10-01 .. 2025-10-20, cal_be=2568
@@ -2649,7 +2651,7 @@ def test_period_date_range():
 
 def test_period_11_weekdays_enumeration():
     import datetime
-    from app import newsline_reports as nl_rep
+    from app.thailand_now import reports as nl_rep
 
     s11, e11, _ = nl_rep.period_date_range(11, 2569)
     weekdays = nl_rep.weekdays_in_range(s11, e11)
@@ -2659,7 +2661,7 @@ def test_period_11_weekdays_enumeration():
 
 
 def test_qr_fill_requests():
-    from app import newsline_reports as nl_rep
+    from app.thailand_now import reports as nl_rep
 
     # Period 11 FY 2569
     reqs_11 = nl_rep.build_qr_fill_requests(11, 2569)
@@ -2681,7 +2683,7 @@ def test_qr_fill_requests():
 
 
 def test_main_report_fill_requests():
-    from app import newsline_reports as nl_rep
+    from app.thailand_now import reports as nl_rep
 
     reqs_11 = nl_rep.build_main_report_fill_requests(11, 2569)
 
@@ -2709,7 +2711,7 @@ def test_main_report_fill_requests():
 
 
 def test_fill_docs_mocked(monkeypatch):
-    from app import newsline_reports as nl_rep
+    from app.thailand_now import reports as nl_rep
 
     api_calls = []
     def mock_api(method, url, body=None, params=None, headers=None, raw_response=False):
@@ -2731,7 +2733,7 @@ def test_fill_docs_mocked(monkeypatch):
 
 
 def test_build_docgen_plan():
-    from app import newsline_reports as nl_rep
+    from app.thailand_now import reports as nl_rep
 
     plan = nl_rep.build_docgen_plan(2569)
     assert len(plan) == 12
@@ -2767,7 +2769,7 @@ def test_build_docgen_plan():
 
 
 def test_docgen_preview_and_generate_mocked(monkeypatch):
-    from app import newsline_reports as nl_rep
+    from app.thailand_now import reports as nl_rep
 
     # Mock Drive operations
     monkeypatch.setattr(nl_rep, "find_or_create_fy_folder", lambda root, fy, dry=False: ("folder_123", f"งบประมาณ {fy}", False))
@@ -2867,7 +2869,7 @@ def test_newsline_docgen_routes(monkeypatch):
 
 def test_thai_date_header_to_ce():
     import datetime
-    from app import newsline_reports as nl_rep
+    from app.thailand_now import reports as nl_rep
 
     # Western digits
     assert nl_rep._thai_date_header_to_ce("วันที่ 7 สิงหาคม 2569") == datetime.date(2026, 8, 7)
@@ -2886,7 +2888,7 @@ def test_thai_date_header_to_ce():
 
 def test_parse_report_slots():
     import datetime
-    from app import newsline_reports as nl_rep
+    from app.thailand_now import reports as nl_rep
 
     sample_doc = {
         "title": "01 รายงานผลการปฏิบัติงาน ตุลาคม 2568",
@@ -2994,7 +2996,7 @@ def test_parse_report_slots():
 
 
 def test_brave_search_newsline():
-    from app import newsline_reports as nl_rep
+    from app.thailand_now import reports as nl_rep
 
     # Fake Brave response with facebook video url
     fake_brave_json = {
@@ -3020,7 +3022,7 @@ def test_brave_search_newsline():
 
 
 def test_yt_nbtwb_evening():
-    from app import newsline_reports as nl_rep
+    from app.thailand_now import reports as nl_rep
 
     listing = [
         ("NBT World Brief 7 August 2026 (Morning)", "morn_123"),
@@ -3044,7 +3046,7 @@ def test_yt_nbtwb_evening():
 
 
 def test_preview_and_apply_report_autofill_dry_run():
-    from app import newsline_reports as nl_rep
+    from app.thailand_now import reports as nl_rep
 
     sample_doc = {
         "title": "01 รายงานผลการปฏิบัติงาน ตุลาคม 2568",
@@ -3178,7 +3180,7 @@ def test_newsline_report_autofill_routes(monkeypatch):
 
 
 def test_newsline_list_report_docs_filtering_and_sorting():
-    from app import newsline_reports as nl_rep
+    from app.thailand_now import reports as nl_rep
 
     stub_folders = [
         {"id": "fy_folder_id", "name": "งบประมาณ 2569"},
@@ -3326,7 +3328,7 @@ def test_resolve_fb_link_all_forms():
 
 def test_render_overlays_legacy_and_bracket_shapes():
     """Aired form is **English (ชื่อไทย)** — brackets are pipeline-only."""
-    from app.newsroom import _render_overlays
+    from app.newsroom.newsroom import _render_overlays
 
     # legacy bracket-paren shapes (2026-08-26 rule) → bold parens
     assert _render_overlays("**[Korawi Prissananantakul(กรวีร์ ปริศนานันทกุล)]**") == \

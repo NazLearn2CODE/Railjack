@@ -5,7 +5,8 @@ The meter is NEVER invoked for real: metered_questions is monkeypatched.
 
 import pytest
 
-from app import jev_gates, seo_jev
+from app.platform import jev_gates
+from app.thailand_now import seo_gates as seo_jev
 
 
 PICKS = [
@@ -40,7 +41,7 @@ def test_gate_bulk_picks_skips_failed_pair(fresh_cache, monkeypatch):
             answers[k] = {"noul": noul}
         return answers, "jev-test"
 
-    monkeypatch.setattr("app.jev_gates.metered_questions", fake_metered)
+    monkeypatch.setattr("app.platform.jev_gates.metered_questions", fake_metered)
     gate_map, meta = seo_jev.gate_bulk_picks("Street Food Guide",
                                              "https://x/khon-kaen/", PICKS)
     assert gate_map["11"] is True
@@ -52,7 +53,7 @@ def test_gate_bulk_picks_skips_failed_pair(fresh_cache, monkeypatch):
 
 def test_gate_bulk_picks_degrades_on_jev_failure(fresh_cache, monkeypatch):
     """Jev down → empty map (no gate) + skipped reason; NEVER raises."""
-    monkeypatch.setattr("app.jev_gates.metered_questions",
+    monkeypatch.setattr("app.platform.jev_gates.metered_questions",
                         lambda s, q: (_ for _ in ()).throw(RuntimeError("meter down")))
     gate_map, meta = seo_jev.gate_bulk_picks("T", "https://x/t/", PICKS)
     assert gate_map == {}
@@ -66,7 +67,7 @@ def test_gate_bulk_picks_uses_cache(fresh_cache, monkeypatch):
         calls.append(1)
         return {k: {"noul": 0.9} for k in questions}, "jev-test"
 
-    monkeypatch.setattr("app.jev_gates.metered_questions", fake_metered)
+    monkeypatch.setattr("app.platform.jev_gates.metered_questions", fake_metered)
     seo_jev.gate_bulk_picks("T", "https://x/t/", PICKS)
     seo_jev.gate_bulk_picks("T", "https://x/t/", PICKS)
     assert len(calls) == 1                         # second run billed nothing
@@ -80,7 +81,7 @@ def test_gate_bulk_picks_flushes_on_model_upgrade(fresh_cache, monkeypatch):
         state["n"] += 1
         return {k: {"noul": 0.9} for k in questions}, f"jev-v{state['n']}"
 
-    monkeypatch.setattr("app.jev_gates.metered_questions", fake_metered)
+    monkeypatch.setattr("app.platform.jev_gates.metered_questions", fake_metered)
     import json as _json
     import time as _time
     seo_jev.gate_bulk_picks("T", "https://x/t/", PICKS)
@@ -95,13 +96,13 @@ def test_gate_bulk_picks_flushes_on_model_upgrade(fresh_cache, monkeypatch):
 
 def test_verdict_insert_advisory(fresh_cache, monkeypatch):
     monkeypatch.setattr(
-        "app.jev_gates.metered_questions",
+        "app.platform.jev_gates.metered_questions",
         lambda s, q: ({"ins0": {"noul": 0.85}}, "jev-test"))
     out = seo_jev.verdict_insert("Khon Kaen street food", "https://x/khon/",
                                  "Food Guide", "Visit ... Khon Kaen street food ...")
     assert out["verdict"] == "ok" and out["prob"] >= 0.6 and out["model"] == "jev-test"
     monkeypatch.setattr(
-        "app.jev_gates.metered_questions",
+        "app.platform.jev_gates.metered_questions",
         lambda s, q: ({"ins0": {"noul": 0.20}}, "jev-test"))
     out2 = seo_jev.verdict_insert("click here cheap pills", "https://x/khon/",
                                   "Other Page", "text")
@@ -109,7 +110,7 @@ def test_verdict_insert_advisory(fresh_cache, monkeypatch):
 
 
 def test_verdict_insert_degrades(fresh_cache, monkeypatch):
-    monkeypatch.setattr("app.jev_gates.metered_questions",
+    monkeypatch.setattr("app.platform.jev_gates.metered_questions",
                         lambda s, q: (_ for _ in ()).throw(RuntimeError("down")))
     out = seo_jev.verdict_insert("p", "https://x/", "H", "excerpt")
     assert out["verdict"] == "skipped"
@@ -124,7 +125,7 @@ def test_verdict_insert_cache_hit_stamps_model(fresh_cache, monkeypatch):
         calls.append(1)
         return {"ins0": {"noul": 0.85}}, "jev-1.13.0"
 
-    monkeypatch.setattr("app.jev_gates.metered_questions", fake_metered)
+    monkeypatch.setattr("app.platform.jev_gates.metered_questions", fake_metered)
     args = ("phrase p", "https://x/t/", "Host", "excerpt text")
     first = seo_jev.verdict_insert(*args)
     second = seo_jev.verdict_insert(*args)
@@ -136,13 +137,13 @@ def test_verdict_insert_cache_hit_stamps_model(fresh_cache, monkeypatch):
 def test_verdict_retarget_advisory(fresh_cache, monkeypatch):
     """Retarget gate: ok above threshold, weak below — same scale as insert."""
     monkeypatch.setattr(
-        "app.jev_gates.metered_questions",
+        "app.platform.jev_gates.metered_questions",
         lambda s, q: ({"ret0": {"noul": 0.82}}, "jev-test"))
     out = seo_jev.verdict_retarget("/khon-kaen-night-market/", "Bangkok Weekend Guide",
                                    "https://x/khon-kaen-street-food/", "Khon Kaen Street Food Guide")
     assert out["verdict"] == "ok" and out["prob"] >= 0.6 and out["model"] == "jev-test"
     monkeypatch.setattr(
-        "app.jev_gates.metered_questions",
+        "app.platform.jev_gates.metered_questions",
         lambda s, q: ({"ret0": {"noul": 0.15}}, "jev-test"))
     out2 = seo_jev.verdict_retarget("/crypto-scam/", "Bangkok Weekend Guide",
                                     "https://x/bangkok-malls/", "Bangkok Malls")
@@ -150,7 +151,7 @@ def test_verdict_retarget_advisory(fresh_cache, monkeypatch):
 
 
 def test_verdict_retarget_degrades(fresh_cache, monkeypatch):
-    monkeypatch.setattr("app.jev_gates.metered_questions",
+    monkeypatch.setattr("app.platform.jev_gates.metered_questions",
                         lambda s, q: (_ for _ in ()).throw(RuntimeError("down")))
     out = seo_jev.verdict_retarget("/dead/", "From Page", "https://x/live/", "Live Page")
     assert out["verdict"] == "skipped"
@@ -163,7 +164,7 @@ def test_verdict_retarget_cache_hit_stamps_model(fresh_cache, monkeypatch):
         calls.append(1)
         return {"ret0": {"noul": 0.75}}, "jev-1.13.0"
 
-    monkeypatch.setattr("app.jev_gates.metered_questions", fake_metered)
+    monkeypatch.setattr("app.platform.jev_gates.metered_questions", fake_metered)
     args = ("/dead-slug/", "Source Page", "https://x/live/", "Live Page")
     seo_jev.verdict_retarget(*args)
     second = seo_jev.verdict_retarget(*args)

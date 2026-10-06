@@ -22,7 +22,7 @@ they need a reader, not a regex. Advisory by design (same call as the name
 hook): results ride rewrite/CONVERT responses, they never block. Only the
 CLI exits non-zero on errors, so the IDE lane and tests can gate on it.
 
-Railjack-native companion to ``app.name_check`` (2026-08-29 port of Tasai's
+Railjack-native companion to ``app.newsroom.name_check`` (2026-08-29 port of Tasai's
 Somatic build ``209aec4``).
 """
 
@@ -32,7 +32,7 @@ import json
 import re
 import sys
 
-from .name_check import _body
+from app.newsroom.name_check import _body
 
 _DASH_RE = re.compile(r"[—–]")
 _PAREN_RE = re.compile(r"[()]")

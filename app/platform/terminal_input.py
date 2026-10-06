@@ -14,7 +14,7 @@ import subprocess
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from .config import CONFIG
+from app.platform.config import CONFIG
 
 router = APIRouter()
 

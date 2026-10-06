@@ -33,11 +33,11 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
-from .config import CONFIG
+from app.platform.config import CONFIG
 
 router = APIRouter()
 
-_REPO_ROOT = Path(__file__).resolve().parent.parent
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 _HOME = Path.home()
 # Browsing noise: never offer these as mappable targets.
 _JUNK_DIRS = {"node_modules", ".venv", "venv", "__pycache__", ".git", "dist",
@@ -102,7 +102,9 @@ def resolve_target(name: str) -> dict:
         return {"path": _REPO_ROOT, "kind": "repo", "label": "Railjack"}
     tried.append(str(_REPO_ROOT))
     app_mod = _REPO_ROOT / "app" / f"{name}.py"
-    if app_mod.exists():  # a Railjack module name maps the whole repo, focused
+    app_pkg = _REPO_ROOT / "app" / name
+    if app_mod.exists() or (app_pkg.is_dir() and (app_pkg / "__init__.py").exists()):
+        # a Railjack module name (file or package) maps the whole repo, focused
         return {"path": _REPO_ROOT, "kind": "repo", "label": f"Railjack · {name}"}
     proj = _projects_root() / name
     tried.append(str(proj))

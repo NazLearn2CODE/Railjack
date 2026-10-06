@@ -66,7 +66,7 @@ _DEFAULT_MODELS: dict[str, str] = {"gemini": "gemini-3.8-flash", "claude": "clau
 
 
 def _zai_display_model() -> str:
-    from .zai import dsh_default_model
+    from app.platform.zai import dsh_default_model
 
     d = dsh_default_model()
     return d.split("/")[-1] if d else "glm-5.2"
@@ -564,7 +564,7 @@ async def session_payload() -> dict:
         lanes[provider] = lane
     # JEV dollar lane — jev() called directly (no self-HTTP), additions only.
     try:
-        from .jev import jev as _jev
+        from app.platform.jev import jev as _jev
         j = await _jev()
         lanes["jev"] = {
             "remaining_usd": j["remaining_usd"],

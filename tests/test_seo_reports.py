@@ -11,7 +11,7 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from app import seo_reports, thailandnow
+from app.thailand_now import scout as thailandnow, seo_reports
 from app.main import app
 
 

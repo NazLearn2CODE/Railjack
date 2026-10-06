@@ -30,8 +30,8 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-from .config import CONFIG
-from .zai import zai_message
+from app.platform.config import CONFIG
+from app.platform.zai import zai_message
 
 router = APIRouter()
 
@@ -39,7 +39,7 @@ router = APIRouter()
 
 FETCH_MODEL = str(Path.home() / ".claude/skills/comfyui-media/scripts/fetch_model.py")
 # catalog/ subdir keeps this out of config.py's configs/*.yaml machine-config glob
-CATALOG_YAML = Path(__file__).resolve().parent.parent / "configs" / "catalog" / "comfyui.yaml"
+CATALOG_YAML = Path(__file__).resolve().parent.parent.parent / "configs" / "catalog" / "comfyui.yaml"
 
 _MODEL_EXTS = {".safetensors", ".ckpt", ".pt", ".pth", ".gguf", ".bin"}
 _OUT_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".mp4"}

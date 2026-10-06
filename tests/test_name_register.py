@@ -13,8 +13,8 @@ from pathlib import Path
 
 from fastapi import HTTPException
 
-from app import newsroom
-from app.name_check import check_rewritten
+from app.newsroom import newsroom
+from app.newsroom.name_check import check_rewritten
 
 PAIR = {"english": "Probe Testname", "thai": "โพรบ เทสต์เนม", "kind": "person"}
 NO_REG = Path("/nonexistent-name-wiki")

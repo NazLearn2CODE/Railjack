@@ -4,12 +4,12 @@ module uses to CREATE Docs in Drive folders.
 Scopes: ``documents`` + ``drive`` (the newsroom token only has ``drive.readonly``,
 which can't create files or set permissions). Writes to the path in
 ``options.google_token_path`` (default ``~/.config/railjack/google_token.json``,
-mode 600) in the exact shape ``app.thailandnow._google_token`` reads.
+mode 600) in the exact shape ``app.thailand_now.scout._google_token`` reads.
 
 Run once on a machine with a browser (google-auth-oauthlib is pulled ephemerally
 so the app's deps stay clean):
 
-    uv run --with google-auth-oauthlib python -m app.tn_auth \\
+    uv run --with google-auth-oauthlib python -m app.thailand_now.auth \\
         --client-id <id> --client-secret <secret>
     # or: export TN_OAUTH_CLIENT_ID / TN_OAUTH_CLIENT_SECRET, then run without flags
     # or: --client-secrets /path/to/desktop_client_secret.json
@@ -31,7 +31,7 @@ try:
 except ImportError:
     sys.exit(
         "google-auth-oauthlib not importable — run me with:\n"
-        "  uv run --with google-auth-oauthlib python -m app.tn_auth ..."
+        "  uv run --with google-auth-oauthlib python -m app.thailand_now.auth ..."
     )
 
 SCOPES = [

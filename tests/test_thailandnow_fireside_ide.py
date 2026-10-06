@@ -15,8 +15,8 @@ pattern as test_thailandnow_events.py)."""
 import asyncio
 import json
 
-from app import thailandnow
-from app.thailandnow import _fireside_topic_row, fireside_ide_convert, fireside_ide_prompt
+from app.thailand_now import scout as thailandnow
+from app.thailand_now.scout import _fireside_topic_row, fireside_ide_convert, fireside_ide_prompt
 
 
 def test_topic_row_coercion_and_rejection():
@@ -119,7 +119,7 @@ def test_ide_prompt_degrades_without_registry(monkeypatch):
 
 # --- negative-framing screen (home port of Somatic be3fb78) + image IDE convert ---
 
-from app.thailandnow import (  # noqa: E402
+from app.thailand_now.scout import (  # noqa: E402
     _is_negative_framing, _screen_negative, scout_images_convert, scout_terminal_report,
 )
 

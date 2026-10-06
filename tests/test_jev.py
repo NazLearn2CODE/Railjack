@@ -12,7 +12,7 @@ import threading
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from app import jev
+from app.platform import jev
 
 
 def test_jev_reads_ledger_off_the_event_loop(monkeypatch):

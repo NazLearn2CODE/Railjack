@@ -10,8 +10,8 @@ import json
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from app import catalog, terminal_input
-from app.config import (
+from app.platform import catalog, terminal_input
+from app.platform.config import (
     Button,
     CatalogGroup,
     CatalogSpec,
@@ -251,7 +251,7 @@ def test_tracked_tawhan_bootstrap_asks_checkpoint_question():
     so this holds on any machine's checkout)."""
     import yaml
 
-    from app import config as config_mod
+    from app.platform import config as config_mod
 
     cfg = yaml.safe_load((config_mod.CONFIG_DIR / "tawhan.yaml").read_text())
     btn = next(b for b in cfg["buttons"] if b["label"] == "BOOTSTRAP")

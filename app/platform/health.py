@@ -14,7 +14,7 @@ import asyncio
 import httpx
 from fastapi import APIRouter
 
-from .config import CONFIG, Module
+from app.platform.config import CONFIG, Module
 
 router = APIRouter()
 

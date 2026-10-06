@@ -95,7 +95,7 @@ def google_token() -> str:
     if _TOKEN:
         return _TOKEN
     if not TOKEN_PATH.exists():
-        _fatal("railjack Google token not found — run `python3 -m app.tn_auth` once")
+        _fatal("railjack Google token not found — run `python3 -m app.thailand_now.auth` once")
     d = json.loads(TOKEN_PATH.read_text(encoding="utf-8"))
     body = urllib.parse.urlencode({
         "client_id": d["client_id"], "client_secret": d["client_secret"],

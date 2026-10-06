@@ -15,7 +15,7 @@ from pathlib import Path
 import yaml
 from pydantic import BaseModel
 
-CONFIG_DIR = Path(__file__).resolve().parent.parent / "configs"
+CONFIG_DIR = Path(__file__).resolve().parent.parent.parent / "configs"
 
 
 class HealthSpec(BaseModel):
@@ -147,7 +147,7 @@ CONFIG = select_config()
 def reload_config() -> MachineConfig:
     """Re-read this machine's YAML and refresh the in-memory ``CONFIG`` in place.
 
-    Other modules bind ``CONFIG`` by reference (``from .config import CONFIG``),
+    Other modules bind ``CONFIG`` by reference (``from app.platform.config import CONFIG``),
     so we copy the fresh fields onto the existing object instead of rebinding the
     global — every holder then sees the new values without a server restart.
 

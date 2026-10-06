@@ -207,8 +207,8 @@ IMAGE_EXT = re.compile(r"\.(?:png|jpe?g|webp)$", re.I)
 
 
 def _wp_module():
-    """Lazy import so tests monkeypatch app.thailandnow._wp / ._wp_list_all."""
-    from app import thailandnow
+    """Lazy import so tests monkeypatch app.thailand_now.scout._wp / ._wp_list_all."""
+    from app.thailand_now import scout as thailandnow
     return thailandnow
 
 

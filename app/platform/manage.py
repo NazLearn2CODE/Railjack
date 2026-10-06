@@ -14,7 +14,7 @@ import asyncio
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from .config import CONFIG, Module
+from app.platform.config import CONFIG, Module
 
 router = APIRouter()
 

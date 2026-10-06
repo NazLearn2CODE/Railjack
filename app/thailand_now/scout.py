@@ -36,9 +36,9 @@ import jwt
 from fastapi import APIRouter, Body, HTTPException
 from pydantic import BaseModel, Field
 
-from .config import CONFIG
-from .notebooklm import CLI, _cached_notebooks, _run_cli
-from .zai import zai_message
+from app.platform.config import CONFIG
+from app.media.notebooklm import CLI, _cached_notebooks, _run_cli
+from app.platform.zai import zai_message
 from . import seo_reports
 
 router = APIRouter()
@@ -311,11 +311,11 @@ def _google_token_path() -> Path:
 
 async def _google_token() -> str:
     """Load + refresh the Google OAuth token. Minted once via ``python3 -m
-    app.tn_auth`` → options.google_token_path. HTTPException(503) until minted."""
+    app.thailand_now.auth`` → options.google_token_path. HTTPException(503) until minted."""
     path = _google_token_path()
     if not path.exists():
         raise HTTPException(
-            503, "Google token not minted — run `python3 -m app.tn_auth` once "
+            503, "Google token not minted — run `python3 -m app.thailand_now.auth` once "
             "(needs the OAuth client_id/secret for documents+drive scopes)",
         )
     d = json.loads(path.read_text())
@@ -557,7 +557,7 @@ async def provision(payload: dict = Body(default={})):
     link-shareable, create a Trello card in the desk's list, and attach the Doc to
     the card. Returns each {doc,card} pair.
 
-    The Google step 503s until the token is minted (``python3 -m app.tn_auth``);
+    The Google step 503s until the token is minted (``python3 -m app.thailand_now.auth``);
     Trello + dedup resolution happen first, so the gate message reports the next
     #NN it *would* create."""
     body = payload or {}
@@ -606,7 +606,7 @@ async def provision(payload: dict = Body(default={})):
         raise HTTPException(
             503, f"resolved next #{nn:02d} for {desk_id} ({count}×, list "
             f"{desk['trello_list_name']!r}), but the Google token isn't minted — "
-            "run `python3 -m app.tn_auth`, then retry.",
+            "run `python3 -m app.thailand_now.auth`, then retry.",
         )
     token = await _google_token()
 
@@ -1445,7 +1445,7 @@ def _resolve_gem(opt_key: str, default: str) -> Path:
     Shared by the publicity/archive/scout gem-path resolvers."""
     p = Path(_opts().get(opt_key, default))
     if not p.is_absolute():
-        p = Path(__file__).resolve().parent.parent / p
+        p = Path(__file__).resolve().parent.parent.parent / p
     return p
 
 
@@ -2985,7 +2985,7 @@ async def debug_info() -> dict:
 
     # Test z.ai (if used)
     try:
-        from .zai import zai_message
+        from app.platform.zai import zai_message
         await zai_message("test", max_tokens=10, timeout=10)
         status["zai"] = "ok"
     except Exception as e:
@@ -6379,7 +6379,7 @@ async def seo_suggest_retarget(req: SeoRetargetSuggestReq):
             if r_.get("link"):
                 candidates.append((r_["link"], t))
     sugg = _seo_suggest(slug_words, candidates, n=3)
-    from .seo_jev import verdict_retarget
+    from app.thailand_now.seo_gates import verdict_retarget
     for s in sugg:
         s["jev"] = verdict_retarget(to, req.from_title or req.from_link, s["link"], s["title"])
     return {"to": to, "suggestions": sugg}
@@ -6436,7 +6436,7 @@ async def seo_preview_insert(req: SeoInsertReq):
     # (grill Q3) — the verdict rides the payload as a chip, never blocks.
     jev: dict = {"verdict": "skipped"}
     try:
-        from .seo_jev import verdict_insert
+        from app.thailand_now.seo_gates import verdict_insert
         host_title = (post.get("title") or {}).get("raw", "") if isinstance(post.get("title"), dict) else str(post.get("title") or "")
         jev = verdict_insert(req.phrase, req.href, host_title,
                              before or after or raw_content[:400])
@@ -6731,7 +6731,7 @@ async def seo_bulk_link_all(req: SeoBulkLinkAllReq):
             jev_meta: dict = {"gated": False}
             apply_hosts = hosts
             try:
-                from .seo_jev import gate_bulk_picks
+                from app.thailand_now.seo_gates import gate_bulk_picks
                 picks = await _seo_bulk_link_orphan(
                     o.get("title", ""), o["link"], hosts, True,
                     extra_text=o.get("description") or "",
@@ -7265,7 +7265,7 @@ async def traffic_apply(req: TrafficApplyReq) -> dict:
 
 def _get_seo_gem_system_prompt() -> str:
     candidates = [
-        Path(__file__).resolve().parent / "gems" / "gemini-gem-thailandnow-seo.md",
+        Path(__file__).resolve().parent.parent / "gems" / "gemini-gem-thailandnow-seo.md",
         Path(__file__).resolve().parent.parent / "assets" / "gemini-gem-thailandnow-seo.md",
         Path.home() / "Cephalon" / "10-knowledge" / "ai-workflow" / "gemini-gem-thailandnow-seo.md",
     ]

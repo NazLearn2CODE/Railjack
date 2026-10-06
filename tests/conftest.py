@@ -8,7 +8,7 @@ patching the module global is enough.
 
 import pytest
 
-from app import catalog, session_stats
+from app.platform import catalog, session_stats
 
 
 @pytest.fixture(autouse=True)

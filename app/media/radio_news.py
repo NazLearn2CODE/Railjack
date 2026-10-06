@@ -24,9 +24,9 @@ RNEWS = SCRIPTS / "radio_news.py"
 DFORMAT = SCRIPTS / "doc_format.py"
 # Editor Ben's broadcast-rewrite gem, sliced by the fill script at write time.
 # Passed explicitly (env) so the script never has to guess the repo location.
-REWRITE_GEM = Path(__file__).parent / "gems" / "radio-news-rewrite.md"
+REWRITE_GEM = Path(__file__).parent.parent / "gems" / "radio-news-rewrite.md"
 # Person-name tagger gem for the reusable publication-formatting pass.
-FORMAT_GEM = Path(__file__).parent / "gems" / "doc-format-entities.md"
+FORMAT_GEM = Path(__file__).parent.parent / "gems" / "doc-format-entities.md"
 # See newsroom.py: run via system python3 (skill deps live there, not in Railjack's venv).
 PY = "python3"
 

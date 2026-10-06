@@ -1,4 +1,4 @@
-"""Ben-voice / anti-slop checks (app.style_check) — rule 14 as code.
+"""Ben-voice / anti-slop checks (app.newsroom.style_check) — rule 14 as code.
 
 Errors are objective (dashes, prose parens, unbalanced markers, non-prose
 markup); warnings are heuristics Naz arbitrates (slop vocab, rhythm, shape,
@@ -6,7 +6,7 @@ person, quotes). Overlay brackets holding Thai are EXEMPT from the paren
 error — they are functional formatting, not prose.
 """
 
-from app.style_check import check_style
+from app.newsroom.style_check import check_style
 
 
 def _blob(body: str) -> str:

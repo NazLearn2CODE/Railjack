@@ -23,7 +23,7 @@ import yaml
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from .terminal_input import insert_text
+from app.platform.terminal_input import insert_text
 
 router = APIRouter(prefix="/api/calendar", tags=["calendar"])
 

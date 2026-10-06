@@ -12,8 +12,8 @@ import asyncio
 import json
 from datetime import datetime, timedelta
 
-from app import thailandnow
-from app.thailandnow import _dedup_merge_events, convert_ide_events
+from app.thailand_now import scout as thailandnow
+from app.thailand_now.scout import _dedup_merge_events, convert_ide_events
 
 NOW = datetime.now()
 def ISO(dt):

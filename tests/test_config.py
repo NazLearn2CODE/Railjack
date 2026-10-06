@@ -6,7 +6,7 @@ Uses tmp_path YAMLs + monkeypatches ``CONFIG_DIR`` so the real
 
 import pytest
 
-from app import config
+from app.platform import config
 
 
 def _write_cfg(path, machine, hostnames):

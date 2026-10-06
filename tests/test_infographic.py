@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 from PIL import Image
 
 from app.main import app
-from app.newsroom import (
+from app.newsroom.newsroom import (
     _INF_PALETTES,
     _INF_STYLES,
     _INF_STYLES_BY_ID,
@@ -32,7 +32,7 @@ def _regex_moods_only(monkeypatch):
     """These tests pin the REGEX mood/pool mechanics — JEV mood judgment is
     covered in test_jev_gates. Force the fallback path so tests stay
     machine-independent (never touch the real meter)."""
-    from app import newsroom
+    from app.newsroom import newsroom
     monkeypatch.setattr(newsroom, "_jev_classify_moods", lambda text: (None, None))
 
 
@@ -265,7 +265,7 @@ async def test_compose_briefs_llm_good_json():
         {"style": "flat-navy", "brief": "Brief 1 art line and data"},
         {"style": "flat-navy", "brief": "Brief 2 art line and data"},
     ])
-    with patch("app.newsroom.zai.zai_message", new_callable=AsyncMock) as mock_zai:
+    with patch("app.newsroom.newsroom.zai.zai_message", new_callable=AsyncMock) as mock_zai:
         mock_zai.return_value = good_json
         briefs = await _compose_briefs(
             "Full script", ["Block 1 with 10", "Block 2 with 20"],
@@ -283,7 +283,7 @@ async def test_compose_briefs_llm_good_json():
 async def test_compose_briefs_llm_failure_falls_back_to_locked_style():
     locked = _INF_STYLES_BY_ID["swiss"]
     pal = next(p for p in _INF_PALETTES if p["tone"] == "light")
-    with patch("app.newsroom.zai.zai_message", new_callable=AsyncMock) as mock_zai:
+    with patch("app.newsroom.newsroom.zai.zai_message", new_callable=AsyncMock) as mock_zai:
         mock_zai.side_effect = RuntimeError("network error")
         briefs = await _compose_briefs(
             "Full script", ["Block 1 with 100 tourists", "Block 2 with 50%"], locked, pal
@@ -305,7 +305,7 @@ async def test_compose_briefs_style_drift_falls_back_whole_set():
         {"style": "flat-navy", "brief": "Good brief"},
         {"style": "kawaii", "brief": "Drifted brief"},
     ])
-    with patch("app.newsroom.zai.zai_message", new_callable=AsyncMock) as mock_zai:
+    with patch("app.newsroom.newsroom.zai.zai_message", new_callable=AsyncMock) as mock_zai:
         mock_zai.return_value = drift
         briefs = await _compose_briefs(
             "Full script", ["Block 1 100", "Block 2 200"],
@@ -320,7 +320,7 @@ async def test_compose_briefs_unknown_style_in_llm_output_falls_back():
     bad_json = json.dumps([
         {"style": "neon-future", "brief": "Unknown style brief"},
     ])
-    with patch("app.newsroom.zai.zai_message", new_callable=AsyncMock) as mock_zai:
+    with patch("app.newsroom.newsroom.zai.zai_message", new_callable=AsyncMock) as mock_zai:
         mock_zai.return_value = bad_json
         briefs = await _compose_briefs(
             "Full script", ["Block 1 with 100"], _LOCKED_STYLE, _LOCKED_PALETTE)
@@ -466,7 +466,7 @@ def test_pick_inf_look_rotation_reaches_both_layers():
 async def test_generate_infographics_success(tmp_path, monkeypatch):
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     # Deterministic style draw: tourism script → business pool → flat-navy (first)
-    import app.newsroom as newsroom_mod
+    import app.newsroom.newsroom as newsroom_mod
     monkeypatch.setattr(newsroom_mod.random, "choice", lambda seq: seq[0])
 
     script_text = (
@@ -503,9 +503,9 @@ async def test_generate_infographics_success(tmp_path, monkeypatch):
             return {"task_id": "t1", "status": "completed"}
         return {}
 
-    with patch("app.newsroom._run", side_effect=fake_run), \
-         patch("app.newsroom._script", side_effect=fake_script), \
-         patch("app.newsroom.zai.zai_message", new_callable=AsyncMock) as mock_zai:
+    with patch("app.newsroom.newsroom._run", side_effect=fake_run), \
+         patch("app.newsroom.newsroom._script", side_effect=fake_script), \
+         patch("app.newsroom.newsroom.zai.zai_message", new_callable=AsyncMock) as mock_zai:
         mock_zai.return_value = json.dumps([
             {"style": "flat-navy", "brief": "Custom brief with 15 million"}
         ])
@@ -592,9 +592,9 @@ async def test_generate_infographics_block_failure_partial_success(tmp_path, mon
             return {"task_id": "t2", "status": "completed"}
         return {}
 
-    with patch("app.newsroom._run", side_effect=fake_run), \
-         patch("app.newsroom._script", side_effect=fake_script), \
-         patch("app.newsroom.zai.zai_message", new_callable=AsyncMock) as mock_zai:
+    with patch("app.newsroom.newsroom._run", side_effect=fake_run), \
+         patch("app.newsroom.newsroom._script", side_effect=fake_script), \
+         patch("app.newsroom.newsroom.zai.zai_message", new_callable=AsyncMock) as mock_zai:
         mock_zai.return_value = json.dumps([
             {"style": "flat-navy", "brief": "Brief 1"},
             {"style": "editorial-print", "brief": "Brief 2"},
@@ -635,9 +635,9 @@ async def test_generate_infographics_forced_style_overrides_mood(tmp_path, monke
             return {"notebook": {"id": "nid-f"}}
         return {"task_id": "t", "status": "completed"}
 
-    with patch("app.newsroom._run", side_effect=fake_run), \
-         patch("app.newsroom._script", side_effect=fake_script), \
-         patch("app.newsroom.zai.zai_message", new_callable=AsyncMock) as mock_zai:
+    with patch("app.newsroom.newsroom._run", side_effect=fake_run), \
+         patch("app.newsroom.newsroom._script", side_effect=fake_script), \
+         patch("app.newsroom.newsroom.zai.zai_message", new_callable=AsyncMock) as mock_zai:
         mock_zai.return_value = ""  # forces template fallback in the locked look
         res = await generate_infographics(script_text, "kawaii")
 
@@ -690,9 +690,9 @@ async def test_generate_infographics_same_style_across_blocks(tmp_path, monkeypa
             gen_stdins.append(stdin)
         return await fake_script(argv, timeout=timeout, env=env, stdin=stdin)
 
-    with patch("app.newsroom._run", side_effect=fake_run), \
-         patch("app.newsroom._script", side_effect=script_spy), \
-         patch("app.newsroom.zai.zai_message", side_effect=zai_echoes_lock):
+    with patch("app.newsroom.newsroom._run", side_effect=fake_run), \
+         patch("app.newsroom.newsroom._script", side_effect=script_spy), \
+         patch("app.newsroom.newsroom.zai.zai_message", side_effect=zai_echoes_lock):
         res = await generate_infographics(script_text, "auto")
 
     assert len(gen_argv_styles) == 2
@@ -708,7 +708,7 @@ async def test_generate_infographics_same_style_across_blocks(tmp_path, monkeypa
 
 
 def test_api_newsroom_infographic_generate_route():
-    with patch("app.newsroom.generate_infographics", new_callable=AsyncMock) as mock_gen:
+    with patch("app.newsroom.newsroom.generate_infographics", new_callable=AsyncMock) as mock_gen:
         mock_gen.return_value = {
             "slug": "EVE123",
             "dir": "/tmp/test",
@@ -759,18 +759,18 @@ async def test_generate_infographics_never_raises_past_step1(tmp_path, monkeypat
     """Validator regression (2026-08-31): CLI create 502 / source-add timeout must
     land in errors — the advisory pipeline never raises past step 1."""
     from unittest.mock import AsyncMock, patch
-    from app.newsroom import generate_infographics
+    from app.newsroom.newsroom import generate_infographics
 
     script = "EVE123\n\n[inf]\nThailand saw 15 million visitors.\n[inf/]\n"
-    # (Somatic's copy also monkeypatches app.newsroom.HOME — home's newsroom
+    # (Somatic's copy also monkeypatches app.newsroom.newsroom.HOME — home's newsroom
     # module has no HOME constant; Path.home() is already tmp-scoped above.)
 
     # create explodes (auth-broken CLI, the realistic trigger)
     async def boom_script(argv, timeout=90, env=None, stdin=None):
         raise HTTPException(502, "notebooklm create exploded")
-    with patch("app.newsroom._run", new_callable=AsyncMock), \
-         patch("app.newsroom._script", side_effect=boom_script), \
-         patch("app.newsroom.zai.zai_message", new_callable=AsyncMock) as mz:
+    with patch("app.newsroom.newsroom._run", new_callable=AsyncMock), \
+         patch("app.newsroom.newsroom._script", side_effect=boom_script), \
+         patch("app.newsroom.newsroom.zai.zai_message", new_callable=AsyncMock) as mz:
         mz.return_value = "[]"
         res = await generate_infographics(script, "auto")
     assert res["files"] == [] and res["errors"], "create failure must land in errors"
@@ -788,9 +788,9 @@ async def test_generate_infographics_never_raises_past_step1(tmp_path, monkeypat
         if "create" in argv:
             return {"notebook": {"id": "nid-x"}}
         return {"task_id": "t", "status": "completed"}
-    with patch("app.newsroom._run", side_effect=timeout_run), \
-         patch("app.newsroom._script", side_effect=ok_script), \
-         patch("app.newsroom.zai.zai_message", new_callable=AsyncMock) as mz:
+    with patch("app.newsroom.newsroom._run", side_effect=timeout_run), \
+         patch("app.newsroom.newsroom._script", side_effect=ok_script), \
+         patch("app.newsroom.newsroom.zai.zai_message", new_callable=AsyncMock) as mz:
         mz.return_value = "[]"
         res = await generate_infographics(script, "auto")
     assert any("source" in e.lower() or "timed out" in e.lower() for e in res["errors"])
@@ -799,7 +799,7 @@ async def test_generate_infographics_never_raises_past_step1(tmp_path, monkeypat
 
 # ── motion catalog: pick_inf_motion + loop prompt ─────────────────────
 def test_motion_catalog_size_and_shape():
-    from app.newsroom import _INF_MOTIONS
+    from app.newsroom.newsroom import _INF_MOTIONS
     assert 20 <= len(_INF_MOTIONS) <= 40
     ids = [m["id"] for m in _INF_MOTIONS]
     assert len(ids) == len(set(ids))
@@ -812,7 +812,7 @@ def test_motion_catalog_size_and_shape():
 def test_motion_tails_are_camera_safe():
     """Tails direct INTERNAL elements only — camera language lives in the
     skeleton, never in a tail (loop safety: one voice per instruction)."""
-    from app.newsroom import _INF_MOTIONS
+    from app.newsroom.newsroom import _INF_MOTIONS
     forbidden = ("zoom", "camera", "pan ", "tilt", "fade to black", "cut to")
     for m in _INF_MOTIONS:
         low = m["tail"].lower()
@@ -821,7 +821,7 @@ def test_motion_tails_are_camera_safe():
 
 
 def test_classify_block_kinds_routing():
-    from app.newsroom import _classify_block_kinds
+    from app.newsroom.newsroom import _classify_block_kinds
     assert "stat" in _classify_block_kinds("Revenue rose 12 percent to 1.2 trillion baht.")
     assert "process" in _classify_block_kinds("First apply online. Then wait five days. Finally collect the card.")
     assert "map" in _classify_block_kinds("Flooding hit provinces in the north along the river.")
@@ -831,7 +831,7 @@ def test_classify_block_kinds_routing():
 
 
 def test_pick_inf_motion_forced_and_fallbacks():
-    from app.newsroom import pick_inf_motion
+    from app.newsroom.newsroom import pick_inf_motion
     plain = "The ministry announced a new initiative."
     forced = pick_inf_motion(plain, [], "flag-wave")
     assert forced["id"] == "flag-wave" and forced["pick_source"] == "forced"
@@ -844,7 +844,7 @@ def test_pick_inf_motion_forced_and_fallbacks():
 def test_pick_inf_motion_kind_never_leaks():
     """A stat block's motion always comes from a kind-matched pool — never a
     typography-only or photo-only motion."""
-    from app.newsroom import _INF_MOTIONS_BY_ID, pick_inf_motion
+    from app.newsroom.newsroom import _INF_MOTIONS_BY_ID, pick_inf_motion
     stat_block = "Tourism revenue rose 12 percent to 1.2 trillion baht in Q3."
     for _ in range(20):
         rec = pick_inf_motion(stat_block, ["business"])
@@ -853,7 +853,7 @@ def test_pick_inf_motion_kind_never_leaks():
 
 
 def test_pick_inf_motion_rotation_breadth():
-    from app.newsroom import pick_inf_motion
+    from app.newsroom.newsroom import pick_inf_motion
     stat_block = "Exports grew 5 percent to 500 billion baht."
     seen = {pick_inf_motion(stat_block, ["business", "hard-news", "tech"])[0 if False else "id"]
             for _ in range(60)}
@@ -861,7 +861,7 @@ def test_pick_inf_motion_rotation_breadth():
 
 
 def test_loop_prompt_contains_contract():
-    from app.newsroom import _loop_prompt, pick_inf_motion
+    from app.newsroom.newsroom import _loop_prompt, pick_inf_motion
     motion = pick_inf_motion("Revenue rose 12 percent.", ["business"])
     txt = _loop_prompt("EVE2026090201 story", "12 percent, 1.2 trillion baht", motion)
     for needle in (
@@ -896,9 +896,9 @@ async def test_generate_infographics_motion_forced_writes_txt(tmp_path, monkeypa
             return {"notebook": {"id": "nid-m"}}
         return {"task_id": "t", "status": "completed"}
 
-    with patch("app.newsroom._run", side_effect=fake_run), \
-         patch("app.newsroom._script", side_effect=fake_script), \
-         patch("app.newsroom.zai.zai_message", new_callable=AsyncMock) as mock_zai:
+    with patch("app.newsroom.newsroom._run", side_effect=fake_run), \
+         patch("app.newsroom.newsroom._script", side_effect=fake_script), \
+         patch("app.newsroom.newsroom.zai.zai_message", new_callable=AsyncMock) as mock_zai:
         mock_zai.return_value = ""
         res = await generate_infographics(script_text, "auto", "flag-wave")
 
@@ -928,7 +928,7 @@ _AGY_BLOCK = (
 async def test_generate_infographics_agy_vision_loop_prompt(tmp_path, monkeypatch):
     """agy on PATH + valid vision block → loop txt is the agy-tailored variant."""
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
-    import app.newsroom as newsroom_mod
+    import app.newsroom.newsroom as newsroom_mod
     monkeypatch.setattr(newsroom_mod.random, "choice", lambda seq: seq[0])
     monkeypatch.setattr(newsroom_mod.shutil, "which", lambda name: "/usr/bin/agy")
 
@@ -963,9 +963,9 @@ async def test_generate_infographics_agy_vision_loop_prompt(tmp_path, monkeypatc
             return {"task_id": "t1", "status": "completed"}
         return {}
 
-    with patch("app.newsroom._run", side_effect=fake_run), \
-         patch("app.newsroom._script", side_effect=fake_script), \
-         patch("app.newsroom.zai.zai_message", new_callable=AsyncMock) as mock_zai:
+    with patch("app.newsroom.newsroom._run", side_effect=fake_run), \
+         patch("app.newsroom.newsroom._script", side_effect=fake_script), \
+         patch("app.newsroom.newsroom.zai.zai_message", new_callable=AsyncMock) as mock_zai:
         mock_zai.return_value = json.dumps(
             [{"style": "flat-navy", "brief": "Custom brief"}])
 
@@ -986,7 +986,7 @@ async def test_generate_infographics_agy_vision_loop_prompt(tmp_path, monkeypatc
 async def test_generate_infographics_agy_failure_falls_back(tmp_path, monkeypatch):
     """agy missing/garbage → classic mood-classifier loop txt, no crash."""
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
-    import app.newsroom as newsroom_mod
+    import app.newsroom.newsroom as newsroom_mod
     monkeypatch.setattr(newsroom_mod.random, "choice", lambda seq: seq[0])
     monkeypatch.setattr(newsroom_mod.shutil, "which", lambda name: None)
 
@@ -1019,9 +1019,9 @@ async def test_generate_infographics_agy_failure_falls_back(tmp_path, monkeypatc
             return {"task_id": "t1", "status": "completed"}
         return {}
 
-    with patch("app.newsroom._run", side_effect=fake_run), \
-         patch("app.newsroom._script", side_effect=fake_script), \
-         patch("app.newsroom.zai.zai_message", new_callable=AsyncMock) as mock_zai:
+    with patch("app.newsroom.newsroom._run", side_effect=fake_run), \
+         patch("app.newsroom.newsroom._script", side_effect=fake_script), \
+         patch("app.newsroom.newsroom.zai.zai_message", new_callable=AsyncMock) as mock_zai:
         mock_zai.return_value = json.dumps(
             [{"style": "flat-navy", "brief": "Custom brief"}])
 
@@ -1039,7 +1039,7 @@ def test_fail_surfaces_notebooklm_cli_error():
     """The notebooklm CLI prints {"error": true, "message": ...} on auth expiry —
     _fail must surface that message, not the blank 'script failed (no output)'.
     Live case 2026-09-10: auth-expired create swallowed as 'script failed (no output)'."""
-    from app.newsroom import _fail
+    from app.newsroom.newsroom import _fail
     out = json.dumps({
         "error": True,
         "code": "UNEXPECTED_ERROR",
@@ -1058,7 +1058,7 @@ def test_fail_surfaces_notebooklm_cli_error():
 @pytest.mark.anyio
 async def test_run_heals_auth_expiry_and_retries(monkeypatch):
     """Auth-expired notebooklm call → cookie sync fires once → retry succeeds."""
-    import app.newsroom as newsroom_mod
+    import app.newsroom.newsroom as newsroom_mod
     calls: list[list[str]] = []
 
     async def fake_exec(argv, timeout=90, env=None, stdin=None):
@@ -1091,7 +1091,7 @@ async def test_run_no_heal_when_disabled_or_not_expired(monkeypatch):
     """Kill-switch NEWSROOM_NLM_HEAL=0 → no heal, single attempt; and a plain
     failure (not auth-expired) never triggers the heal either. Uses the REAL
     _nlm_heal (the kill-switch lives there) with _nlm_sync_cookies faked."""
-    import app.newsroom as newsroom_mod
+    import app.newsroom.newsroom as newsroom_mod
     calls: list[list[str]] = []
     syncs: list[bool] = []
 
@@ -1132,7 +1132,7 @@ async def test_heal_rate_limited_within_gap(monkeypatch):
     the gap passes (LAST reset to -inf) it fires again — a long-lived hub keeps
     coverage across repeated expiries (2026-09-23: the one-shot flag died after
     the first heal and left later expiries raw)."""
-    import app.newsroom as newsroom_mod
+    import app.newsroom.newsroom as newsroom_mod
     syncs: list[bool] = []
 
     def fake_sync():

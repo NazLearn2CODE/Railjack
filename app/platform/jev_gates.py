@@ -508,7 +508,7 @@ def apply_gates(body: str, report: dict) -> tuple[str, dict]:
 def load_registry_map() -> dict[str, str]:
     """english → thai from the vault name-wiki (inverts name_check.load_registry,
     which already owns the frontmatter parsing)."""
-    from .name_check import load_registry
+    from app.newsroom.name_check import load_registry
 
     reg, _err = load_registry()
     return {en.lower(): th for th, en in reg.items() if en}

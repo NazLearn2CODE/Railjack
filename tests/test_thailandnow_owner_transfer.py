@@ -12,7 +12,7 @@ import json
 
 import pytest
 
-from app import thailandnow
+from app.thailand_now import scout as thailandnow
 
 
 class _MockResponse:

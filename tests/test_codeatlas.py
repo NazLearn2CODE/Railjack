@@ -9,7 +9,7 @@ import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
-from app import codeatlas
+from app.platform import codeatlas
 from app.main import app
 
 GOOD_HTML = '<html><body><script id="codeatlas-data" type="application/json">{}</script></body></html>'

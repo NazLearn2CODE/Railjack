@@ -1,6 +1,6 @@
 """Session telemetry test suite — limit table, empirical clamp, provider detection, quota parsers."""
 
-from app import session_stats
+from app.platform import session_stats
 
 
 def test_limit_table_glm_1m():

@@ -11,7 +11,7 @@ import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
-from app import thailandnow
+from app.thailand_now import scout as thailandnow
 from app.main import app
 
 
@@ -19,7 +19,7 @@ from app.main import app
 def _no_jev_meter(monkeypatch, tmp_path):
     """Machine-independent tests: the JEV gate must degrade to no-gate here,
     never touch the real meter or the real verdict cache."""
-    from app import jev_gates
+    from app.platform import jev_gates
     monkeypatch.setattr(jev_gates, "METER", tmp_path / "no-meter.py")
     monkeypatch.setattr(jev_gates, "CACHE_DIR", tmp_path / "cache")
 
