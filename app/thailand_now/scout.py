@@ -7282,13 +7282,13 @@ def _get_seo_gem_system_prompt() -> str:
 AGY_BIN = os.path.expanduser("~/.local/bin/agy")
 
 
-async def _agy_complete(prompt: str, timeout: float = 120.0, add_dir: str | None = None, effort: str = "medium") -> str | None:
+async def _agy_complete(prompt: str, timeout: float = 120.0, add_dir: str | None = None, effort: str = "medium", model: str = "gemini-3.6-flash") -> str | None:
     """Run agy CLI (AI-Pro Gemini quota) as a subprocess. Never raises (returns None on failure)."""
     try:
         cmd = [
             AGY_BIN,
             "--model",
-            "gemini-3.6-flash",
+            model,
             "--effort",
             effort,
             "--output-format",
@@ -7441,20 +7441,22 @@ async def _generate_event_seo(title: str, body: str, category: str = "Events") -
         f"Related Hashtags, AI SEO Block with Version A and Version B), no preamble."
     )
 
-    # 1. PRIMARY: agy (AI-Pro Gemini quota)
-    raw = await _agy_complete(agy_prompt)
+    # 1. PRIMARY: agy (AI-Pro Gemini quota) — Gemini 3.8 Flash (Naz 2026-10-06)
+    raw = await _agy_complete(agy_prompt, model="gemini-3.8-flash")
     if raw:
         parsed = _parse_gemini_seo(raw)
         if parsed:
-            return parsed, "gemini-3.6-flash (agy)"
+            return parsed, "gemini-3.8-flash (agy)"
 
-    # 2. FALLBACK: glm-5 via zai_message (OmniRoute)
+    # 2. FALLBACK: glm-5.3-flash via zai_message (OmniRoute). THINKING model —
+    # burns budget on a reasoning block first, so 4096 truncates before any text
+    # (stop_reason=length, literal "(empty response)"). 8192 gives it room.
     try:
-        raw = await zai_message(article, max_tokens=4096, system=gem_core, model="glm-5", timeout=120.0)
+        raw = await zai_message(article, max_tokens=8192, system=gem_core, model="glm/glm-5.3-flash", timeout=180.0)
         if raw:
             parsed = _parse_gemini_seo(raw)
             if parsed:
-                return parsed, "glm-5"
+                return parsed, "glm-5.3-flash"
     except Exception:
         pass
 
