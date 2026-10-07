@@ -7282,7 +7282,7 @@ def _get_seo_gem_system_prompt() -> str:
 AGY_BIN = os.path.expanduser("~/.local/bin/agy")
 
 
-async def _agy_complete(prompt: str, timeout: float = 120.0, add_dir: str | None = None, effort: str = "medium", model: str = "gemini-3.6-flash") -> str | None:
+async def _agy_complete(prompt: str, timeout: float = 300.0, add_dir: str | None = None, effort: str = "medium", model: str = "gemini-3.6-flash") -> str | None:
     """Run agy CLI (AI-Pro Gemini quota) as a subprocess. Never raises (returns None on failure)."""
     try:
         cmd = [
@@ -7302,11 +7302,14 @@ async def _agy_complete(prompt: str, timeout: float = 120.0, add_dir: str | None
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout, _stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
         if proc.returncode == 0:
             return stdout.decode(errors="replace")
-    except Exception:
-        pass
+        print(f"[seo-gen] agy rc={proc.returncode} stderr={stderr.decode(errors='replace')[-200:]!r}", flush=True)
+    except asyncio.TimeoutError:
+        print(f"[seo-gen] agy TIMEOUT after {timeout}s", flush=True)
+    except Exception as e:
+        print(f"[seo-gen] agy error: {e}", flush=True)
     return None
 
 
@@ -7441,8 +7444,13 @@ async def _generate_event_seo(title: str, body: str, category: str = "Events") -
         f"Related Hashtags, AI SEO Block with Version A and Version B), no preamble."
     )
 
-    # 1. PRIMARY: agy (AI-Pro Gemini quota) — Gemini 3.8 Flash (Naz 2026-10-06)
+    # 1. PRIMARY: agy (AI-Pro Gemini quota) — Gemini 3.8 Flash (Naz 2026-10-06).
+    # One retry: the agy binary self-updates in place and briefly fails during
+    # the swap window (observed 2026-10-06 10:56).
     raw = await _agy_complete(agy_prompt, model="gemini-3.8-flash")
+    if not raw:
+        await asyncio.sleep(20)
+        raw = await _agy_complete(agy_prompt, model="gemini-3.8-flash")
     if raw:
         parsed = _parse_gemini_seo(raw)
         if parsed:
@@ -7452,8 +7460,11 @@ async def _generate_event_seo(title: str, body: str, category: str = "Events") -
     # burns budget on a reasoning block first, so 4096 truncates before any text
     # (stop_reason=length, literal "(empty response)"). 8192 gives it room.
     try:
-        raw = await zai_message(article, max_tokens=8192, system=gem_core, model="glm/glm-5.3-flash", timeout=180.0)
-        if raw:
+        raw = await zai_message(article, max_tokens=8192, system=gem_core, model="glm/glm-5.3-flash", timeout=300.0)
+        if raw and "(empty response)" in raw[:40]:
+            # thinking model burned the whole budget reasoning → escalate once
+            raw = await zai_message(article, max_tokens=16384, system=gem_core, model="glm/glm-5.3-flash", timeout=300.0)
+        if raw and raw != "(empty response)":
             parsed = _parse_gemini_seo(raw)
             if parsed:
                 return parsed, "glm-5.3-flash"
