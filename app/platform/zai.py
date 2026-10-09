@@ -108,5 +108,6 @@ async def zai_message(
             r.raise_for_status()
             data = r.json()
     except httpx.HTTPError as e:
-        raise HTTPException(502, f"omniroute gateway request failed: {e}")
+        print(f"[zai] gateway {type(e).__name__}: {e} | model={m} mt={max_tokens} sys={bool(system)} proxy_env={bool(os.environ.get('ALL_PROXY') or os.environ.get('HTTPS_PROXY'))}", flush=True)
+        raise HTTPException(502, f"omniroute gateway request failed: {type(e).__name__} {e}")
     return "".join(b.get("text", "") for b in data.get("content", [])).strip()

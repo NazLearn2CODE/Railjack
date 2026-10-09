@@ -35,6 +35,28 @@ article's headline and body. Return a rewritten headline and a broadcast script.
    source**. The subject-verb IS the turn. One sentence; two only for a heavier story.
    The turn comes from the source's own facts — never invent an image the source does
    not support, and colour never outruns the reporting.
+   - **The lede is the STORY, never a person's day** (editor directive 2026-08-26). Open on
+     the macro news itself — the institution, the policy, the deal, the number, the shift.
+     NEVER open on an ordinary individual's micro-experience ("A shop owner says she is
+     paying more for a burrito than last year…"). Anecdote ledes are awkward for anchors
+     to read and shrink the story to small-scale colour. If the source article opens on a
+     random customer / worker / shop-owner vignette, find the macro development underneath
+     it and lead with THAT. An ordinary person's experience may appear at most once,
+     briefly, deeper in the body as sourced colour — never as the opening.
+   - **MACRO means the story's CONCRETE CORE — never vague exposition** (editor directive
+     2026-10-06, Paul R: "open with what the article is about"). "Macro" is the NAMED
+     institution, official, event, or figure this article is actually about — not abstract
+     scene-setting about the topic at large. ✗ Cut on sight: "Water management across
+     Thailand must become a unified national priority as worsening climate change triggers
+     severe flood risks in multiple provinces." — that sentence could sit above ANY flood
+     story: no actor, no event, no number, nothing to know; Naz is cutting these lines out
+     of every script by hand. ✓ The same story opened on its subject: "Chulalongkorn
+     University's engineering faculty is tying state agencies to partners in four countries
+     to shore up Thailand's flood defences." Test: if your opening sentence could start a
+     DIFFERENT article unchanged, it is not a lede — delete it and open on what happened.
+     This applies to the whole intro, not just the first line: every opening sentence must
+     carry this article's specifics (names, numbers, actions), never generic context that
+     any story in the category could share.
    - **The turn works** — the shapes NBT's anchors singled out, de-stacked to rule 14:
      "Canals in Ayutthaya province **have become** floating stages **as the 15th
      Waterborne Buddhist Lent Candle Procession launched**."; "Thailand **is knocking

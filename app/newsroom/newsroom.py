@@ -29,6 +29,7 @@ from fastapi import APIRouter, Body, HTTPException
 from fastapi.responses import FileResponse
 
 from app.platform import zai
+from app.thailand_now.scout import _agy_complete
 from app.newsroom.name_check import _HONORIFICS, check_rewritten, load_registry
 from app.newsroom.style_check import check_style
 
@@ -844,9 +845,27 @@ async def api_rewrite(body: dict = Body(...)):
         "Do NOT produce Version B (Key Points), focus keyphrases, meta descriptions, or hashtags.\n"
         "Output ONLY the Version A summary paragraph."
     )
+    async def _rewrite_llm(prompt: str, max_tokens: int, timeout: float, system: str | None = None) -> str:
+        """Engine split by input size (Naz 2026-10-06): glm-5.3-flash is a THINKING
+        model — long documents think longer than OmniRoute's 120s queue budget
+        (maxWaitMs), which drops them as 502. Long prompts → agy gemini-3.8-flash
+        primary (no queue); short prompts → glm/glm-5.3-flash primary; the other
+        engine is always the in-function fallback."""
+        long_doc = len(prompt) > 4000
+        primary = ("agy", "gemini-3.8-flash") if long_doc else ("glm", "glm/glm-5.3-flash")
+        async def run(engine):
+            if engine == "agy":
+                return await _agy_complete(prompt, model="gemini-3.8-flash", timeout=max(timeout, 300.0)) or ""
+            raw = await zai.zai_message(prompt, max_tokens=max_tokens, timeout=timeout, system=system, model=primary[1])
+            return "" if raw == "(empty response)" else raw
+        raw = await run(primary[0])
+        if not raw:
+            raw = await run(primary[1])
+        return raw
+
     out_ben, out_seo = await asyncio.gather(
-        zai.zai_message(ben_prompt, max_tokens=9000, timeout=120),
-        zai.zai_message(text, system=seo_system, max_tokens=4000, timeout=60),
+        _rewrite_llm(ben_prompt, max_tokens=16384, timeout=600),
+        _rewrite_llm(text, max_tokens=8192, timeout=600, system=seo_system),
     )
     if not out_ben.strip():
         raise HTTPException(502, "rewrite came back empty")
