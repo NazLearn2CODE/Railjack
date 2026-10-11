@@ -15,9 +15,12 @@ This is now the home Railjack module, back-ported from Somatic's 2026-08-17 tele
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
+import shutil
+import subprocess
 import time
 from datetime import datetime
 from pathlib import Path
@@ -367,10 +370,12 @@ def _load_ag_disk() -> dict[str, dict]:
         return {}
 
 
-async def _antigravity_quota() -> dict[str, dict]:
-    """Both model-group quotas from the local Antigravity LanguageServer
-    Connect-RPC (60s cache, shared by the gemini + claude lanes — one RPC per
-    minute, not one per lane). Empty dict on failure; callers fall back."""
+async def _antigravity_rpc_quota() -> dict[str, dict]:
+    """OLD scrape: both model-group quotas from the local Antigravity
+    LanguageServer Connect-RPC. agy 1.3.3 added CSRF auth to this endpoint
+    (`unauthenticated: missing CSRF token`) and moved the gRPC port to TLS,
+    so this now returns {} in practice — kept for when agy re-opens it.
+    (60s cache, shared by the gemini + claude lanes — one RPC per minute.)"""
     global _ag_quota_cache
     ts, groups = _ag_quota_cache
     if groups and time.monotonic() - ts < 60:
@@ -423,6 +428,82 @@ async def _antigravity_quota() -> dict[str, dict]:
     except Exception:
         pass
     return {}
+
+
+def _agy_cli_quota() -> dict[str, dict]:
+    """Quota via the agy CLI itself: `agy -p /quota` prints the same 4-bucket
+    table the RPC used to serve (Gemini / Claude+GPT × 5h / weekly, REMAINING
+    %, reset time). agy 1.3.3 CSRF-locked the local LanguageServer RPC, so
+    this is the working scrape path. Returns the same per-group shape as
+    _parse_ag_groups; {} on any failure.
+    ponytail: if agy ever re-opens the RPC, _antigravity_rpc_quota is the
+    drop-in replacement — parse shapes are shared."""
+    exe = shutil.which("agy") or str(Path.home() / ".local" / "bin" / "agy")
+    try:
+        out = subprocess.run(
+            [exe, "-p", "/quota"], capture_output=True, text=True, timeout=120
+        ).stdout
+    except Exception:
+        return {}
+    groups: dict[str, dict] = {}
+    for line in out.splitlines():
+        parts = [p.strip() for p in re.split(r"\t+|\s{2,}", line) if p.strip()]
+        if len(parts) < 3:
+            continue
+        group, kind, pct = parts[0].lower(), parts[1].lower(), parts[2]
+        key = ("gemini" if "gemini" in group
+               else "3p" if "claude" in group or "gpt" in group else None)
+        m = re.search(r"(\d+)%", pct)
+        if not key or not m:
+            continue
+        lane = groups.setdefault(key, {})
+        used = 100 - int(m.group(1))  # CLI prints remaining; lanes show used
+        reset = parts[3] if len(parts) > 3 else ""
+        if "five hour" in kind:
+            lane["session_pct"] = used
+            if reset:
+                lane["reset_at"] = reset
+        elif "week" in kind:
+            lane["week_pct"] = used
+            if reset:
+                lane["week_reset_at"] = reset
+    return groups
+
+
+_ag_cli_lock = asyncio.Lock()
+_ag_refresh_task: asyncio.Task | None = None
+
+
+async def _refresh_ag_quota() -> dict[str, dict]:
+    """Single-flight refresh: RPC first (in case agy re-opens it), then the
+    agy CLI. Persists to disk so the week fields survive idle."""
+    global _ag_quota_cache
+    async with _ag_cli_lock:
+        ts, groups = _ag_quota_cache
+        if groups and time.monotonic() - ts < 60:
+            return groups
+        groups = await _antigravity_rpc_quota()
+        if not groups:
+            groups = await asyncio.to_thread(_agy_cli_quota)
+        if groups:
+            _ag_quota_cache = (time.monotonic(), groups)
+            _save_ag_disk(groups)
+        return groups
+
+
+async def _antigravity_quota() -> dict[str, dict]:
+    """Both model-group quotas for the gemini + claude lanes. Serves the 60s
+    last-good cache and kicks a single-flight background refresh when stale —
+    the CLI scrape takes tens of seconds, so callers must never block on it.
+    Empty dict until the first successful scrape; lanes show nothing rather
+    than fabricate."""
+    global _ag_refresh_task
+    ts, groups = _ag_quota_cache
+    if groups and time.monotonic() - ts < 60:
+        return groups
+    if _ag_refresh_task is None or _ag_refresh_task.done():
+        _ag_refresh_task = asyncio.ensure_future(_refresh_ag_quota())
+    return groups
 
 
 async def _gemini_usage() -> dict | None:

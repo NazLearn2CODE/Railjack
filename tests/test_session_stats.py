@@ -122,3 +122,34 @@ def test_ag_disk_cache_validity_bounds(tmp_path, monkeypatch):
 
     cache.write_text("not json")
     assert session_stats._load_ag_disk() == {}  # torn write → empty, never crash
+
+
+def test_agy_cli_quota_parses_slash_output(monkeypatch):
+    """agy 1.3.3 CSRF-locked the RPC; `agy -p /quota` is the scrape path.
+    CLI prints REMAINING % — the parser must invert to used %."""
+    sample = (
+        "Gemini Models\tWeekly Limit Remaining\t39%\t2026-10-14T03:07:27Z\n"
+        "Gemini Models\tFive Hour Limit Remaining\t70%\t2026-10-11T14:32:03Z\n"
+        "Claude and GPT models\tWeekly Limit Remaining\t100%\t2026-10-18T10:36:15Z\n"
+        "Claude and GPT models\tFive Hour Limit Remaining\t100%\t2026-10-11T15:36:15Z\n"
+    )
+
+    class R:
+        stdout = sample
+
+    monkeypatch.setattr(session_stats.subprocess, "run", lambda *a, **k: R())
+    out = session_stats._agy_cli_quota()
+    assert out["gemini"]["week_pct"] == 61
+    assert out["gemini"]["week_reset_at"] == "2026-10-14T03:07:27Z"
+    assert out["gemini"]["session_pct"] == 30
+    assert out["gemini"]["reset_at"] == "2026-10-11T14:32:03Z"
+    assert out["3p"]["week_pct"] == 0
+    assert out["3p"]["session_pct"] == 0
+
+
+def test_agy_cli_quota_garbage_returns_empty(monkeypatch):
+    class R:
+        stdout = "some unparseable noise\n"
+
+    monkeypatch.setattr(session_stats.subprocess, "run", lambda *a, **k: R())
+    assert session_stats._agy_cli_quota() == {}
