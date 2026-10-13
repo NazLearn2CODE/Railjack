@@ -128,7 +128,7 @@ export default function ModuleRail() {
           }
           now={now}
 />
-        <TelemetryLane label="GOOGLE" lane={stats?.lanes?.gemini} now={now} />
+        <TelemetryLane label="GOOGLE" lane={stats?.lanes?.gemini} now={now} showSes />
         <TelemetryLane label="CLAUDE / GPT" lane={stats?.lanes?.claude} now={now} />
         <TelemetryLane label="Z.AI" lane={stats?.lanes?.zai} now={now} showSes />
       </div>

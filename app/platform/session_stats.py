@@ -550,16 +550,6 @@ async def _gemini_usage() -> dict | None:
     return None
 
 
-async def _google_3p_usage() -> dict | None:
-    """Claude+GPT group hosted on the Google AI-Pro sub, from the same local
-    Antigravity RPC (5h + weekly), then the persisted last daemon reading.
-    None beyond that → the claude lane falls back to anthropic-oauth."""
-    groups = await _antigravity_quota()
-    if groups.get("3p"):
-        return groups["3p"]
-    return _load_ag_disk().get("3p")
-
-
 if __name__ == "__main__":
     import sys
     try:
@@ -586,9 +576,9 @@ async def _provider_usage(provider: str) -> dict:
     now = time.monotonic()
     try:
         if provider == "anthropic" or provider == "claude":
-            # Google-sub Claude/GPT quota first (the CLAUDE / GPT lane); native
-            # Anthropic OAuth as fallback when the Antigravity daemon is down.
-            data = await _google_3p_usage() or await _anthropic_usage()
+            # Native Anthropic OAuth only — the old Google-sub Claude/GPT feed
+            # is gone (Naz doesn't use it; 2026-10-13).
+            data = await _anthropic_usage()
         elif provider == "zai":
             data = await _zai_usage()
         elif provider == "cco":
