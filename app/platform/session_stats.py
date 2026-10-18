@@ -72,7 +72,7 @@ def _zai_display_model() -> str:
     from app.platform.zai import dsh_default_model
 
     d = dsh_default_model()
-    return d.split("/")[-1] if d else "glm-5.2"
+    return d.split("/")[-1] if d else "glm-5.3"
 
 
 _last_state: dict[str, dict] = {}
