@@ -141,7 +141,6 @@ export default function ModuleRail() {
           now={now}
 />
         <AgyMenu agy={stats?.agy} active={stats?.lanes?.gemini?.active ?? false} now={now} />
-        <TelemetryLane label="CLAUDE / GPT" lane={stats?.lanes?.claude} now={now} />
         <TelemetryLane label="Z.AI" lane={stats?.lanes?.zai} now={now} showSes />
       </div>
     </nav>
