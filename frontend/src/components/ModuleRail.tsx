@@ -141,7 +141,26 @@ export default function ModuleRail() {
           now={now}
 />
         <AgyMenu agy={stats?.agy} active={stats?.lanes?.gemini?.active ?? false} now={now} />
-        <TelemetryLane label="Z.AI" lane={stats?.lanes?.zai} now={now} showSes />
+        {/* Z.AI — flat (never collapses): every z.ai model shares one token
+            pool, so no model name and no per-model windows (Naz, 2026-10-18).
+            Same 5-hour row shape as the AGY menu; remaining = 100 − used%. */}
+        {stats?.lanes?.zai?.used_pct !== undefined && (
+          <div className="flex flex-col gap-0.5">
+            <div className="flex items-center gap-2">
+              <span className={stats.lanes.zai.active ? "pip pip--go" : "pip pip--crit"} />
+              <span className="label">Z.AI</span>
+            </div>
+            <AgyRow
+              label="5-hour"
+              win={{
+                remaining_pct: Math.max(0, 100 - stats.lanes.zai.used_pct),
+                reset_at: stats.lanes.zai.reset_at,
+              }}
+              now={now}
+              withDays={false}
+            />
+          </div>
+        )}
       </div>
     </nav>
   );
@@ -178,13 +197,10 @@ function TelemetryLane({
   label,
   lane,
   now,
-  showSes,
 }: {
   label: string;
   lane?: Lane;
   now: number;
-  /** SES (session-window %) is opt-in per lane — Z.AI only (Naz, 2026-09-22). */
-  showSes?: boolean;
 }) {
   const active = lane?.active ?? false;
   const reset = lane?.reset_at ? resetCountdown(lane.reset_at, now) : null;
@@ -206,7 +222,6 @@ function TelemetryLane({
           value={`$${lane.usd.remaining.toFixed(2)} / $${lane.usd.refill.toFixed(2)}`}
         />
       )}
-      {showSes && lane?.used_pct !== undefined && <Metric label="SES" value={lane.used_pct} />}
       {active && lane?.ctx_pct !== undefined && <Metric label="CTX" value={lane.ctx_pct} />}
       {lane?.week_pct !== undefined && <Metric label="WK" value={lane.week_pct} />}
       {reset && <MetricRaw label="RESET" value={reset} />}
