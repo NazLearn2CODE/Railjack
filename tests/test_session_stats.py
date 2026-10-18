@@ -153,3 +153,38 @@ def test_agy_cli_quota_garbage_returns_empty(monkeypatch):
 
     monkeypatch.setattr(session_stats.subprocess, "run", lambda *a, **k: R())
     assert session_stats._agy_cli_quota() == {}
+
+
+def test_agy_cli_quota_argon_split_and_local_resets(monkeypatch):
+    """Real agy output (2026-10-18): space-aligned columns, '+07' resets, and a
+    'Gemini 4 Argon' row that must NOT overwrite the Gemini Models weekly."""
+    sample = (
+        "Quota:\n"
+        "Gemini Models          Weekly Limit Remaining       99%   2026-10-24 20:26 +07\n"
+        "Gemini Models          Five Hour Limit Remaining    98%   2026-10-18 18:33 +07\n"
+        "Claude and GPT models  Weekly Limit Remaining       100%  2026-10-25 15:46 +07\n"
+        "Claude and GPT models  Five Hour Limit Remaining    100%  2026-10-18 20:46 +07\n"
+        "Gemini 4 Argon         Gemini 4 Argon Weekly Limit  52%   2026-10-24 20:25 +07\n"
+    )
+
+    class R:
+        stdout = sample
+
+    monkeypatch.setattr(session_stats.subprocess, "run", lambda *a, **k: R())
+    out = session_stats._agy_cli_quota()
+    assert out["gemini"] == {"week_pct": 1, "week_reset_at": "2026-10-24T13:26:00Z",
+                             "session_pct": 2, "reset_at": "2026-10-18T11:33:00Z"}
+    assert out["argon"] == {"week_pct": 48, "week_reset_at": "2026-10-24T13:25:00Z"}
+    assert out["3p"]["reset_at"] == "2026-10-18T13:46:00Z"
+
+    view = session_stats._agy_groups_view(out)
+    assert view["argon"] == {"weekly": {"remaining_pct": 52, "reset_at": "2026-10-24T13:25:00Z"}}
+    assert view["gemini"]["five_hour"] == {"remaining_pct": 98, "reset_at": "2026-10-18T11:33:00Z"}
+    assert view["gemini"]["weekly"]["remaining_pct"] == 99
+    assert view["3p"]["weekly"]["remaining_pct"] == 100
+
+
+def test_cli_reset_iso_passthrough():
+    assert session_stats._cli_reset_iso("2026-10-14T03:07:27Z") == "2026-10-14T03:07:27Z"
+    assert session_stats._cli_reset_iso("2026-10-18 18:33:05 +0530") == "2026-10-18T13:03:05Z"
+    assert session_stats._cli_reset_iso("soon") == "soon"

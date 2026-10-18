@@ -296,9 +296,7 @@ def _parse_ag_groups(data: dict) -> dict[str, dict]:
     inverted from remainingFraction (dashboard shows remaining, we show used)."""
     out: dict[str, dict] = {}
     for g in (data or {}).get("groups") or []:
-        name = (g.get("displayName") or "").lower()
-        key = ("gemini" if "gemini" in name
-               else "3p" if "claude" in name or "gpt" in name else None)
+        key = _ag_group_key(g.get("displayName") or "")
         if not key or key in out:
             continue
         lane: dict = {}
@@ -430,12 +428,44 @@ async def _antigravity_rpc_quota() -> dict[str, dict]:
     return {}
 
 
+def _ag_group_key(name: str) -> str | None:
+    """agy quota group → lane key. Argon is checked BEFORE the generic
+    'gemini' match: its row ('Gemini 4 Argon') also contains 'gemini' and used
+    to overwrite the Gemini Models weekly reading."""
+    name = name.lower()
+    if "argon" in name:
+        return "argon"
+    if "gemini" in name:
+        return "gemini"
+    if "claude" in name or "gpt" in name:
+        return "3p"
+    return None
+
+
+def _cli_reset_iso(raw: str) -> str:
+    """agy CLI reset time → ISO-8601 UTC. agy prints '2026-10-24 20:26 +07'
+    (not ISO — browsers and fromisoformat reject it); older builds printed ISO
+    already. Unparseable input is returned unchanged."""
+    raw = raw.strip()
+    m = re.fullmatch(r"(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}(?::\d{2})?)\s*([+-]\d{2})(?::?(\d{2}))?", raw)
+    if not m:
+        return raw
+    date, clock, off_h, off_m = m.groups()
+    if clock.count(":") == 1:
+        clock += ":00"
+    try:
+        dt = datetime.fromisoformat(f"{date}T{clock}{off_h}:{off_m or '00'}")
+    except ValueError:
+        return raw
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(dt.timestamp()))
+
+
 def _agy_cli_quota() -> dict[str, dict]:
-    """Quota via the agy CLI itself: `agy -p /quota` prints the same 4-bucket
-    table the RPC used to serve (Gemini / Claude+GPT × 5h / weekly, REMAINING
-    %, reset time). agy 1.3.3 CSRF-locked the local LanguageServer RPC, so
-    this is the working scrape path. Returns the same per-group shape as
-    _parse_ag_groups; {} on any failure.
+    """Quota via the agy CLI itself: `agy -p /quota` prints the per-group
+    table the RPC used to serve (Gemini 4 Argon weekly, Gemini Models and
+    Claude+GPT × 5h / weekly, REMAINING %, reset time). agy 1.3.3 CSRF-locked
+    the local LanguageServer RPC, so this is the working scrape path. Returns
+    the same per-group shape as _parse_ag_groups; {} on any failure.
     ponytail: if agy ever re-opens the RPC, _antigravity_rpc_quota is the
     drop-in replacement — parse shapes are shared."""
     exe = shutil.which("agy") or str(Path.home() / ".local" / "bin" / "agy")
@@ -450,15 +480,14 @@ def _agy_cli_quota() -> dict[str, dict]:
         parts = [p.strip() for p in re.split(r"\t+|\s{2,}", line) if p.strip()]
         if len(parts) < 3:
             continue
-        group, kind, pct = parts[0].lower(), parts[1].lower(), parts[2]
-        key = ("gemini" if "gemini" in group
-               else "3p" if "claude" in group or "gpt" in group else None)
+        group, kind, pct = parts[0], parts[1].lower(), parts[2]
+        key = _ag_group_key(group)
         m = re.search(r"(\d+)%", pct)
         if not key or not m:
             continue
         lane = groups.setdefault(key, {})
         used = 100 - int(m.group(1))  # CLI prints remaining; lanes show used
-        reset = parts[3] if len(parts) > 3 else ""
+        reset = _cli_reset_iso(parts[3]) if len(parts) > 3 else ""
         if "five hour" in kind:
             lane["session_pct"] = used
             if reset:
@@ -646,7 +675,44 @@ async def session_payload() -> dict:
         }
     except Exception:
         pass  # a dead JEV ledger never blocks the provider lanes
-    return {"lanes": lanes}
+    agy = await _agy_payload()
+    return {"lanes": lanes, "agy": agy} if agy else {"lanes": lanes}
+
+
+def _agy_window(pct_used: int | None, reset_at: str | None) -> dict | None:
+    if pct_used is None:
+        return None
+    w: dict = {"remaining_pct": max(0, 100 - int(pct_used))}
+    if reset_at:
+        w["reset_at"] = reset_at
+    return w
+
+
+def _agy_groups_view(groups: dict[str, dict]) -> dict:
+    """Per-group agy quota → sidebar AGY menu shape (REMAINING %, like agy's
+    own /quota). Only windows with a real reading are included."""
+    out: dict = {}
+    for key in ("argon", "gemini", "3p"):
+        g = groups.get(key) or {}
+        entry = {}
+        five = _agy_window(g.get("session_pct"), g.get("reset_at"))
+        week = _agy_window(g.get("week_pct"), g.get("week_reset_at"))
+        if five:
+            entry["five_hour"] = five
+        if week:
+            entry["weekly"] = week
+        if entry:
+            out[key] = entry
+    return out
+
+
+async def _agy_payload() -> dict:
+    """60s-cached agy quota (kicks a background refresh when stale), falling
+    back to the validity-bounded disk reading so the menu survives restarts."""
+    groups = await _antigravity_quota()
+    if not groups:
+        groups = _load_ag_disk()
+    return _agy_groups_view(groups)
 
 
 @router.get("/api/session")

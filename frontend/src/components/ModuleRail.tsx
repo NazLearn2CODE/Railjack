@@ -25,8 +25,20 @@ interface Lane {
   active?: boolean;
 }
 
+interface AgyWindow {
+  remaining_pct: number;
+  reset_at?: string;
+}
+
+interface AgyGroup {
+  five_hour?: AgyWindow;
+  weekly?: AgyWindow;
+}
+
 interface SessionStats {
   lanes?: { zai?: Lane; gemini?: Lane; claude?: Lane; jev?: Lane };
+  /** agy /quota per group, REMAINING % (argon = Gemini 4 Argon, 3p = Claude & GPT). */
+  agy?: { argon?: AgyGroup; gemini?: AgyGroup; "3p"?: AgyGroup };
 }
 
 function resetCountdown(iso: string, now: number): string | null {
@@ -128,7 +140,7 @@ export default function ModuleRail() {
           }
           now={now}
 />
-        <TelemetryLane label="GOOGLE" lane={stats?.lanes?.gemini} now={now} showSes />
+        <AgyMenu agy={stats?.agy} active={stats?.lanes?.gemini?.active ?? false} now={now} />
         <TelemetryLane label="CLAUDE / GPT" lane={stats?.lanes?.claude} now={now} />
         <TelemetryLane label="Z.AI" lane={stats?.lanes?.zai} now={now} showSes />
       </div>
@@ -201,5 +213,108 @@ function TelemetryLane({
       {reset && <MetricRaw label="RESET" value={reset} />}
       {wkReset && <MetricRaw label="WK RESET" value={wkReset} />}
     </div>
+  );
+}
+
+/** "Xd XXh XXm" (weekly) / "Xh XXm" (5-hour) until `iso`; null when past/unknown. */
+function agyCountdown(iso: string | undefined, now: number, withDays: boolean): string | null {
+  if (!iso) return null;
+  const ms = new Date(iso).getTime() - now;
+  if (isNaN(ms) || ms <= 0) return null;
+  const totalMin = Math.floor(ms / 60_000);
+  const m = String(totalMin % 60).padStart(2, "0");
+  if (!withDays) return `${Math.floor(totalMin / 60)}h ${m}m`;
+  const h = String(Math.floor(totalMin / 60) % 24).padStart(2, "0");
+  return `${Math.floor(totalMin / 1440)}d ${h}h ${m}m`;
+}
+
+/** REMAINING % color: hazard ≤30%, critical ≤10% (inverse of the used-% Metric grammar). */
+function remainingColor(pct: number): string {
+  return pct <= 10
+    ? "var(--color-critical, var(--error-deep))"
+    : pct <= 30
+      ? "var(--color-hazard, var(--warning))"
+      : "var(--color-phosphor, var(--ink))";
+}
+
+function AgyRow({
+  label,
+  win,
+  now,
+  withDays,
+}: {
+  label: string;
+  win?: AgyWindow;
+  now: number;
+  withDays: boolean;
+}) {
+  if (!win) return null;
+  const reset = agyCountdown(win.reset_at, now, withDays);
+  return (
+    <div className="pl-2" style={{ fontSize: "11px", lineHeight: 1.35 }}>
+      <span className="label" style={{ fontSize: "10px", letterSpacing: "0.1em" }}>
+        {label}:
+      </span>{" "}
+      <span className="pct" style={{ fontSize: "11px", color: remainingColor(win.remaining_pct) }}>
+        {win.remaining_pct}%
+      </span>{" "}
+      <span style={{ color: "var(--color-muted)" }}>remaining{reset ? ` — resets ${reset}` : ""}</span>
+    </div>
+  );
+}
+
+function AgyGroupBlock({ title, group, now }: { title: string; group?: AgyGroup; now: number }) {
+  if (!group || (!group.five_hour && !group.weekly)) return null;
+  return (
+    <div className="flex flex-col gap-0.5">
+      <span className="label" style={{ fontSize: "10px", color: "var(--color-signal)" }}>
+        {title}
+      </span>
+      <AgyRow label="5-hour" win={group.five_hour} now={now} withDays={false} />
+      <AgyRow label="Weekly" win={group.weekly} now={now} withDays />
+    </div>
+  );
+}
+
+const AGY_OPEN_KEY = "railjack.agyMenu.open";
+
+/** Antigravity quota menu (replaces the old GOOGLE lane, Naz 2026-10-18).
+ * Source: agy's own `/quota` via /api/session `agy` (60s cache). Native
+ * <details> for collapse; open/closed state persists in localStorage. The pip
+ * follows the gemini lane's activity light (an agy session wrote ≤90s ago). */
+function AgyMenu({ agy, active, now }: { agy?: SessionStats["agy"]; active: boolean; now: number }) {
+  const [open, setOpen] = useState(() => localStorage.getItem(AGY_OPEN_KEY) !== "0");
+  const empty = !agy?.argon && !agy?.gemini && !agy?.["3p"];
+  return (
+    <details
+      open={open}
+      onToggle={(e) => {
+        const next = (e.currentTarget as HTMLDetailsElement).open;
+        setOpen(next);
+        localStorage.setItem(AGY_OPEN_KEY, next ? "1" : "0");
+      }}
+      className="flex flex-col gap-0.5"
+    >
+      <summary className="flex cursor-pointer select-none items-center gap-2" style={{ listStyle: "none" }}>
+        <span className={active ? "pip pip--go" : "pip pip--crit"} />
+        <span className="label">AGY</span>
+        <span className="label" style={{ marginLeft: "auto", opacity: 0.6 }}>
+          {open ? "▾" : "▸"}
+        </span>
+      </summary>
+      <div className="mt-1 flex flex-col gap-1.5">
+        {empty ? (
+          <span className="label pl-2" style={{ opacity: 0.6 }}>
+            awaiting /quota…
+          </span>
+        ) : (
+          <>
+            <AgyGroupBlock title="Gemini 4 Argon" group={agy?.argon} now={now} />
+            <AgyGroupBlock title="Gemini Models" group={agy?.gemini} now={now} />
+            <AgyGroupBlock title="Claude & GPT Models" group={agy?.["3p"]} now={now} />
+          </>
+        )}
+      </div>
+    </details>
   );
 }
