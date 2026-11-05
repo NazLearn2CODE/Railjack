@@ -30,6 +30,7 @@ from fastapi.responses import FileResponse
 
 from app.platform import zai
 from app.thailand_now.scout import _agy_complete
+from app.newsroom.humanizer import humanize_text
 from app.newsroom.name_check import _HONORIFICS, check_rewritten, load_registry
 from app.newsroom.style_check import check_style
 
@@ -247,6 +248,7 @@ async def api_append(body: dict = Body(...)):
     text = _strip_inf(body.get("text", ""))
     if not text.strip():
         raise HTTPException(400, "text required")
+    text = await humanize_text(text)  # always-on before the Doc write (O's design, 2026-11-04)
     argv = [PY, str(APPEND)]
     tab = str(body.get("tab") or "NL").strip().upper()
     if tab != "NL":  # NL is the script default — only override for other tabs
@@ -270,6 +272,7 @@ async def api_fill(body: dict = Body(...)):
     text = _strip_inf(body.get("text", ""))
     if not text.strip():
         raise HTTPException(400, "text required")
+    text = await humanize_text(text)  # always-on before the Doc write
     slot = body.get("slot")
     try:
         slot = int(slot)  # type: ignore[arg-type]
@@ -344,6 +347,7 @@ async def api_radio_fill(body: dict = Body(...)):
     text = _strip_inf((body.get("text") or "").strip())
     if not text:
         raise HTTPException(400, "text required")
+    text = await humanize_text(text)  # always-on before the Doc write
     argv = [
         PY, str(RADIO), "fill",
         "--section", section, "--block", block, "--slot", str(slot),
