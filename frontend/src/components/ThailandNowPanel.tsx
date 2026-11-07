@@ -4170,6 +4170,7 @@ function StoryScoutTab() {
       `Only stories published within the last ${days} day(s); drop undated/out-of-window items; exclude thailandnow.in.th. ` +
       "Use real web browsing/search (DDG, Brave, GNews, news sites; Thai-language sources welcome). " +
       "DROP negative-framing stories (tourist-trap / myth-bust / warning pieces, crackdown stories, skip-avoid listicles) — constructive or neutral framing only. " +
+      "ALSO DROP company-focused stories — anything that promotes a private company or highlights a private-sector achievement (product launches, corporate PR/CSR, funding rounds, single-company or single-executive profiles). TN promotes government units and Thailand in general: keep sector-wide business-climate, policy, and regulation stories, drop stories centered on one business entity. " +
       "Dedup on URL. Return 5-15 stories. Write ONLY a JSON array to `/tmp/railjack-scout/latest.json`, each item exactly: " +
       '`{"title": "...", "url": "https://...", "snippet": "≤200 chars", "date": "YYYY-MM-DD", "lang": "en|th", "source": "domain"}`. ' +
       "No fabricated URLs or dates.";
