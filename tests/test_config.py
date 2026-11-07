@@ -81,3 +81,48 @@ def test_dock_parses_from_yaml(monkeypatch, tmp_path):
     assert cfg.dock.url == "http://localhost:7681"
     assert cfg.dock.height == 220
 
+
+def test_dsh_launch_url_attaches_and_caches_token(monkeypatch):
+    from types import SimpleNamespace
+    import app.main as main_mod
+
+    monkeypatch.setattr(main_mod, "_DSH_TOKEN_CACHE", {})
+    calls: list[list[str]] = []
+
+    def fake_run(argv, **_kw):
+        calls.append(argv)
+        if argv[0] == "systemctl":
+            return SimpleNamespace(returncode=0, stdout="abc123inv\n")
+        return SimpleNamespace(
+            returncode=0,
+            stdout="dsh web: http://127.0.0.1:3080/?token=tok_first\ndsh web: http://127.0.0.1:3080/?token=tok_latest\n",
+        )
+
+    monkeypatch.setattr(main_mod.subprocess, "run", fake_run)
+    m = config.Module(
+        id="dsh",
+        title="DSH",
+        kind="iframe",
+        url="http://127.0.0.1:3080",
+        manage=config.ManageSpec(type="systemd-user", unit="dsh-web.service"),
+    )
+    first = main_mod._sanitize(m)["url"]
+    second = main_mod._sanitize(m)["url"]
+    assert first == "http://127.0.0.1:3080/?token=tok_latest"
+    assert second == first
+    # Second call hits InvocationID cache — journalctl ran only once.
+    assert [c[0] for c in calls] == ["systemctl", "journalctl", "systemctl"]
+
+
+def test_dsh_launch_url_degrades_cleanly_on_error(monkeypatch):
+    import app.main as main_mod
+
+    monkeypatch.setattr(main_mod, "_DSH_TOKEN_CACHE", {})
+    monkeypatch.setattr(
+        main_mod.subprocess,
+        "run",
+        lambda *_a, **_kw: (_ for _ in ()).throw(FileNotFoundError("no systemctl")),
+    )
+    assert main_mod._dsh_launch_url("http://127.0.0.1:3080", "dsh-web.service") == "http://127.0.0.1:3080"
+
+

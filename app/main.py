@@ -7,7 +7,10 @@ wins.
 
 from __future__ import annotations
 
+import re
+import subprocess
 from pathlib import Path
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
@@ -42,6 +45,46 @@ app.include_router(thailandnow_router)
 app.include_router(calendar_router)
 
 DASHBOARD_DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
+_DSH_TOKEN_RE = re.compile(r"\?token=([A-Za-z0-9_-]+)")
+# ponytail: per-unit (InvocationID, launch_token) cache so /api/config stays ~4ms
+# after the first ~75ms journal read; upgrade to an explicit DSH RPC only if CLI log format changes.
+_DSH_TOKEN_CACHE: dict[str, tuple[str, str]] = {}
+
+
+def _dsh_launch_url(url: str, unit: str) -> str:
+    """Attach the active dsh-web launch token so the same-site hub iframe auto-mints
+    its 30-day BrowserAuth cookie on load/refresh (no manual journal URL hunting)."""
+    try:
+        inv_res = subprocess.run(
+            ["systemctl", "--user", "show", "-p", "InvocationID", "--value", unit],
+            capture_output=True,
+            text=True,
+            timeout=1.5,
+        )
+        inv = inv_res.stdout.strip()
+        if inv_res.returncode != 0 or not inv or set(inv) == {"0"}:
+            return url
+        cached = _DSH_TOKEN_CACHE.get(unit)
+        if cached and cached[0] == inv:
+            token = cached[1]
+        else:
+            j_res = subprocess.run(
+                ["journalctl", "--user", "-b", f"_SYSTEMD_INVOCATION_ID={inv}", "-n", "20", "--no-pager", "-o", "cat"],
+                capture_output=True,
+                text=True,
+                timeout=2.5,
+            )
+            tokens = _DSH_TOKEN_RE.findall(j_res.stdout)
+            if j_res.returncode != 0 or not tokens:
+                return url
+            token = tokens[-1]
+            _DSH_TOKEN_CACHE[unit] = (inv, token)
+        parts = urlsplit(url)
+        query = [(k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True) if k != "token"]
+        query.append(("token", token))
+        return urlunsplit((parts.scheme, parts.netloc, parts.path or "/", urlencode(query), parts.fragment))
+    except Exception:
+        return url
 
 
 def _sanitize(m: Module) -> dict:
@@ -49,7 +92,11 @@ def _sanitize(m: Module) -> dict:
     presence flags, but drop internals (argv, unit names, probe URLs)."""
     out: dict = {"id": m.id, "title": m.title, "kind": m.kind}
     if m.url:
-        out["url"] = m.url
+        out["url"] = (
+            _dsh_launch_url(m.url, m.manage.unit)
+            if m.id == "dsh" and m.manage and m.manage.type == "systemd-user" and m.manage.unit
+            else m.url
+        )
     if m.panel:
         out["panel"] = m.panel
     out["health"] = m.health is not None
