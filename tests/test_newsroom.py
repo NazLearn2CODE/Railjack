@@ -1211,6 +1211,19 @@ def test_rewrite_success_and_prompt_assembly(monkeypatch):
         )
 
     monkeypatch.setattr(newsroom.zai, "zai_message", fake_zai_message)
+
+    # The Ben call is a LONG prompt (>4000 chars) → engine split (Railjack
+    # `7913790`) routes it to the agy CLI primary, NOT zai_message. Without this
+    # mock the test fires a real agy/Gemini subprocess whenever the agy binary
+    # exists (latent since 7913790; unmasked when agy landed on this machine).
+    async def fake_agy_complete(prompt: str, model: str | None = None, timeout: float = 30.0, **kw) -> str:
+        calls.append({"prompt": prompt, "system": None, "max_tokens": None})
+        return (
+            '{"title": "Rail crash payout ordered", "title_th": "หัวข้อไทย", '
+            '"body": "This is broadcast prose by **[Ben(เบ็น)]** mentioning **นายกฯ** on ~~July 15, 2026~~."}'
+        )
+
+    monkeypatch.setattr(newsroom, "_agy_complete", fake_agy_complete)
     app = FastAPI()
     app.include_router(newsroom.router)
     client = TestClient(app)
