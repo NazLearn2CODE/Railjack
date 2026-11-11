@@ -79,6 +79,54 @@ async def _script(argv: list[str], timeout: float = 90, stdin: bytes | None = No
     return _json(out)
 
 
+def slots_argv(doc_id: str, kind: str, category: str) -> list[str]:
+    """Argv for ``radio_news.py slots`` (read-only slot occupancy snapshot)."""
+    return [
+        PY, str(RNEWS), "slots",
+        "--doc", str(doc_id), "--kind", str(kind), "--category", str(category),
+    ]
+
+
+def text_argv(doc_id: str) -> list[str]:
+    """Argv for ``radio_news.py text`` (read-only concatenated tab text)."""
+    return [PY, str(RNEWS), "text", "--doc", str(doc_id)]
+
+
+def fill_explicit_argv(doc_id: str, kind: str, category: str) -> list[str]:
+    """Argv for ``radio_news.py fill --explicit`` (caller-assigned tab/slot + pre-split title/body)."""
+    return [
+        PY, str(RNEWS), "fill",
+        "--doc", str(doc_id), "--kind", str(kind),
+        "--category", str(category), "--explicit",
+    ]
+
+
+async def doc_slots(doc_id: str, kind: str, category: str, timeout: float = 30) -> dict:
+    """Read-only slot occupancy for ``doc_id`` via ``radio_news.py slots``."""
+    return await _script(slots_argv(doc_id, kind, category), timeout=timeout)
+
+
+async def doc_text(doc_id: str, timeout: float = 20) -> dict:
+    """Read-only concatenated tab text for ``doc_id`` via ``radio_news.py text``."""
+    return await _script(text_argv(doc_id), timeout=timeout)
+
+
+async def fill_explicit(
+    doc_id: str,
+    kind: str,
+    category: str,
+    pieces: list[dict],
+    timeout: float = 90,
+) -> dict:
+    """Verbatim write via ``radio_news.py fill --explicit``."""
+    stdin = json.dumps({"pieces": pieces}).encode()
+    return await _script(
+        fill_explicit_argv(doc_id, kind, category),
+        timeout=timeout,
+        stdin=stdin,
+    )
+
+
 # ---------------------------------------------------------------- docs / report
 
 
@@ -121,10 +169,18 @@ async def api_report():
 @router.post("/api/newsroom/radio/news/apply")
 async def api_apply(body: dict = Body(...)):
     """Write path — ``fill`` the picked doc's radio tabs. Pieces go to
-    the child on stdin; the 180s cap covers a Docs batchUpdate over 3 tabs."""
+    the child on stdin; the 180s cap covers a Docs batchUpdate over 3 tabs.
+    When ``urls`` is provided without ``pieces``, delegates to the strict
+    convert-cache-gated ``radio_convert.apply_converted`` path."""
     doc_id, kind, category = body.get("doc_id"), body.get("kind"), body.get("category")
     if not (doc_id and kind and category):
         raise HTTPException(400, "doc_id, kind and category are required")
+    if "urls" in body and "pieces" not in body:
+        from app.media import radio_convert
+
+        return await radio_convert.apply_converted(
+            str(doc_id), str(kind), str(category), list(body.get("urls") or [])
+        )
     argv = [PY, str(RNEWS), "fill", "--doc", str(doc_id),
             "--kind", str(kind), "--category", str(category)]
     stdin = json.dumps({"pieces": body.get("pieces", [])}).encode()
@@ -152,7 +208,8 @@ async def api_autofill(body: dict = Body(...)):
 async def api_format(body: dict = Body(...)):
     """Publication polish — bold people names + underline dates across the doc's
     tabs (or one ``tab``). Reusable beyond RADIO; idempotent (safe re-run). Gem
-    path is handed to the child via env. 120s covers a batchUpdate per tab."""
+    path is handed to the child via env. 420s covers the 3-tab Entity Tagger +
+    Docs batchUpdate."""
     doc_id = body.get("doc_id")
     if not doc_id:
         raise HTTPException(400, "doc_id is required")
@@ -160,4 +217,4 @@ async def api_format(body: dict = Body(...)):
     tab = body.get("tab")
     if tab:
         argv += ["--tab", str(tab)]
-    return await _script(argv, timeout=120)
+    return await _script(argv, timeout=420)

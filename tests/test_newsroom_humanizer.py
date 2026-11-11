@@ -98,3 +98,34 @@ def test_success_roundtrip_through_llm_stub():
     assert "**Chaiwathom [ชัยวัฒน์]**" in out       # markers restored byte-exact
     assert "~~July 15, 2026~~" in out
     assert out.startswith("Bangkok Traffic Plan Announced")  # headline intact
+
+
+def test_percent_normalization_before_and_after_mask(monkeypatch):
+    """British/UN 'per cent' is normalized to 'percent' on both sides of
+    mask/unmask (headline, bold/underline spans, and model output)."""
+    import asyncio
+    from app.newsroom import humanizer
+
+    src = (
+        "Inflation Rises 5 Per Cent in April\n"
+        "\n"
+        "**Chaiwathom [ชัยวัฒน์]** said growth reached 4.2 per cent on ~~July 15, 2026~~ "
+        "while exports climbed 12 PER CENT across the region during the quarter.\n"
+        "\n"
+        "Analysts expect another 3 per cent gain next quarter as trade recovers across "
+        "Southeast Asian manufacturing hubs."
+    )
+
+    async def model_reintroduces_per_cent(prompt, **k):
+        masked = prompt.split("=== TEXT ===\n", 1)[1]
+        # Even if the model re-introduces "per cent" in body prose, exit normalization catches it
+        return masked.replace("3 percent", "3 per cent")
+
+    monkeypatch.setattr(humanizer, "_agy_complete", model_reintroduces_per_cent)
+    out = asyncio.run(humanizer.humanize_text(src))
+    assert "per cent" not in out.lower()
+    assert "Inflation Rises 5 percent in April" in out
+    assert "4.2 percent" in out
+    assert "12 percent" in out
+    assert "3 percent" in out
+

@@ -1146,6 +1146,7 @@ def test_df_format_doc_gateway_down_degrades(monkeypatch):
     sent = []
     monkeypatch.setattr(df, "_get", lambda tok, url: doc)
     monkeypatch.setattr(df, "_post", lambda tok, url, body: sent.append(body) or {})
+    monkeypatch.setattr(df, "_post_status", lambda tok, url, body: (True, sent.append(body) or {}))
     monkeypatch.setattr(df, "_load_entities_gem", lambda: "GEM")
 
     def down(*a, **k):

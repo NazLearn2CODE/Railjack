@@ -953,6 +953,94 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
   const [newsReportLoading, setNewsReportLoading] = useState<boolean>(false);
   const [newsReport, setNewsReport] = useState<NewsReportResponse | null>(null);
   const [selectedArticles, setSelectedArticles] = useState<NewsArticle[]>([]);
+  // Selection sequence map (url -> 1-based tick order), frozen across untick/retick (Naz 2026-11-05)
+  const [selectionSeq, setSelectionSeq] = useState<Record<string, number>>({});
+  const seqRef = useRef<number>(1);
+  // Per-URL converted piece cache mirrored from /api/newsroom/radio/news/convert
+  const [convertedMap, setConvertedMap] = useState<
+    Record<
+      string,
+      {
+        url: string;
+        state: string;
+        title?: string;
+        body?: string;
+        words?: number;
+        title_problems?: string[];
+        verify_block?: boolean;
+      }
+    >
+  >({});
+  const [convertingSel, setConvertingSel] = useState<boolean>(false);
+  const [convertJob, setConvertJob] = useState<{
+    convert_id?: string;
+    status: string;
+    total?: number;
+    done?: number;
+    failed?: number;
+    pieces?: Array<{
+      index: number;
+      url: string;
+      source_title: string;
+      state: string;
+      cached?: boolean;
+      title?: string;
+      words?: number;
+      title_problems?: string[];
+      verify_block?: boolean;
+      error?: string | null;
+    }>;
+  } | null>(null);
+  const [placement, setPlacement] = useState<{
+    slots_total: number;
+    slots_filled: number;
+    slots_empty: number;
+    plan: Array<{
+      index: number;
+      url: string;
+      title: string;
+      words: number;
+      converted: boolean;
+      title_problems?: string[];
+      verify_block?: boolean;
+      action: string;
+      tab?: string | null;
+      slot?: number | null;
+      reason?: string | null;
+    }>;
+  } | null>(null);
+  const [radioLoop, setRadioLoop] = useState<{
+    loop_id?: string;
+    status: string;
+    total?: number;
+    done?: number;
+    failed?: number;
+    skipped?: number;
+    elapsed_s?: number;
+    doc_check?: {
+      total: number;
+      filled: number;
+      empty: string[];
+      slots: Array<{ tab: string; slot: number; filled: boolean; title: string }>;
+    } | null;
+    format?: { ok?: boolean; bolded?: string[]; underlined?: string[]; error?: string } | null;
+    pieces: Array<{
+      index: number;
+      title: string;
+      region: string;
+      state: string;
+      passes: Array<{ pass: string; ok: boolean }>;
+      verify?: {
+        figures?: { ok?: boolean; mismatches?: unknown[] };
+        freshness_hits?: Array<{ token: string }>;
+        title_problems?: string[];
+        verify_block?: boolean;
+      } | null;
+      slot?: { tab: string; slot: number } | null;
+      words?: number;
+      error?: string | null;
+    }>;
+  } | null>(null);
   const [newsApplying, setNewsApplying] = useState<boolean>(false);
   const [newsApplyResult, setNewsApplyResult] = useState<NewsFillApplyResponse | null>(null);
   // Cheap lane: exact-count scout + one-click autopilot (no human curation)
@@ -1576,7 +1664,12 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
     setError(null);
     setNewsReport(null);
     setSelectedArticles([]);
+    setSelectionSeq({});
+    seqRef.current = 1;
+    setConvertJob(null);
+    setPlacement(null);
     setNewsApplyResult(null);
+    setRadioLoop(null);
     try {
       const data = await fetchJSON<NewsReportResponse>("/api/newsroom/radio/news/report");
       setNewsReport(data);
@@ -1608,47 +1701,152 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
     const existsIndex = selectedArticles.findIndex((a) => a.url === article.url);
     if (existsIndex >= 0) {
       setSelectedArticles(selectedArticles.filter((_, idx) => idx !== existsIndex));
+      // seq entry KEPT — re-ticking restores the piece's original position
+      // (2026-11-05: untick+retick used to move it to the end of the order)
+      setPlacement(null);
     } else {
       if (selectedArticles.length < targetHardCount) {
         setSelectedArticles([...selectedArticles, article]);
+        setSelectionSeq((s) =>
+          s[article.url] != null ? s : { ...s, [article.url]: seqRef.current++ }
+        );
+        setPlacement(null);
       }
     }
   };
+
+  // Broadcast order = first-tick order, frozen (Naz 2026-11-05).
+  const orderedSelected = [...selectedArticles].sort(
+    (a, b) => (selectionSeq[a.url] ?? 0) - (selectionSeq[b.url] ?? 0)
+  );
+  const unconverted = orderedSelected.filter((a) => !convertedMap[a.url]);
 
   const isConfirmEnabled =
     Boolean(selectedDoc) &&
     selectedArticles.length === targetHardCount &&
     !newsApplying;
 
+  // CONVERT SELECTED — text work per ticked piece (Naz 2026-11-05 split):
+  // 4-pass rewrite -> humanizer deep-edit -> figure-verify -> explicit
+  // title/body. Server caches per URL, so re-ticks never re-pay.
+  const handleConvertSelected = async () => {
+    if (!orderedSelected.length) return;
+    setConvertingSel(true);
+    setError(null);
+    try {
+      const res = await fetch("/api/newsroom/radio/news/convert", {
+        method: "POST",
+        headers: CT,
+        body: JSON.stringify({ pieces: orderedSelected }),
+      });
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({ detail: res.statusText }));
+        setError(typeof d.detail === "string" ? d.detail : JSON.stringify(d.detail));
+        return;
+      }
+      const { convert_id: convertId } = await res.json();
+      let last: {
+        pieces?: Array<{
+          url: string;
+          state: string;
+          title?: string;
+          body?: string;
+          words?: number;
+          title_problems?: string[];
+          verify_block?: boolean;
+        }>;
+      } | null = null;
+      for (;;) {
+        await new Promise((r) => setTimeout(r, 3000));
+        const st = await fetch(`/api/newsroom/radio/news/convert/${convertId}`).then((r) => r.json());
+        setConvertJob(st);
+        if (st.status !== "running") {
+          last = st;
+          break;
+        }
+      }
+      const finished = (last?.pieces || []).filter((p) => p.state === "done");
+      setConvertedMap((m) => {
+        const next = { ...m };
+        for (const p of finished) next[p.url] = p;
+        return next;
+      });
+      await refreshPlacement();
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setConvertingSel(false);
+    }
+  };
+
+  // Placement preview — the SAME server-side plan Apply executes (preview ==
+  // write contract). Advisory display; Apply re-plans against live doc state.
+  const refreshPlacement = async () => {
+    if (!selectedDoc || !orderedSelected.length) return;
+    try {
+      const res = await fetch("/api/newsroom/radio/news/preview", {
+        method: "POST",
+        headers: CT,
+        body: JSON.stringify({
+          doc_id: selectedDoc.id,
+          kind: selectedDoc.kind,
+          category: newsCategory,
+          urls: orderedSelected.map((a) => a.url),
+          titles: Object.fromEntries(orderedSelected.map((a) => [a.url, a.title])),
+        }),
+      });
+      if (res.ok) setPlacement(await res.json());
+    } catch {
+      // preview is advisory — never block the panel on it
+    }
+  };
+
+  // CONFIRM & APPLY — the ONE streaming pipeline (Naz 2026-11-10): per piece
+  // in tick order — cache-or-convert (timeout fail-safe writes
+  // "[CONVERT FAILED — url]" INTO the slot) → verbatim explicit-slot write →
+  // ledger — then FORMAT. CONVERT SELECTED is the optional pre-pass (review
+  // text + warm the cache); Apply converts anything missing on the fly.
   const handleNewsApply = async () => {
     if (!selectedDoc || !isConfirmEnabled) return;
     setNewsApplying(true);
     setError(null);
     setNewsApplyResult(null);
+    setRadioLoop(null);
     try {
-      const body = {
-        doc_id: selectedDoc.id,
-        kind: selectedDoc.kind,
-        category: newsCategory,
-        pieces: selectedArticles,
-      };
-      const res = await fetch("/api/newsroom/radio/news/apply", {
-        method: "POST",
-        headers: CT,
-        body: JSON.stringify(body),
-      });
-      if (!res.ok) {
-        const d = await res.json().catch(() => ({ detail: res.statusText }));
-        setError(typeof d.detail === "string" ? d.detail : JSON.stringify(d.detail));
-      } else {
-        const data: NewsFillApplyResponse = await res.json();
-        setNewsApplyResult(data);
-        void runFormat(selectedDoc.id); // auto-chain polish: bold names + underline dates
-      }
+      await runRadioLoop(selectedDoc.id, String(selectedDoc.kind), orderedSelected);
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setNewsApplying(false);
+    }
+  };
+
+  // RADIO REWRITE LOOP: per selected piece, in selection order — pollable job.
+  const runRadioLoop = async (docId: string, kind: string, pieces: NewsArticle[]) => {
+    if (!pieces.length) return;
+    setRadioLoop({ status: "starting", pieces: [] });
+    try {
+      const res = await fetch("/api/newsroom/radio/news/run", {
+        method: "POST",
+        headers: CT,
+        body: JSON.stringify({ doc_id: docId, kind, category: newsCategory, pieces }),
+      });
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({ detail: res.statusText }));
+        setError(typeof d.detail === "string" ? d.detail : JSON.stringify(d.detail));
+        setRadioLoop(null);
+        return;
+      }
+      const { loop_id: loopId } = await res.json();
+      for (;;) {
+        await new Promise((r) => setTimeout(r, 3000));
+        const st = await fetch(`/api/newsroom/radio/news/run/${loopId}`).then((r) => r.json());
+        setRadioLoop(st);
+        if (st.status !== "running") break;
+      }
+      if (selectedDoc) void runFormat(selectedDoc.id);
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : String(e));
     }
   };
 
@@ -1752,7 +1950,19 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
     const countClause = curated
       ? `gather ${scoutN} results (aim for at least ${M} SEA-led — Southeast Asia EXCLUDING Thailand) — a few MORE than the ${N} I need, so I can curate`
       : `gather EXACTLY ${scoutN} results (${M} of them SEA-led — Southeast Asia excluding Thailand)`;
-    const promptText = `Read \`10-knowledge/radio-news-antigravity-handoff.md\` in this vault. Scout TODAY-ONLY (published today, not yesterday — this airs same-day) news for category \`${newsCategory}\`, kind \`${kind}\` — ${countClause} — from the anchor outlets first, broadening to ANY reputable non-blacklisted source to fill the count; REJECT pure stock-market churn (daily index/earnings/share-price recaps); EXCLUDE Thailand entirely — no Thai-government, Thai-agency, Bangkok-centred, or Thai-domestic stories (the National desk owns Thailand; Global/Business = the world and the region, never Thailand); word floor ≥180, tiering DOWN (170/160/…) only if same-day supply is short (never relax same-day); tag each piece's \`word_floor\`. Rewrite each piece into Editor Ben's broadcast voice (≥ the piece's \`word_floor\`, ≤ 250 words; rules in that note) — never date events as "today"/"this morning"/"yesterday" (rule 14), no adjective stacking and no sentences over ~25 words (rule 15) — tag SEA pieces, and write the result to \`/tmp/railjack-radio-news/latest.json\` in the exact shape shown — \`"rewritten": true\` on every piece. Do not touch any Google Doc.`;
+    const promptText = `Read these FOUR files — ABSOLUTE paths, valid from any workspace. If any is missing or unreadable, STOP and say so — do not improvise the JSON shape or skip a pass:
+1. \`/home/naz6395/Cephalon/10-knowledge/radio-news-antigravity-handoff.md\` — the handoff contract + gather rules
+2. \`/home/naz6395/Cephalon/10-knowledge/newsroom-rewrite-antigravity-handoff.md\` — the writing rules
+3. \`/home/naz6395/.claude/skills/humanizer/SKILL.md\` — the humanizer pass (final polish, mandatory)
+4. \`/home/naz6395/.claude/skills/unslop/SKILL.md\` — the unslop checklist (applied together with 3)
+
+Task: scout AND rewrite (Naz 2026-11-10 revert — the IDE child does ALL the writing; the hub only places + styles). Scout TODAY-ONLY (published today, not yesterday — this airs same-day) news for category \`${newsCategory}\`, kind \`${kind}\` — ${countClause} — from the anchor outlets first, broadening to ANY reputable non-blacklisted source to fill the count; REJECT pure stock-market churn (daily index/earnings/share-price recaps) — and when the category is \`global\`, ALSO EXCLUDE business-led stories (trade, deals, markets, companies, macro economy as the MAIN subject — the business lane owns those and has its own sweep; economic CONSEQUENCES of a global story are fine, the economy must not BE the story); EXCLUDE Thailand entirely — no Thai-government, Thai-agency, Bangkok-centred, or Thai-domestic stories (the National desk owns Thailand; Global/Business = the world and the region, never Thailand); word floor ≥180, tiering DOWN (170/160/…) only if same-day supply is short (never relax same-day); tag each piece's \`word_floor\`.
+
+Then REWRITE every piece per contract 2 + the radio shape (ONE fresh broadcast headline ≤ ~12 words as \`title\` — never a "HEADLINE:" prefix, never the intro sentence; body 2–4 paragraphs within [word_floor, 250] as \`content\`, \\n\\n-separated; no ~~date~~ markers, no SEO block, no EN/TH pair; facts/names/numbers/dates EXACTLY as the source states them).
+
+Then HUMANIZE + UNSLOP every piece (passes 3 + 4, MANDATORY — Naz caveat 2026-11-10): apply the humanizer skill's patterns and the unslop checklist to your own draft — strip AI tells, vary sentence rhythm hard, cut stock transitions and filler, kill adjective stacks and "not just X but Y" constructions; keep every fact, name, number and date EXACTLY as written (no invented detail); percentages as "percent" or "%", never "per cent". The humanize pass is where a summary-feeling draft becomes a story.
+
+Set \`"rewritten": true\` on EVERY piece (this is what makes the hub skip its own rewrite). Tag SEA pieces, and write the result to \`/tmp/railjack-radio-news/latest.json\` in the exact shape shown. Do not touch any Google Doc.`;
     try {
       await navigator.clipboard.writeText(promptText);
       setError(null);
@@ -3211,14 +3421,29 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
                 >
                   {newsScouting ? "SCOUTING…" : "SCOUT"}
                 </button>
-                <button
-                  className="btn btn--compact btn--signal"
-                  onClick={() => void handleNewsConvert()}
-                  disabled={newsReportLoading}
-                  title="Fetch and convert latest scout handoff report"
-                >
-                  {newsReportLoading ? "LOADING…" : "CONVERT"}
-                </button>
+                {selectedArticles.length > 0 ? (
+                  <button
+                    className="btn btn--compact btn--signal"
+                    onClick={() => void handleConvertSelected()}
+                    disabled={convertingSel || newsApplying}
+                    title="4-pass rewrite → humanize → figure-verify → explicit title/body for ticked pieces (cached per URL)"
+                  >
+                    {convertingSel
+                      ? `CONVERTING (${convertJob?.done ?? 0}/${convertJob?.total ?? orderedSelected.length})…`
+                      : unconverted.length === 0
+                      ? `✓ ${orderedSelected.length} READY — REFRESH PREVIEW`
+                      : `CONVERT ${orderedSelected.length} SELECTED (${unconverted.length} new)`}
+                  </button>
+                ) : (
+                  <button
+                    className="btn btn--compact btn--signal"
+                    onClick={() => void handleNewsConvert()}
+                    disabled={newsReportLoading}
+                    title="Load the scout handoff report (tick articles below, then click again to convert them)"
+                  >
+                    {newsReportLoading ? "LOADING…" : "CONVERT"}
+                  </button>
+                )}
               </div>
 
               {/* Folder browser: RT 2026 ▸ month ▸ day */}
@@ -3297,6 +3522,9 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
                             onClick={() => {
                               setSelectedDoc(doc);
                               setSelectedArticles([]);
+                              setSelectionSeq({});
+                              seqRef.current = 1;
+                              setPlacement(null);
                               setNewsApplyResult(null);
                             }}
                             style={{
@@ -3388,8 +3616,8 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
               </div>
             </div>
 
-            {/* Status Header / Target Summary & CONFIRM Button */}
-            <div className="flex items-center justify-between px-2 py-1.5 text-xs mono border border-edge gap-2" style={{ background: "var(--color-void)" }}>
+            {/* Status Header — Step 1 (CONVERT SELECTED) → Step 2 (CONFIRM & APPLY) */}
+            <div className="flex flex-wrap items-center justify-between px-2 py-1.5 text-xs mono border border-edge gap-2" style={{ background: "var(--color-void)" }}>
               <div className="flex items-center gap-3">
                 <div className="flex items-center gap-1.5">
                   <span className="label" style={{ color: "var(--color-signal)" }}>HARD PICKS:</span>
@@ -3397,6 +3625,11 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
                     {selectedArticles.length} / {targetHardCount} selected
                   </span>
                 </div>
+                {orderedSelected.length > 0 && (
+                  <span className="label" style={{ color: unconverted.length === 0 ? "var(--color-go)" : "var(--color-muted)" }}>
+                    · {orderedSelected.length - unconverted.length}/{orderedSelected.length} converted
+                  </span>
+                )}
               </div>
               <div className="ml-auto flex items-center gap-2">
                 {newsFormatResult && (
@@ -3426,18 +3659,186 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
                   {newsFormatting ? "FORMATTING…" : "FORMAT"}
                 </button>
                 <button
+                  className="btn btn--compact"
+                  onClick={() => void handleConvertSelected()}
+                  disabled={!orderedSelected.length || convertingSel || newsApplying}
+                  title="Optional pre-pass: convert + cache ticked pieces before Apply so you can review headlines & flags"
+                >
+                  {convertingSel
+                    ? `CONVERTING (${convertJob?.done ?? 0}/${convertJob?.total ?? orderedSelected.length})…`
+                    : unconverted.length === 0 && orderedSelected.length > 0
+                    ? "✓ CONVERTED — REFRESH PREVIEW"
+                    : `CONVERT SELECTED (${unconverted.length} new)`}
+                </button>
+                <button
                   className="btn btn--compact btn--signal"
                   onClick={() => void handleNewsApply()}
                   disabled={!isConfirmEnabled}
-                  title={!isConfirmEnabled ? "Target hard picks must be met" : "Apply selected pieces to target document"}
+                  title={
+                    !selectedDoc
+                      ? "Pick a script doc first"
+                      : selectedArticles.length !== targetHardCount
+                      ? `Pick ${targetHardCount} articles first`
+                      : "Stream per-piece: cache-or-convert → verbatim explicit-slot write → FORMAT"
+                  }
                 >
                   {newsApplying ? "APPLYING…" : "CONFIRM & APPLY TO DOC"}
                 </button>
               </div>
             </div>
 
+            {/* Placement Preview Table — exact tab·slot plan Apply will execute */}
+            {placement && orderedSelected.length > 0 && (
+              <div className="flex flex-col gap-1 border border-edge p-2 mono text-xs" style={{ background: "var(--color-void)" }}>
+                <div className="flex items-center justify-between">
+                  <span className="label" style={{ color: "var(--color-signal)" }}>
+                    PLACEMENT PREVIEW — {placement.slots_empty} EMPTY / {placement.slots_total} TOTAL SLOTS ({placement.slots_filled} already filled)
+                  </span>
+                  <button className="btn btn--compact" onClick={() => void refreshPlacement()} style={{ fontSize: "10px", padding: "1px 6px" }}>
+                    ↻ Refresh
+                  </button>
+                </div>
+                {placement.plan.map((row) => (
+                  <div key={row.index} className="flex items-center gap-2 border-b border-edge-soft py-0.5">
+                    <span className="label" style={{ minWidth: 28, color: "var(--color-muted)" }}>
+                      [#{row.index + 1}]
+                    </span>
+                    <span
+                      className="label"
+                      style={{
+                        minWidth: 78,
+                        color: row.action === "write" ? "var(--color-go)" : "var(--color-hazard)",
+                      }}
+                    >
+                      {row.action === "write" ? `→ ${row.tab}·${row.slot}` : row.action.toUpperCase()}
+                    </span>
+                    {Boolean(row.title_problems?.length) && (
+                      <span
+                        className="label"
+                        style={{ color: "var(--color-hazard)", fontSize: "10px" }}
+                        title={row.title_problems?.join(", ")}
+                      >
+                        ⚠ TITLE
+                      </span>
+                    )}
+                    {row.verify_block && (
+                      <span
+                        className="label"
+                        style={{ color: "var(--color-hazard)", fontSize: "10px" }}
+                        title="Figure mismatch flagged — [VERIFY] banner prepended in body"
+                      >
+                        ⚠ VERIFY
+                      </span>
+                    )}
+                    <span className="flex-1 truncate" style={{ color: "var(--color-phosphor)" }}>
+                      {row.title || "(unconverted)"}
+                    </span>
+                    {row.words > 0 && (
+                      <span className="label" style={{ color: "var(--color-muted)", fontSize: "10px" }}>
+                        {row.words}w
+                      </span>
+                    )}
+                    {row.reason && (
+                      <span style={{ color: "var(--color-hazard)", fontSize: "10px" }}>{row.reason}</span>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+
             {/* News Fill Content Area (Checklist & Results) */}
             <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-auto border border-edge p-2" style={{ background: "var(--color-void)" }}>
+              {radioLoop && (
+                <div className="flex flex-col gap-1.5 border border-edge p-2 mono text-xs" style={{ background: "var(--color-panel-2)" }}>
+                  <div className="flex items-center justify-between">
+                    <span className="label" style={{ color: radioLoop.status === "done" ? "var(--color-go)" : "var(--color-signal)" }}>
+                      {radioLoop.status === "done"
+                        ? `✓ STREAMING FILL COMPLETE — ${radioLoop.done ?? 0}/${radioLoop.total ?? 0} written${radioLoop.skipped ? ` · ${radioLoop.skipped} already in doc` : ""}${radioLoop.failed ? ` · ${radioLoop.failed} failed` : ""} (${radioLoop.elapsed_s ?? 0}s)`
+                        : `⟳ STREAMING FILL — ${radioLoop.done ?? 0}/${radioLoop.total ?? 0} written (${radioLoop.elapsed_s ?? 0}s)`}
+                    </span>
+                    {radioLoop.status === "done" && (
+                      <button
+                        className="btn btn--compact"
+                        onClick={() => setRadioLoop(null)}
+                        style={{ fontSize: "10px", padding: "1px 6px" }}
+                      >
+                        Dismiss
+                      </button>
+                    )}
+                  </div>
+                  {radioLoop.doc_check && (
+                    <div
+                      className="flex items-center gap-2 px-1.5 py-1 border border-edge"
+                      style={{
+                        color:
+                          radioLoop.doc_check.empty.length === 0 ? "var(--color-go)" : "var(--color-hazard)",
+                      }}
+                    >
+                      <span className="label">
+                        DOC VERIFIED: {radioLoop.doc_check.filled}/{radioLoop.doc_check.total} slots filled
+                        {radioLoop.doc_check.empty.length > 0
+                          ? ` — empty: ${radioLoop.doc_check.empty.join(", ")}`
+                          : " — all slots populated"}
+                      </span>
+                    </div>
+                  )}
+                  {radioLoop.pieces.map((p) => (
+                    <div key={p.index} className="flex items-center gap-2 border-b border-edge-soft py-0.5">
+                      <span
+                        className={`pip ${
+                          p.state === "done"
+                            ? "pip--go"
+                            : p.state === "failed" || p.state === "failsafe" || p.state === "skipped"
+                            ? "pip--hazard"
+                            : "pip--signal"
+                        }`}
+                      />
+                      <span className="label" style={{ minWidth: 74, color: "var(--color-signal)" }}>
+                        {p.slot
+                          ? `[${p.slot.tab} ${p.slot.slot}]`
+                          : p.state === "skipped"
+                          ? "SKIPPED"
+                          : p.state.toUpperCase()}
+                      </span>
+                      {p.state === "failsafe" && (
+                        <span
+                          className="label"
+                          style={{ color: "var(--color-hazard)", fontSize: "10px" }}
+                          title="Convert timed out/failed — [CONVERT FAILED] placeholder written to slot; re-run Apply to replace"
+                        >
+                          ⚠ FAILSAFE IN DOC
+                        </span>
+                      )}
+                      {p.region === "SEA" && (
+                        <span className="label" style={{ fontSize: "9px", color: "var(--color-hazard)" }}>
+                          SEA
+                        </span>
+                      )}
+                      <span className="flex-1 truncate" style={{ color: "var(--color-phosphor)" }}>
+                        {p.title}
+                      </span>
+                      {Boolean(p.verify?.figures && p.verify.figures.ok === false) && (
+                        <span className="label" style={{ color: "var(--color-hazard)", fontSize: "10px" }}>
+                          ⚠ figures ({p.verify?.figures?.mismatches?.length ?? 0})
+                        </span>
+                      )}
+                      {Boolean(p.verify?.freshness_hits?.length) && (
+                        <span className="label" style={{ color: "var(--color-hazard)", fontSize: "10px" }}>
+                          ⚠ rule14
+                        </span>
+                      )}
+                      {p.words ? (
+                        <span className="label" style={{ color: "var(--color-muted)", fontSize: "10px" }}>
+                          {p.words}w
+                        </span>
+                      ) : null}
+                      {p.error && (
+                        <span style={{ color: "var(--color-hazard)", fontSize: "10px" }}>{p.error}</span>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
               {newsApplyResult ? (
                 <div className="flex flex-col gap-2">
                   <span className="label" style={{ color: "var(--color-go)" }}>
@@ -3497,7 +3898,12 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
                       {selectedArticles.length > 0 && (
                         <button
                           className="btn btn--compact"
-                          onClick={() => setSelectedArticles([])}
+                          onClick={() => {
+                            setSelectedArticles([]);
+                            setSelectionSeq({});
+                            seqRef.current = 1;
+                            setPlacement(null);
+                          }}
                           style={{ fontSize: "10px", padding: "1px 6px" }}
                         >
                           Clear Picks
@@ -3506,8 +3912,9 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
                     </div>
                     <div className="flex flex-col gap-1">
                       {newsReport.results?.map((article) => {
-                        const selectIndex = selectedArticles.findIndex((a) => a.url === article.url);
-                        const isSelected = selectIndex >= 0;
+                        const orderIndex = orderedSelected.findIndex((a) => a.url === article.url);
+                        const isSelected = orderIndex >= 0;
+                        const conv = convertedMap[article.url];
                         return (
                           <div
                             key={article.url}
@@ -3527,7 +3934,7 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
                                 minWidth: 28,
                               }}
                             >
-                              {isSelected ? `[#${selectIndex + 1}]` : "[  ]"}
+                              {isSelected ? `[#${orderIndex + 1}]` : "[  ]"}
                             </span>
                             <div className="flex flex-1 flex-col gap-0.5 min-w-0">
                               <div className="flex items-center justify-between gap-2">
@@ -3542,20 +3949,43 @@ export default function NewsroomPanel({ module: _module }: { module: ModuleConfi
                                       SEA
                                     </span>
                                   )}
-                                  {article.rewritten && (
+                                  {conv && (
+                                    <span className="label" style={{ fontSize: "9px", color: "var(--color-go)" }} title="Converted & cached — ready for Apply">
+                                      ✓ CONVERTED
+                                    </span>
+                                  )}
+                                  {Boolean(conv?.title_problems?.length) && (
+                                    <span
+                                      className="label"
+                                      style={{ fontSize: "9px", color: "var(--color-hazard)" }}
+                                      title={`Title lint: ${conv?.title_problems?.join(", ")}`}
+                                    >
+                                      ⚠ TITLE
+                                    </span>
+                                  )}
+                                  {conv?.verify_block && (
+                                    <span
+                                      className="label"
+                                      style={{ fontSize: "9px", color: "var(--color-hazard)" }}
+                                      title="Figure mismatch flagged — [VERIFY] banner prepended in body"
+                                    >
+                                      ⚠ VERIFY
+                                    </span>
+                                  )}
+                                  {!conv && article.rewritten && (
                                     <span className="label" style={{ fontSize: "9px", color: "var(--color-go)" }} title="Pre-rewritten by Antigravity — APPLY places it free (no local rewrite)">
                                       ✎READY
                                     </span>
                                   )}
-                                  <span className="truncate">{article.title}</span>
+                                  <span className="truncate">{conv?.title || article.title}</span>
                                 </span>
                                 <span className="label text-xs shrink-0" style={{ color: "var(--color-muted)", fontSize: "10px" }}>
-                                  {article.source} · {article.words}w · {article.date}
+                                  {article.source} · {conv?.words ?? article.words}w · {article.date}
                                 </span>
                               </div>
-                              {article.content && (
+                              {(conv?.body || article.content) && (
                                 <span className="text-xs truncate" style={{ color: "var(--color-muted)", fontSize: "11px" }}>
-                                  {article.content.slice(0, 140)}…
+                                  {(conv?.body || article.content || "").slice(0, 140)}…
                                 </span>
                               )}
                             </div>

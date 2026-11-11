@@ -24,6 +24,8 @@ from app.platform.config import CONFIG, Module, reload_config
 from app.platform.health import router as health_router
 from app.platform.manage import router as manage_router
 from app.newsroom.newsroom import router as newsroom_router
+from app.media.radio_convert import router as radio_convert_router
+from app.media.radio_loop import router as radio_loop_router
 from app.media.radio_news import router as radio_news_router
 from app.platform.session_stats import router as session_router
 from app.platform.jev import router as jev_router
@@ -36,6 +38,8 @@ app.include_router(manage_router)
 app.include_router(comfyui_router)
 app.include_router(newsroom_router)
 app.include_router(radio_news_router)
+app.include_router(radio_convert_router)
+app.include_router(radio_loop_router)
 app.include_router(catalog_router)
 app.include_router(codeatlas_router)
 app.include_router(session_router)

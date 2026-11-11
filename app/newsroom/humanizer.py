@@ -27,6 +27,13 @@ _THAI_RUN = re.compile(r"[ก-๙][ก-๙\s]*")
 _BOLD = re.compile(r"\*\*[^*]+\*\*")
 _UNDER = re.compile(r"~~[^~]+~~")
 _PLACEHOLDER = re.compile(r"\[M\d+\]")
+# British/UN "per cent" → "percent" so the broadcast formatter's % regex sees one token.
+_PCT_RE = re.compile(r"\bper cent\b", re.IGNORECASE)
+
+
+def _normalize_percent(text: str) -> str:
+    return _PCT_RE.sub("percent", text)
+
 
 _PROMPT = (
     "You are a copy editor at a broadcast newsroom. Rewrite the TEXT below so "
@@ -40,6 +47,7 @@ _PROMPT = (
     "6. bold labels inside sentences and title-case fragments\n"
     "Keep every fact, number, date, name and claim, in the same order. Add nothing. "
     "Do not summarize. Keep the paragraph count similar.\n"
+    "Write percentages as the single word 'percent' — never the two-word 'per cent'.\n"
     "Tokens like [M0], [M1] are immutable placeholders — keep each one in place, "
     "exactly once, never renumber, merge, or reformat them.\n"
     "Return ONLY the rewritten text — no preamble, no notes, no quotation marks."
@@ -95,7 +103,7 @@ async def humanize_text(text: str) -> str:
     the caller writes nothing rather than silently skipping the pass."""
     if len(text) < _MIN_LEN:
         return text
-    masked, table = mask_structures(text)
+    masked, table = mask_structures(_normalize_percent(text))
     prompt = _PROMPT + "\n\n=== TEXT ===\n" + masked
     for _attempt in (1, 2):
         out = await _agy_complete(prompt, model=_MODEL, timeout=_TIMEOUT)
@@ -104,7 +112,7 @@ async def humanize_text(text: str) -> str:
         out = out.strip()
         if placeholders_ok(out, table):
             try:
-                return unmask(out, table)
+                return _normalize_percent(unmask(out, table))
             except KeyError:
                 continue
     raise HTTPException(
