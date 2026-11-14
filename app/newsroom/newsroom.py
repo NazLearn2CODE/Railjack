@@ -29,6 +29,7 @@ from fastapi import APIRouter, Body, HTTPException
 from fastapi.responses import FileResponse
 
 from app.platform import zai
+from app.platform.agy import AGY_MODEL
 from app.thailand_now.scout import _agy_complete
 from app.newsroom.humanizer import humanize_text
 from app.newsroom.name_check import _HONORIFICS, check_rewritten, load_registry
@@ -852,14 +853,15 @@ async def api_rewrite(body: dict = Body(...)):
     async def _rewrite_llm(prompt: str, max_tokens: int, timeout: float, system: str | None = None) -> str:
         """Engine split by input size (Naz 2026-10-06): glm-5.3-flash is a THINKING
         model — long documents think longer than OmniRoute's 120s queue budget
-        (maxWaitMs), which drops them as 502. Long prompts → agy gemini-3.8-flash
+        (maxWaitMs), which drops them as 502. Long prompts → agy
+        gemini-4-hydrogen (the AGY_MODEL constant, app/platform/agy.py)
         primary (no queue); short prompts → glm/glm-5.3-flash primary; the other
         engine is always the in-function fallback."""
         long_doc = len(prompt) > 4000
-        primary = ("agy", "gemini-3.8-flash") if long_doc else ("glm", "glm/glm-5.3-flash")
+        primary = ("agy", AGY_MODEL) if long_doc else ("glm", "glm/glm-5.3-flash")
         async def run(engine):
             if engine == "agy":
-                return await _agy_complete(prompt, model="gemini-3.8-flash", timeout=max(timeout, 300.0)) or ""
+                return await _agy_complete(prompt, model=AGY_MODEL, timeout=max(timeout, 300.0)) or ""
             raw = await zai.zai_message(prompt, max_tokens=max_tokens, timeout=timeout, system=system, model=primary[1])
             return "" if raw == "(empty response)" else raw
         raw = await run(primary[0])
@@ -2006,6 +2008,7 @@ async def _agy_loop_block(png_path: Path) -> str | None:
     )
     argv = [
         "agy", "-p", brief,
+        "--model", AGY_MODEL,
         "--add-dir", str(png_path.parent),
         "--effort", "medium",
         "--dangerously-skip-permissions",

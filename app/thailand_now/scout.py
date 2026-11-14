@@ -7282,8 +7282,15 @@ def _get_seo_gem_system_prompt() -> str:
 AGY_BIN = os.path.expanduser("~/.local/bin/agy")
 
 
-async def _agy_complete(prompt: str, timeout: float = 300.0, add_dir: str | None = None, effort: str = "medium", model: str = "gemini-3.6-flash") -> str | None:
-    """Run agy CLI (AI-Pro Gemini quota) as a subprocess. Never raises (returns None on failure)."""
+async def _agy_complete(prompt: str, timeout: float = 300.0, add_dir: str | None = None, effort: str = "medium", model: str | None = None) -> str | None:
+    """Run agy CLI (AI-Pro Gemini quota) as a subprocess. Never raises (returns None on failure).
+
+    model=None → the app/platform/agy.py AGY_MODEL generation constant
+    (Gemini 4 Hydrogen); bare ids only — a suffixed id conflicts with --effort."""
+    if not model:
+        from app.platform.agy import AGY_MODEL
+
+        model = AGY_MODEL
     try:
         cmd = [
             AGY_BIN,
@@ -7444,17 +7451,21 @@ async def _generate_event_seo(title: str, body: str, category: str = "Events") -
         f"Related Hashtags, AI SEO Block with Version A and Version B), no preamble."
     )
 
-    # 1. PRIMARY: agy (AI-Pro Gemini quota) — Gemini 3.8 Flash (Naz 2026-10-06).
+    # 1. PRIMARY: agy (AI-Pro Gemini quota) — agy's workhorse generation
+    # (Naz 2026-10-06; id rides app/platform/agy.py AGY_MODEL, was Gemini 3.8
+    # Flash at ruling time, Gemini 4 Hydrogen since 2026-11-11).
     # One retry: the agy binary self-updates in place and briefly fails during
     # the swap window (observed 2026-10-06 10:56).
-    raw = await _agy_complete(agy_prompt, model="gemini-3.8-flash")
+    raw = await _agy_complete(agy_prompt)
     if not raw:
         await asyncio.sleep(20)
-        raw = await _agy_complete(agy_prompt, model="gemini-3.8-flash")
+        raw = await _agy_complete(agy_prompt)
     if raw:
         parsed = _parse_gemini_seo(raw)
         if parsed:
-            return parsed, "gemini-3.8-flash (agy)"
+            from app.platform.agy import AGY_MODEL
+
+            return parsed, f"{AGY_MODEL} (agy)"
 
     # 2. FALLBACK: glm-5.3-flash via zai_message (OmniRoute). THINKING model —
     # burns budget on a reasoning block first, so 4096 truncates before any text

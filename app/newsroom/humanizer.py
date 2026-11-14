@@ -2,7 +2,8 @@
 
 Port of O's Somatic design (Cephalon hot.md 2026-11-04), implemented natively
 on Railjack — not copied. Every Doc write runs the script through the
-humanizer (agy gemini-3.8-flash, embedded mode) first, always-on and
+humanizer (agy, model id from [[app/platform/agy.py]][AGY_MODEL], embedded
+mode) first, always-on and
 fail-fast: service down or unverifiable output → 502, nothing written.
 
 Structural pieces the Doc pipeline depends on — **name** bold markers,
@@ -16,9 +17,10 @@ import re
 
 from fastapi import HTTPException
 
+from app.platform.agy import AGY_MODEL
 from app.thailand_now.scout import _agy_complete
 
-_MODEL = "gemini-3.8-flash"
+_MODEL = AGY_MODEL
 _TIMEOUT = 300.0
 # Below this, humanizing is noise: short fills are already lean.
 _MIN_LEN = 200

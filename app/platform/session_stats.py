@@ -26,6 +26,8 @@ from datetime import datetime
 from pathlib import Path
 
 import httpx
+
+from app.platform.agy import AGY_MODEL
 from fastapi import APIRouter
 
 router = APIRouter()
@@ -64,8 +66,9 @@ _usage_cache: dict[str, tuple[float, dict]] = {}
 ACTIVE_WINDOW = 90.0
 # Model shown per provider before any session is ever seen, so a lane is
 # populated on first boot. zai follows DSH's live agent-default-model instead
-# of a hardcoded id (2026-09-10).
-_DEFAULT_MODELS: dict[str, str] = {"gemini": "gemini-3.8-flash", "claude": "claude-3.7-sonnet"}
+# of a hardcoded id (2026-09-10); gemini follows the agy generation constant
+# (app/platform/agy.py AGY_MODEL) so a model swap is a one-line change.
+_DEFAULT_MODELS: dict[str, str] = {"gemini": AGY_MODEL, "claude": "claude-3.7-sonnet"}
 
 
 def _zai_display_model() -> str:
@@ -116,9 +119,10 @@ def _agy_selected_model() -> str:
             return m
     except Exception:
         pass
-    # Naz runs gemini-3.8-flash (stated 2026-09-10; agy settings.json does not
-    # persist a model key, so this constant is the truth when no setting exists).
-    return model or "gemini-3.8-flash"
+    # The agy generation constant (app/platform/agy.py) is the truth when no
+    # setting exists — agy settings.json does not persist a model key (Naz
+    # ruled the workhorse model 2026-09-10; was gemini-3.8-flash, now Hydrogen).
+    return model or AGY_MODEL
 
 
 def _scan_jsonl_usage(path: Path) -> tuple[str, int] | None:

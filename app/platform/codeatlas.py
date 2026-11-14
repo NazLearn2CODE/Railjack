@@ -33,6 +33,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
+from app.platform.agy import AGY_MODEL
 from app.platform.config import CONFIG
 
 router = APIRouter()
@@ -348,6 +349,7 @@ async def generate(req: GenerateReq) -> dict:
     async def flow(job: AtlasJob) -> None:
         job.logs.append("brief built; launching agy…")
         argv = ["agy", "-p", _brief(t, focus),
+                "--model", AGY_MODEL,
                 "--add-dir", str(t["path"]),
                 "--effort", "medium",
                 "--dangerously-skip-permissions",
